@@ -2,50 +2,65 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: douban_id_lookup.py
-# Version: 1.0.0
+# Version: 1.1.0
 # Organization: MontageSubs (蒙太奇字幕组)
 # Contributors: Meow P (小p)
 # License: MIT License
-# Source: https://github.com/MontageSubs/subtitle-repo-actions/douban/search/douban_id_lookup.py
+# Source: https://github.com/MontageSubs/subtitle-repo-actions/douban/search/
 #
 # Description / 描述:
-#    A utility script for resolving Douban movie subject IDs from movie titles
-#    using a dual-stage fallback strategy. Integrates Tavily API for primary
-#    search with confidence scoring and SerpStack API as fallback when Tavily
-#    fails or returns no results.
-#    用于从电影标题解析豆瓣电影条目ID的工具脚本。采用两级容错策略，使用
-#    Tavily API进行主要搜索并返回置信度分数，在Tavily失败或无结果时降级
-#    到SerpStack API。
+#    Resolves a Douban movie subject ID from a movie title. Tries Tavily first,
+#    scoped to Douban's movie subject pages via its include_domains parameter;
+#    falls back to SerpStack, scoped via a site:-restricted query, only when
+#    Tavily has no key, errors, or returns nothing.
+#    根据电影标题解析豆瓣电影条目ID。优先使用Tavily，通过include_domains参数
+#    限定豆瓣电影条目页面；仅当Tavily无key、出错或无结果时，才降级到用
+#    site:限定查询的SerpStack。
 #
 # Usage / 用法:
 #    python douban_id_lookup.py "Cosmos Laundromat 2015"
-#    python douban_id_lookup.py "Sintel 2010"
+#    python douban_id_lookup.py "Sintel 2010" --tavily-api-key KEY --serpstack-api-key KEY
 #
-#    Note: Use English titles with release year for best results. Chinese titles
-#    are not recommended as some search APIs have limited support for Chinese
-#    character processing and may return incorrect or no results.
+#    Keys are read from --tavily-api-key/--serpstack-api-key, falling back to
+#    the TAVILY_API_KEY/SERPSTACK_API_KEY environment variables. Either key
+#    may be omitted; at least one of the two is required.
+#    密钥可通过--tavily-api-key/--serpstack-api-key传入，缺省时读取
+#    TAVILY_API_KEY/SERPSTACK_API_KEY环境变量。两个密钥可以只提供一个，
+#    但不能都不提供。
+#
+#    Note: Use English titles with release year for best results. Chinese
+#    titles are not recommended as some search APIs have limited support for
+#    Chinese character processing and may return incorrect or no results.
 #    注意：为获得最佳结果，请使用英文片名加上映年代。不建议使用中文标题，
 #    因为某些搜索API对中文字符处理的支持有限，可能返回错误或无结果。
 #
 # Output / 输出:
-#
 #    Diagnostic logs (stderr) / 诊断日志（标准错误）:
-#      - Search queries sent to each provider / 发送到各个提供者的搜索查询
-#      - Number of candidates found and their sources / 找到的候选结果数量及其来源
-#      - Final resolution status (success/failure) / 最终解析状态（成功/失败）
+#      - Each provider's query, and every raw result it returned whether or
+#        not it matched a Douban subject page / 每个提供者的查询语句，以及
+#        其返回的每一条原始结果（无论是否命中豆瓣条目页面）
+#      - Final success/failure status / 最终的成功或失败状态
 #
 #    Result data (stdout) / 结果数据（标准输出）:
-#      - JSON object containing douban_id, provider, confidence status,
-#        and candidate list / 包含豆瓣ID、提供者、置信度状态和候选列表的JSON对象
+#      - A single JSON object. "candidates" is only populated when reason is
+#        "low_confidence", so the caller can pick manually; it is otherwise
+#        an empty list. / 单个JSON对象。仅当reason为"low_confidence"时
+#        "candidates"才有内容供调用方手动挑选，其余情况均为空列表。
 #
-#    Example execution / 执行示例:
-#      $ python douban_id_lookup.py "Cosmos Laundromat 2015"
-#      query (tavily): site:m.douban.com/movie/subject/ site:movie.douban.com/subject/ Cosmos Laundromat 2015
-#      query (serpstack): site:m.douban.com/movie/subject/ Cosmos Laundromat 2015
-#      result: 1 candidate(s) found via serpstack
-#        - https://m.douban.com/movie/subject/26798719/ | 宇宙自助洗衣店- 电影
-#      status: success
-#      {"status": "success", "reason": null, "douban_id": "26798719", "provider": "serpstack", "candidates": [{"id": "26798719", "url": "https://m.douban.com/movie/subject/26798719/", "title": "宇宙自助洗衣店- 电影", "score": null}], "errors": []}
+# Example execution / 执行示例:
+#    $ python douban_id_lookup.py "Cosmos Laundromat 2015"
+#    query (tavily): Cosmos Laundromat 2015 [domains: m.douban.com/movie/subject/, movie.douban.com/subject/]
+#    tavily raw results: 1
+#      [tavily] https://m.douban.com/movie/subject/26798719 | 宇宙自助洗衣店- 电影 score=0.748
+#    result: 1 candidate(s) found via tavily
+#      - https://m.douban.com/movie/subject/26798719 | 宇宙自助洗衣店- 电影 score=0.748
+#    status: success
+#    {"success": true, "douban_id": "26798719", "provider": "tavily", "reason": null, "candidates": []}
+#
+# Exit codes / 退出码:
+#    0    normal completion, regardless of whether success is true or false
+#         正常完成，无论success为true还是false
+#    130  interrupted by Ctrl+C / 被Ctrl+C中断
 #
 # ============================================================================
 import argparse
@@ -66,8 +81,6 @@ DOUBAN_SITES = [
     "movie.douban.com/subject/",
 ]
 
-# Extract Douban subject ID from search result URLs using regex pattern.
-# 从搜索结果URL中提取豆瓣条目ID。
 SUBJECT_URL_PATTERN = re.compile(
     r"https?://(?:m\.douban\.com/movie/subject|movie\.douban\.com/subject)/(\d+)"
 )
@@ -75,12 +88,20 @@ SUBJECT_URL_PATTERN = re.compile(
 TAVILY_ENDPOINT = "https://api.tavily.com/search"
 SERPSTACK_ENDPOINT = "https://api.serpstack.com/search"
 
-# Confidence threshold for Tavily API search results (0-1 scale).
-# Tavily API搜索结果的置信度阈值（0-1范围）。
+# Tavily relevance score (0-1) below which a result is treated as unreliable.
+# Tavily相关性分数（0-1）低于此值时视为不可靠。
 LOW_CONFIDENCE_SCORE_THRESHOLD = 0.3
 
+# reason values surfaced to the caller when success is false:
+# no_token, not_found, low_confidence, auth_error, bad_request,
+# rate_limit, quota_exceeded, server_error, network_error, multiple_errors
+# success为false时呈现给调用方的reason取值如上
 ERROR_NO_TOKEN = "no_token"
 ERROR_AUTH = "auth_error"
+ERROR_BAD_REQUEST = "bad_request"
+ERROR_RATE_LIMIT = "rate_limit"
+ERROR_QUOTA_EXCEEDED = "quota_exceeded"
+ERROR_SERVER = "server_error"
 ERROR_NETWORK = "network_error"
 
 
@@ -89,8 +110,10 @@ def log(message):
 
 
 def build_scoped_query(query_terms, sites):
-    site_clause = " ".join(f"site:{s}" for s in sites)
-    return f"{site_clause} {query_terms}"
+    if len(sites) == 1:
+        return f"site:{sites[0]} {query_terms}"
+    site_clause = " OR ".join(f"site:{s}" for s in sites)
+    return f"({site_clause}) {query_terms}"
 
 
 def extract_subject_id(url):
@@ -99,15 +122,21 @@ def extract_subject_id(url):
         return match.group(1)
     return None
 
-# Call Tavily API to search for Douban subject IDs with confidence scoring.
-# 调用Tavily API搜索豆瓣条目ID并返回置信度分数。
-def call_tavily(query, api_key):
+
+def log_raw_result(provider, url, title, score, matched):
+    score_part = f" score={score:.3f}" if score is not None else ""
+    marker = "" if matched else " (no douban id)"
+    log(f"  [{provider}] {url} | {title}{score_part}{marker}")
+
+
+def call_tavily(query, api_key, domains):
     if not api_key:
         return [], {"provider": "tavily", "type": ERROR_NO_TOKEN, "detail": "no api key provided"}
 
     payload = json.dumps({
         "query": query,
         "search_depth": "advanced",
+        "include_domains": domains,
     }).encode("utf-8")
     request = urllib.request.Request(
         TAVILY_ENDPOINT,
@@ -123,28 +152,43 @@ def call_tavily(query, api_key):
         with urllib.request.urlopen(request, timeout=20) as response:
             body = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
-        if e.code in (401, 403):
-            return [], {"provider": "tavily", "type": ERROR_AUTH, "detail": f"http {e.code}"}
-        return [], {"provider": "tavily", "type": ERROR_NETWORK, "detail": f"http {e.code}"}
+        code = e.code
+        if code == 401:
+            error_type = ERROR_AUTH
+        elif code in (400, 403):
+            error_type = ERROR_BAD_REQUEST
+        elif code == 429:
+            error_type = ERROR_RATE_LIMIT
+        elif code in (432, 433):
+            error_type = ERROR_QUOTA_EXCEEDED
+        elif code == 500:
+            error_type = ERROR_SERVER
+        else:
+            error_type = ERROR_NETWORK
+        return [], {"provider": "tavily", "type": error_type, "detail": f"http {code}"}
     except Exception as e:
         return [], {"provider": "tavily", "type": ERROR_NETWORK, "detail": str(e)}
 
+    raw_results = body.get("results", [])
+    log(f"tavily raw results: {len(raw_results)}")
     candidates = []
-    for result in body.get("results", []):
+    for result in raw_results:
         url = result.get("url", "")
+        title = result.get("title", "")
+        score = result.get("score")
         subject_id = extract_subject_id(url)
+        log_raw_result("tavily", url, title, score, subject_id is not None)
         if subject_id is None:
             continue
         candidates.append({
             "id": subject_id,
             "url": url,
-            "title": result.get("title", ""),
-            "score": result.get("score"),
+            "title": title,
+            "score": score,
         })
     return candidates, None
 
-# Call SerpStack API as fallback provider when Tavily fails or returns no results.
-# 当Tavily失败或无结果时，调用SerpStack API作为备选方案。
+
 def call_serpstack(query, api_key):
     if not api_key:
         return [], {"provider": "serpstack", "type": ERROR_NO_TOKEN, "detail": "no api key provided"}
@@ -159,43 +203,54 @@ def call_serpstack(query, api_key):
         with urllib.request.urlopen(url, timeout=20) as response:
             body = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
-        if e.code in (401, 403):
-            return [], {"provider": "serpstack", "type": ERROR_AUTH, "detail": f"http {e.code}"}
-        return [], {"provider": "serpstack", "type": ERROR_NETWORK, "detail": f"http {e.code}"}
+        code = e.code
+        if code in (401, 403):
+            error_type = ERROR_AUTH
+        elif code in (400, 422):
+            error_type = ERROR_BAD_REQUEST
+        elif code == 429:
+            error_type = ERROR_RATE_LIMIT
+        elif code == 500:
+            error_type = ERROR_SERVER
+        else:
+            error_type = ERROR_NETWORK
+        return [], {"provider": "serpstack", "type": error_type, "detail": f"http {code}"}
     except Exception as e:
         return [], {"provider": "serpstack", "type": ERROR_NETWORK, "detail": str(e)}
 
     request_meta = body.get("request", {})
     if not request_meta.get("success"):
         error_meta = body.get("error", {})
-        error_type = error_meta.get("type", "")
-        if "key" in error_type or "access" in error_type:
-            return [], {"provider": "serpstack", "type": ERROR_AUTH, "detail": error_type}
-        return [], {"provider": "serpstack", "type": ERROR_NETWORK, "detail": error_type}
+        error_type_text = error_meta.get("type", "")
+        if "key" in error_type_text or "access" in error_type_text:
+            error_type = ERROR_AUTH
+        elif "limit" in error_type_text or "rate" in error_type_text:
+            error_type = ERROR_RATE_LIMIT
+        else:
+            error_type = ERROR_BAD_REQUEST
+        return [], {"provider": "serpstack", "type": error_type, "detail": error_type_text}
 
-    candidates = []
+    raw_items = []
 
     featured = body.get("answer_box", {}).get("featured_snippets", [])
     for snippet in featured:
         link = snippet.get("link", "") or snippet.get("display_link", "")
-        subject_id = extract_subject_id(link)
-        if subject_id is not None:
-            candidates.append({
-                "id": subject_id,
-                "url": link,
-                "title": snippet.get("link_title", ""),
-                "score": None,
-            })
+        raw_items.append((link, snippet.get("link_title", "")))
 
     for result in body.get("organic_results", []):
-        url = result.get("url", "")
+        raw_items.append((result.get("url", ""), result.get("title", "")))
+
+    log(f"serpstack raw results: {len(raw_items)}")
+    candidates = []
+    for url, title in raw_items:
         subject_id = extract_subject_id(url)
+        log_raw_result("serpstack", url, title, None, subject_id is not None)
         if subject_id is None:
             continue
         candidates.append({
             "id": subject_id,
             "url": url,
-            "title": result.get("title", ""),
+            "title": title,
             "score": None,
         })
 
@@ -205,8 +260,10 @@ def call_serpstack(query, api_key):
             deduped[c["id"]] = c
     return list(deduped.values()), None
 
-# Sort candidates by confidence score (descending) and frequency across providers.
-# 按置信度分数（降序）和跨提供者出现频率排序候选结果。
+
+# Ranks by score first (unscored SerpStack results sort last), then by how
+# many providers agreed on the same id.
+# 先按分数排序（SerpStack结果无分数，排在最后），再按被多少提供者同时命中排序。
 def summarize_candidates(candidates):
     counts = collections.Counter(c["id"] for c in candidates)
     return sorted(
@@ -215,8 +272,10 @@ def summarize_candidates(candidates):
         reverse=True,
     )
 
-# Determine confidence level based on top result score and candidate uniqueness.
-# 根据顶部结果的分数和候选结果的唯一性判定置信度。
+
+# Trusts a single high-scoring result outright; without a score, only trusts
+# the result if every candidate agrees on the same id.
+# 单个高分结果可直接信任；没有分数时，只有全部候选一致指向同一ID才可信任。
 def determine_confidence_status(ranked):
     top = ranked[0]
     if top["score"] is not None:
@@ -230,31 +289,38 @@ def determine_confidence_status(ranked):
     return "success"
 
 
-def determine_error_status(errors):
+def determine_error_reason(errors):
     types = {e["type"] for e in errors}
-    if types == {ERROR_NO_TOKEN}:
-        return "error", ERROR_NO_TOKEN
-    if types == {ERROR_AUTH}:
-        return "error", ERROR_AUTH
-    if types == {ERROR_NETWORK}:
-        return "error", ERROR_NETWORK
-    return "error", "multiple_errors"
+    if len(types) == 1:
+        return next(iter(types))
+    return "multiple_errors"
 
-# Two-stage fallback strategy: try Tavily first, then SerpStack if no results found.
-# 两级容错策略：先尝试Tavily，若无结果则降级到SerpStack。
+
 def resolve(query_terms, tavily_api_key=None, serpstack_api_key=None):
+    if not tavily_api_key and not serpstack_api_key:
+        log(f"status: failed ({ERROR_NO_TOKEN})")
+        return {
+            "success": False,
+            "douban_id": None,
+            "provider": None,
+            "reason": ERROR_NO_TOKEN,
+            "candidates": [],
+        }
+
     errors = []
+    candidates = []
+    provider_used = None
 
-    tavily_query = build_scoped_query(query_terms, DOUBAN_SITES)
-    log(f"query (tavily): {tavily_query}")
-    candidates, error = call_tavily(tavily_query, tavily_api_key)
-    provider_used = "tavily"
-    if error:
-        log(f"tavily error: {error['type']} ({error['detail']})")
-        errors.append(error)
+    if tavily_api_key:
+        log(f"query (tavily): {query_terms} [domains: {', '.join(DOUBAN_SITES)}]")
+        candidates, error = call_tavily(query_terms, tavily_api_key, DOUBAN_SITES)
+        provider_used = "tavily"
+        if error:
+            log(f"tavily error: {error['type']} ({error['detail']})")
+            errors.append(error)
 
-    if not candidates:
-        serpstack_query = build_scoped_query(query_terms, DOUBAN_SITES[:1])
+    if not candidates and serpstack_api_key:
+        serpstack_query = build_scoped_query(query_terms, DOUBAN_SITES)
         log(f"query (serpstack): {serpstack_query}")
         candidates, error = call_serpstack(serpstack_query, serpstack_api_key)
         provider_used = "serpstack"
@@ -263,26 +329,14 @@ def resolve(query_terms, tavily_api_key=None, serpstack_api_key=None):
             errors.append(error)
 
     if not candidates:
-        if errors:
-            status, reason = determine_error_status(errors)
-            log(f"status: {status} ({reason})")
-            return {
-                "status": status,
-                "reason": reason,
-                "douban_id": None,
-                "provider": None,
-                "candidates": [],
-                "errors": errors,
-            }
-
-        log("result: no candidates found")
+        reason = determine_error_reason(errors) if errors else "not_found"
+        log(f"status: failed ({reason})")
         return {
-            "status": "not_found",
-            "reason": None,
+            "success": False,
             "douban_id": None,
             "provider": None,
+            "reason": reason,
             "candidates": [],
-            "errors": [],
         }
 
     ranked = summarize_candidates(candidates)
@@ -292,20 +346,19 @@ def resolve(query_terms, tavily_api_key=None, serpstack_api_key=None):
         score_part = f" score={c['score']:.3f}" if c["score"] is not None else ""
         log(f"  - {c['url']} | {c['title']}{score_part}")
 
-    top = ranked[0]
-    status = determine_confidence_status(ranked)
-    log(f"status: {status}")
+    confidence = determine_confidence_status(ranked)
+    success = confidence == "success"
+    log(f"status: {'success' if success else 'failed (low_confidence)'}")
 
     return {
-        "status": status,
-        "reason": None,
-        "douban_id": top["id"],
-        "provider": provider_used,
-        "candidates": [
+        "success": success,
+        "douban_id": ranked[0]["id"] if success else None,
+        "provider": provider_used if success else None,
+        "reason": None if success else "low_confidence",
+        "candidates": [] if success else [
             {"id": c["id"], "url": c["url"], "title": c["title"], "score": c["score"]}
             for c in ranked
         ],
-        "errors": errors,
     }
 
 
@@ -335,4 +388,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        log("interrupted")
+        sys.exit(130)
