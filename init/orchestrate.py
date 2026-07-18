@@ -46,6 +46,45 @@ NAMING_ERROR_REASONS = {"invalid_repo_name", "not_found", "title_mismatch", "yea
 
 GITHUB_API_ENDPOINT = "https://api.github.com/repos/{full_name}"
 
+# Base topics per media type. Douban IDs are never included here — see
+# discussion in project notes: topics are for discoverability, not for
+# tracking cross-referenced IDs.
+# 按内容类型划分的基础 topics。豆瓣 ID 不会出现在 topics 中——topics 是为了
+# 便于检索，而非用来记录跨站 ID。
+TOPIC_MAP = {
+    "movie": [
+        "movies", "translation", "movie", "subtitles", "subtitle",
+        "chinese", "chinese-translation", "film", "films", "filmmaking",
+        "movie-translator",
+    ],
+    "tv": [
+        "tv-series", "translation", "series", "subtitles", "subtitle",
+        "chinese", "chinese-translation", "tv-show", "tv-shows",
+        "tv-translator",
+    ],
+}
+
+SLUG_INVALID_CHARS_PATTERN = re.compile(r"[^a-z0-9]+")
+
+
+def slugify_title(title_en):
+    # GitHub topics must be lowercase, and may contain hyphens but not
+    # spaces; this collapses any run of non-alphanumeric characters into a
+    # single hyphen. e.g. "The Backrooms" -> "the-backrooms".
+    # GitHub topic 要求小写，可含连字符但不能有空格；这里将任意一段非字母
+    # 数字字符折叠为单个连字符。例如 "The Backrooms" -> "the-backrooms"。
+    slug = SLUG_INVALID_CHARS_PATTERN.sub("-", title_en.lower()).strip("-")
+    return slug
+
+
+def build_topics(tmdb_result):
+    media_type = tmdb_result.get("media_type") or "movie"
+    topics = list(TOPIC_MAP.get(media_type, TOPIC_MAP["movie"]))
+    slug = slugify_title(tmdb_result["title_en"])
+    if slug and slug not in topics:
+        topics.append(slug)
+    return topics
+
 # Matches the leading <!-- ERROR_COPY_JSON ... --> comment block at the top
 # of error.md. This is the only place orchestrate.py parses structure out of
 # a template file, and it does so via json.loads on a clearly delimited
@@ -125,8 +164,13 @@ def build_douban_warning_block(douban_result):
     return read_template(os.path.join(FRAGMENTS_DIR, "douban_not_found.md"))
 
 
-def render_release_readme(repo_name, tmdb_result, douban_result):
+def render_release_readme(repo_name, tmdb_result, douban_result, visibility_ok=True):
     douban_id = douban_result["douban_id"] or "待核实"
+    visibility_warning_block = (
+        ""
+        if visibility_ok
+        else read_template(os.path.join(FRAGMENTS_DIR, "visibility_warning.md"))
+    )
     douban_url = (
         f"https://m.douban.com/movie/subject/{douban_result['douban_id']}"
         if douban_result["success"]
@@ -158,36 +202,18 @@ def render_release_readme(repo_name, tmdb_result, douban_result):
         progress_percent=0,
         version="v1.0",
         douban_warning_block=build_douban_warning_block(douban_result),
+        visibility_warning_block=visibility_warning_block,
     )
     write_readme(content)
     log("README rendered from release.md")
 
 
-def update_github_repo_metadata(github_repository, github_token, tmdb_result):
-    if not github_token:
-        log("no ORG_ADMIN_TOKEN provided, skipping repo metadata update (description/topics require a PAT with admin scope, not the default GITHUB_TOKEN)")
-        return
-    payload = json.dumps({
-        "description": f"{tmdb_result['title_zh']} ({tmdb_result['year']}) 中文字幕 | {tmdb_result['title_en']}",
-        "homepage": f"https://www.themoviedb.org/movie/{tmdb_result['tmdb_id']}",
-    }).encode("utf-8")
+def call_github_api(url, github_token, method, payload_dict):
+    payload = json.dumps(payload_dict).encode("utf-8")
     request = urllib.request.Request(
-        GITHUB_API_ENDPOINT.format(full_name=github_repository),
+        url,
         data=payload,
-        method="PATCH",
-        headers={
-            "Authorization": f"Bearer {github_token}",
-            "Accept": "application/vnd.github+json",
-            "Content-Type": "application/json",
-        },
-    )
-    topics_payload = json.dumps({
-        "names": ["montagesubs", "subtitle", "chinese-subtitle", str(tmdb_result["year"])]
-    }).encode("utf-8")
-    topics_request = urllib.request.Request(
-        GITHUB_API_ENDPOINT.format(full_name=github_repository) + "/topics",
-        data=topics_payload,
-        method="PUT",
+        method=method,
         headers={
             "Authorization": f"Bearer {github_token}",
             "Accept": "application/vnd.github+json",
@@ -197,13 +223,65 @@ def update_github_repo_metadata(github_repository, github_token, tmdb_result):
     try:
         with urllib.request.urlopen(request, timeout=20) as response:
             response.read()
-        with urllib.request.urlopen(topics_request, timeout=20) as response:
-            response.read()
-        log("github repo metadata updated (description/homepage/topics)")
+        return True, None
     except urllib.error.HTTPError as e:
-        log(f"failed to update repo metadata: http {e.code}")
+        return False, {"http_status": e.code, "body": e.read().decode("utf-8", "ignore")}
     except Exception as e:
-        log(f"failed to update repo metadata: {e}")
+        return False, {"http_status": None, "body": str(e)}
+
+
+def update_github_repo_metadata(github_repository, github_token, tmdb_result):
+    """Returns visibility_ok: True if the repo is (or was made) public, False
+    if it's stuck private and the README should carry a warning.
+    返回 visibility_ok：仓库为公开（或已被成功切换为公开）返回 True；若仍为
+    私有（自动化未能切换），返回 False，供 README 附带警告。"""
+    if not github_token:
+        log("no ORG_ADMIN_TOKEN provided, skipping repo metadata update (description/topics/visibility require a PAT with admin scope, not the default GITHUB_TOKEN)")
+        return True
+
+    repo_url = GITHUB_API_ENDPOINT.format(full_name=github_repository)
+
+    description = (
+        f"{tmdb_result['title_zh']}（{tmdb_result['year']}）中文字幕协作项目 | "
+        f"Chinese fansub project for {tmdb_result['title_en']} ({tmdb_result['year']})"
+    )
+    # No homepage: we intentionally don't link out to TMDB (or anywhere) from
+    # the repo's About section.
+    # 不设置 homepage：不从仓库 About 区域链接到 TMDB 或任何外部地址。
+    ok, err = call_github_api(repo_url, github_token, "PATCH", {
+        "description": description,
+        "homepage": "",
+        "has_discussions": True,
+    })
+    if ok:
+        log("github repo metadata updated (description/has_discussions)")
+    else:
+        log(f"failed to update repo metadata: {err}")
+
+    topics_ok, topics_err = call_github_api(repo_url + "/topics", github_token, "PUT", {
+        "names": build_topics(tmdb_result),
+    })
+    if topics_ok:
+        log("github repo topics updated")
+    else:
+        log(f"failed to update repo topics: {topics_err}")
+
+    # Attempt to flip the repo to public. Free-plan orgs create repos as
+    # private by default; if org policy restricts visibility changes to
+    # owners only, GitHub returns 403/422 and we fall back to a README
+    # warning instead of failing the whole run.
+    # 尝试将仓库切换为公开。免费版组织默认新建为私有；若组织策略将可见性
+    # 修改权限限制为仅 owner，GitHub 会返回 403/422，此时不让整个流程失败，
+    # 而是改为在 README 中附带警告。
+    visibility_ok, vis_err = call_github_api(repo_url, github_token, "PATCH", {
+        "private": False,
+    })
+    if visibility_ok:
+        log("repository visibility set to public")
+    else:
+        log(f"could not switch repository to public, will warn in README: {vis_err}")
+
+    return visibility_ok
 
 
 def main():
@@ -243,8 +321,12 @@ def main():
     douban_query = f"{tmdb_result['title_en']} {tmdb_result['year']}"
     douban_result = douban_id_lookup.resolve(douban_query, tavily_key, serpstack_key)
 
-    render_release_readme(args.repo_name, tmdb_result, douban_result)
-    update_github_repo_metadata(args.github_repository, github_token, tmdb_result)
+    # Metadata (incl. the visibility flip attempt) runs first, so its
+    # outcome can be reflected in the README we're about to render.
+    # 元数据更新（含尝试切换可见性）先执行，其结果才能反映进即将渲染的
+    # README。
+    visibility_ok = update_github_repo_metadata(args.github_repository, github_token, tmdb_result)
+    render_release_readme(args.repo_name, tmdb_result, douban_result, visibility_ok)
 
     print(json.dumps({
         "stage": "release",
