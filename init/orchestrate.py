@@ -8,7 +8,8 @@
 # Description / 描述:
 #   仓库初始化总控脚本。串联 tmdb_lookup.py 与 douban_id_lookup.py 的结果，
 #   按 reason 选择对应 README 模板渲染，并通过 GitHub API 回写仓库的
-#   description / topics / homepage。
+#   description / topics / Discussions 开关。不涉及仓库可见性（private/
+#   public），该项由模板仓库初始 README 中的手动前置步骤处理。
 #
 # Usage / 用法:
 #   python init/orchestrate.py --repo-name Cosmos_Laundromat_2015 \
@@ -41,6 +42,15 @@ TEMPLATES_DIR = os.path.join(REPO_ROOT, "readme", "templates")
 ERROR_TEMPLATE = os.path.join(TEMPLATES_DIR, "error", "error.md")
 FRAGMENTS_DIR = os.path.join(TEMPLATES_DIR, "fragments")
 RELEASE_TEMPLATE = os.path.join(TEMPLATES_DIR, "release.md")
+
+# Sits at the very bottom of release.md (invisible in rendered Markdown).
+# If it's already present in the checked-out README.md, this repo has been
+# initialized before — orchestrate.py exits immediately without spending any
+# TMDB/Douban calls or touching a README a human may have since edited.
+# 位于release.md最底部（渲染后不可见）。若签出的README.md中已存在该标记，
+# 说明本仓库已初始化过——orchestrate.py会立即退出，不消耗TMDB/豆瓣调用，
+# 也不覆盖人工可能已编辑过的README。
+INIT_MARKER = "<!-- montagesubs:initialized -->"
 
 NAMING_ERROR_REASONS = {"invalid_repo_name", "not_found", "title_mismatch", "year_mismatch"}
 
@@ -106,6 +116,14 @@ def read_template(path):
         return f.read()
 
 
+def already_initialized():
+    readme_path = os.path.join(os.getcwd(), "README.md")
+    if not os.path.exists(readme_path):
+        return False
+    with open(readme_path, "r", encoding="utf-8") as f:
+        return INIT_MARKER in f.read()
+
+
 def write_readme(content):
     with open(os.path.join(os.getcwd(), "README.md"), "w", encoding="utf-8") as f:
         f.write(content)
@@ -164,13 +182,8 @@ def build_douban_warning_block(douban_result):
     return read_template(os.path.join(FRAGMENTS_DIR, "douban_not_found.md"))
 
 
-def render_release_readme(repo_name, tmdb_result, douban_result, visibility_ok=True):
+def render_release_readme(repo_name, tmdb_result, douban_result):
     douban_id = douban_result["douban_id"] or "待核实"
-    visibility_warning_block = (
-        ""
-        if visibility_ok
-        else read_template(os.path.join(FRAGMENTS_DIR, "visibility_warning.md"))
-    )
     douban_url = (
         f"https://m.douban.com/movie/subject/{douban_result['douban_id']}"
         if douban_result["success"]
@@ -202,7 +215,6 @@ def render_release_readme(repo_name, tmdb_result, douban_result, visibility_ok=T
         progress_percent=0,
         version="v1.0",
         douban_warning_block=build_douban_warning_block(douban_result),
-        visibility_warning_block=visibility_warning_block,
     )
     write_readme(content)
     log("README rendered from release.md")
@@ -231,19 +243,28 @@ def call_github_api(url, github_token, method, payload_dict):
 
 
 def update_github_repo_metadata(github_repository, github_token, tmdb_result):
-    """Returns visibility_ok: True if the repo is (or was made) public, False
-    if it's stuck private and the README should carry a warning.
-    返回 visibility_ok：仓库为公开（或已被成功切换为公开）返回 True；若仍为
-    私有（自动化未能切换），返回 False，供 README 附带警告。"""
+    # Note: this never touches repository visibility. ORG_ADMIN_TOKEN is an
+    # org-level Actions secret; on free-plan orgs such secrets are not
+    # available to private repos unless explicitly allowlisted. Since the
+    # repo is private at this point, trying to use this very token to flip
+    # it public is circular — if the token isn't reachable, we don't even
+    # get this far. Visibility is handled as a manual pre-requisite step in
+    # the template's initial README instead (see subtitle-repo-template).
+    # 注意：本函数不涉及仓库可见性。ORG_ADMIN_TOKEN 是组织级 Actions
+    # secret，免费版组织默认不对私有仓库开放该 secret，除非显式加入白名单。
+    # 此时仓库仍是私有的，若指望用这个 token 反过来把仓库改公开，逻辑上是
+    # 循环的——token 若不可达，脚本根本走不到这一步。可见性改为在模板仓库
+    # 的初始 README 中作为运行 workflow 前的手动前置步骤（见
+    # subtitle-repo-template）。
     if not github_token:
-        log("no ORG_ADMIN_TOKEN provided, skipping repo metadata update (description/topics/visibility require a PAT with admin scope, not the default GITHUB_TOKEN)")
-        return True
+        log("no ORG_ADMIN_TOKEN provided (or not accessible to this private repo), skipping repo metadata update")
+        return
 
     repo_url = GITHUB_API_ENDPOINT.format(full_name=github_repository)
 
     description = (
-        f"{tmdb_result['title_zh']}（{tmdb_result['year']}）中文字幕协作项目 | "
-        f"Chinese fansub project for {tmdb_result['title_en']} ({tmdb_result['year']})"
+        f"《{tmdb_result['title_zh']}》({tmdb_result['year']}) 中文字幕协作项目 | "
+        f"Chinese fansub project for \"{tmdb_result['title_en']}\" ({tmdb_result['year']})"
     )
     # No homepage: we intentionally don't link out to TMDB (or anywhere) from
     # the repo's About section.
@@ -266,23 +287,6 @@ def update_github_repo_metadata(github_repository, github_token, tmdb_result):
     else:
         log(f"failed to update repo topics: {topics_err}")
 
-    # Attempt to flip the repo to public. Free-plan orgs create repos as
-    # private by default; if org policy restricts visibility changes to
-    # owners only, GitHub returns 403/422 and we fall back to a README
-    # warning instead of failing the whole run.
-    # 尝试将仓库切换为公开。免费版组织默认新建为私有；若组织策略将可见性
-    # 修改权限限制为仅 owner，GitHub 会返回 403/422，此时不让整个流程失败，
-    # 而是改为在 README 中附带警告。
-    visibility_ok, vis_err = call_github_api(repo_url, github_token, "PATCH", {
-        "private": False,
-    })
-    if visibility_ok:
-        log("repository visibility set to public")
-    else:
-        log(f"could not switch repository to public, will warn in README: {vis_err}")
-
-    return visibility_ok
-
 
 def main():
     parser = argparse.ArgumentParser()
@@ -298,6 +302,11 @@ def main():
     github_token = args.github_token or os.environ.get("ORG_ADMIN_TOKEN")
     tavily_key = args.tavily_api_key or os.environ.get("TAVILY_API_KEY")
     serpstack_key = args.serpstack_api_key or os.environ.get("SERPSTACK_API_KEY")
+
+    if already_initialized():
+        log("README.md already carries the init marker, this repo was initialized before — skipping to avoid overwriting manual edits")
+        print(json.dumps({"stage": "idempotency", "success": True, "skipped": True}, ensure_ascii=False))
+        sys.exit(0)
 
     tmdb_result = tmdb_lookup.resolve(args.repo_name, tmdb_token)
 
@@ -321,12 +330,12 @@ def main():
     douban_query = f"{tmdb_result['title_en']} {tmdb_result['year']}"
     douban_result = douban_id_lookup.resolve(douban_query, tavily_key, serpstack_key)
 
-    # Metadata (incl. the visibility flip attempt) runs first, so its
-    # outcome can be reflected in the README we're about to render.
-    # 元数据更新（含尝试切换可见性）先执行，其结果才能反映进即将渲染的
-    # README。
-    visibility_ok = update_github_repo_metadata(args.github_repository, github_token, tmdb_result)
-    render_release_readme(args.repo_name, tmdb_result, douban_result, visibility_ok)
+    # Metadata update (description/topics/discussions) runs first; README
+    # rendering doesn't depend on its outcome anymore.
+    # 元数据更新（description/topics/discussions）先执行；README渲染已不再
+    # 依赖其结果。
+    update_github_repo_metadata(args.github_repository, github_token, tmdb_result)
+    render_release_readme(args.repo_name, tmdb_result, douban_result)
 
     print(json.dumps({
         "stage": "release",
