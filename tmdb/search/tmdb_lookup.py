@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: tmdb_lookup.py
-# Version: 1.0.1
+# Version: 1.1.0
 # Organization: MontageSubs (蒙太奇字幕组)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -10,15 +10,17 @@
 #
 # Description / 描述:
 #    Resolves and validates a repository name (format: EnglishTitle_Year)
-#    against TMDB, then fetches the movie's metadata. The English title is
-#    first searched via TMDB's /search/movie with language=en-US to validate
-#    naming conventions (case-sensitive) against the repository name. Only
-#    when the title and year both match does it proceed to fetch full detail
-#    (Chinese title, overview, poster, IMDb ID) via /movie/{id}.
+#    against TMDB, then fetches the title's metadata. Supports both movies
+#    and TV series via TMDB's /search/multi endpoint (language=en-US) to
+#    validate naming conventions (case-sensitive) against the repository
+#    name. Only when the title and year both match does it proceed to fetch
+#    full detail (Chinese title, overview, poster, IMDb ID) via
+#    /movie/{id} or /tv/{id}, depending on media_type.
 #    根据仓库名（格式：英文片名_年份）在TMDB中解析并校验，通过后拉取该
-#    影片的元数据。先以language=en-US调用TMDB的/search/movie搜索英文标题，
-#    与仓库名做大小写敏感的命名规范校验；仅当标题与年份均一致时，才继续
-#    调用/movie/{id}拉取完整详情（中文标题、简介、海报、IMDb ID）。
+#    影视内容的元数据。同时支持电影与剧集，通过TMDB的/search/multi接口
+#    （language=en-US）搜索英文标题，与仓库名做大小写敏感的命名规范校验；
+#    仅当标题与年份均一致时，才根据media_type继续调用/movie/{id}或
+#    /tv/{id}拉取完整详情（中文标题、简介、海报、IMDb ID）。
 #
 # Usage / 用法:
 #    python tmdb_lookup.py Cosmos_Laundromat_2015
@@ -31,10 +33,13 @@
 #    Note: The repository name's title segment must match TMDB's en-US title
 #    exactly, including case (e.g. "an" not "An"). A mismatch aborts before
 #    any detail request is made, to avoid spending an extra API call on a
-#    result that will be discarded.
+#    result that will be discarded. /search/multi may return movies, TV
+#    series, and people in the same result list; person results are
+#    filtered out before matching.
 #    注意：仓库名中的片名部分须与TMDB的en-US标题逐字符（含大小写）一致，
 #    例如"an"而非"An"。一旦不匹配，将在发出详情请求前中止，以避免为注定
-#    被丢弃的结果多消耗一次API调用。
+#    被丢弃的结果多消耗一次API调用。/search/multi可能在同一结果列表中
+#    返回电影、剧集与人物，匹配前会先过滤掉人物类结果。
 #
 # Output / 输出:
 #    Diagnostic logs (stderr) / 诊断日志（标准错误）:
@@ -43,20 +48,22 @@
 #        以及最终的成功或失败状态
 #
 #    Result data (stdout) / 结果数据（标准输出）:
-#      - A single JSON object. On failure, "expected_title"/"expected_year"
-#        are only populated for title_mismatch/year_mismatch, so the caller
-#        can render the correct repository name. / 单个JSON对象。仅当
-#        reason为title_mismatch或year_mismatch时"expected_title"/
-#        "expected_year"才有内容，供调用方渲染正确的仓库名。
+#      - A single JSON object, including "media_type" ("movie" or "tv").
+#        On failure, "expected_title"/"expected_year" are only populated
+#        for title_mismatch/year_mismatch, so the caller can render the
+#        correct repository name. / 单个JSON对象，包含"media_type"
+#        （"movie"或"tv"）。仅当reason为title_mismatch或year_mismatch时
+#        "expected_title"/"expected_year"才有内容，供调用方渲染正确的
+#        仓库名。
 #
 # Example execution / 执行示例:
 #    $ python tmdb_lookup.py Cosmos_Laundromat_2015
 #    query (tmdb search): Cosmos Laundromat (2015)
 #    tmdb search results: 1
-#      [358332] Cosmos Laundromat (2015-08-10)
-#    query (tmdb detail): 358332
+#      [358332] movie: Cosmos Laundromat (2015-08-10)
+#    query (tmdb detail): movie/358332
 #    status: success
-#    {"success": true, "reason": null, "tmdb_id": 358332, "imdb_id": "tt4957236", ...}
+#    {"success": true, "reason": null, "media_type": "movie", "tmdb_id": 358332, "imdb_id": "tt4957236", ...}
 #
 # Exit codes / 退出码:
 #    0    normal completion, regardless of whether success is true or false
@@ -74,10 +81,12 @@ import urllib.parse
 import urllib.request
 
 TMDB_READ_ACCESS_TOKEN_ENV = "TMDB_READ_ACCESS_TOKEN"
-TMDB_SEARCH_ENDPOINT = "https://api.themoviedb.org/3/search/movie"
-TMDB_DETAIL_ENDPOINT = "https://api.themoviedb.org/3/movie/{id}"
+TMDB_SEARCH_ENDPOINT = "https://api.themoviedb.org/3/search/multi"
+TMDB_DETAIL_ENDPOINT = "https://api.themoviedb.org/3/{media_type}/{id}"
 
 REPO_NAME_PATTERN = re.compile(r"^(.+)_(\d{4})$")
+
+SUPPORTED_MEDIA_TYPES = ("movie", "tv")
 
 ERROR_INVALID_REPO_NAME = "invalid_repo_name"
 ERROR_NOT_FOUND = "not_found"
@@ -129,7 +138,18 @@ def call_tmdb(url, read_access_token):
         return None, {"type": ERROR_NETWORK, "detail": str(e)}
 
 
-def search_movie(title, year, read_access_token):
+def candidate_title(candidate):
+    # movie uses "title"/"release_date", tv uses "name"/"first_air_date"
+    # 电影用"title"/"release_date"字段，剧集用"name"/"first_air_date"字段
+    media_type = candidate.get("media_type")
+    if media_type == "movie":
+        return candidate.get("title", ""), candidate.get("release_date", "")
+    if media_type == "tv":
+        return candidate.get("name", ""), candidate.get("first_air_date", "")
+    return "", ""
+
+
+def search_title(title, year, read_access_token):
     params = urllib.parse.urlencode({
         "query": title,
         "year": year,
@@ -140,22 +160,24 @@ def search_movie(title, year, read_access_token):
     body, error = call_tmdb(url, read_access_token)
     if error:
         return None, error
-    results = body.get("results", [])
-    log(f"tmdb search results: {len(results)}")
+    all_results = body.get("results", [])
+    results = [r for r in all_results if r.get("media_type") in SUPPORTED_MEDIA_TYPES]
+    log(f"tmdb search results: {len(results)} (of {len(all_results)} total, non movie/tv filtered out)")
     for r in results:
-        log(f"  [{r.get('id')}] {r.get('title')} ({r.get('release_date')})")
+        name, date = candidate_title(r)
+        log(f"  [{r.get('id')}] {r.get('media_type')}: {name} ({date})")
     if not results:
         return None, None
     return results[0], None
 
 
-def get_movie_detail(tmdb_id, read_access_token):
+def get_detail(media_type, tmdb_id, read_access_token):
     params = urllib.parse.urlencode({
         "language": "zh-CN",
         "append_to_response": "external_ids",
     })
-    url = f"{TMDB_DETAIL_ENDPOINT.format(id=tmdb_id)}?{params}"
-    log(f"query (tmdb detail): {tmdb_id}")
+    url = f"{TMDB_DETAIL_ENDPOINT.format(media_type=media_type, id=tmdb_id)}?{params}"
+    log(f"query (tmdb detail): {media_type}/{tmdb_id}")
     return call_tmdb(url, read_access_token)
 
 
@@ -163,6 +185,7 @@ def empty_result(reason, **extra):
     result = {
         "success": False,
         "reason": reason,
+        "media_type": None,
         "tmdb_id": None,
         "imdb_id": None,
         "title_en": None,
@@ -185,7 +208,7 @@ def resolve(repo_name, tmdb_read_access_token=None):
         log(f"status: failed ({ERROR_INVALID_REPO_NAME})")
         return empty_result(ERROR_INVALID_REPO_NAME, input_repo_name=repo_name)
 
-    candidate, error = search_movie(title, year, tmdb_read_access_token)
+    candidate, error = search_title(title, year, tmdb_read_access_token)
     if error:
         log(f"tmdb error: {error['type']} ({error['detail']})")
         return empty_result(error["type"], input_repo_name=repo_name)
@@ -194,8 +217,9 @@ def resolve(repo_name, tmdb_read_access_token=None):
         log(f"status: failed ({ERROR_NOT_FOUND})")
         return empty_result(ERROR_NOT_FOUND, input_repo_name=repo_name)
 
-    tmdb_title = candidate.get("title", "")
-    tmdb_year = int(candidate.get("release_date", "0000")[:4] or 0)
+    media_type = candidate["media_type"]
+    tmdb_title, release_date = candidate_title(candidate)
+    tmdb_year = int((release_date or "0000")[:4] or 0)
 
     if tmdb_title != title:
         log(f"status: failed ({ERROR_TITLE_MISMATCH})")
@@ -216,19 +240,22 @@ def resolve(repo_name, tmdb_read_access_token=None):
         )
 
     tmdb_id = candidate["id"]
-    detail, error = get_movie_detail(tmdb_id, tmdb_read_access_token)
+    detail, error = get_detail(media_type, tmdb_id, tmdb_read_access_token)
     if error:
         log(f"tmdb error: {error['type']} ({error['detail']})")
         return empty_result(error["type"], input_repo_name=repo_name)
+
+    title_zh = detail.get("title") if media_type == "movie" else detail.get("name")
 
     log("status: success")
     return {
         "success": True,
         "reason": None,
+        "media_type": media_type,
         "tmdb_id": tmdb_id,
         "imdb_id": detail.get("external_ids", {}).get("imdb_id"),
         "title_en": tmdb_title,
-        "title_zh": detail.get("title"),
+        "title_zh": title_zh,
         "year": tmdb_year,
         "overview_zh": detail.get("overview"),
         "poster_path": detail.get("poster_path"),
