@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: tmdb_lookup.py
-# Version: 1.0.0
+# Version: 1.0.1
 # Organization: MontageSubs (蒙太奇字幕组)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -22,11 +22,11 @@
 #
 # Usage / 用法:
 #    python tmdb_lookup.py Cosmos_Laundromat_2015
-#    python tmdb_lookup.py It_Was_Just_an_Accident_2025 --tmdb-api-key KEY
+#    python tmdb_lookup.py It_Was_Just_an_Accident_2025 --tmdb-read-access-token KEY
 #
-#    The key is read from --tmdb-api-key, falling back to the TMDB_API_KEY
+#    The key is read from --tmdb-read-access-token, falling back to the TMDB_READ_ACCESS_TOKEN
 #    environment variable.
-#    密钥可通过--tmdb-api-key传入，缺省时读取TMDB_API_KEY环境变量。
+#    密钥可通过--tmdb-read-access-token传入，缺省时读取TMDB_READ_ACCESS_TOKEN环境变量。
 #
 #    Note: The repository name's title segment must match TMDB's en-US title
 #    exactly, including case (e.g. "an" not "An"). A mismatch aborts before
@@ -73,7 +73,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-TMDB_API_KEY_ENV = "TMDB_API_KEY"
+TMDB_READ_ACCESS_TOKEN_ENV = "TMDB_READ_ACCESS_TOKEN"
 TMDB_SEARCH_ENDPOINT = "https://api.themoviedb.org/3/search/movie"
 TMDB_DETAIL_ENDPOINT = "https://api.themoviedb.org/3/movie/{id}"
 
@@ -112,11 +112,11 @@ def classify_http_error(code):
     return ERROR_NETWORK
 
 
-def call_tmdb(url, api_key):
+def call_tmdb(url, read_access_token):
     request = urllib.request.Request(
         url,
         headers={
-            "Authorization": f"Bearer {api_key}",
+            "Authorization": f"Bearer {read_access_token}",
             "accept": "application/json",
         },
     )
@@ -129,7 +129,7 @@ def call_tmdb(url, api_key):
         return None, {"type": ERROR_NETWORK, "detail": str(e)}
 
 
-def search_movie(title, year, api_key):
+def search_movie(title, year, read_access_token):
     params = urllib.parse.urlencode({
         "query": title,
         "year": year,
@@ -137,7 +137,7 @@ def search_movie(title, year, api_key):
     })
     url = f"{TMDB_SEARCH_ENDPOINT}?{params}"
     log(f"query (tmdb search): {title} ({year})")
-    body, error = call_tmdb(url, api_key)
+    body, error = call_tmdb(url, read_access_token)
     if error:
         return None, error
     results = body.get("results", [])
@@ -149,14 +149,14 @@ def search_movie(title, year, api_key):
     return results[0], None
 
 
-def get_movie_detail(tmdb_id, api_key):
+def get_movie_detail(tmdb_id, read_access_token):
     params = urllib.parse.urlencode({
         "language": "zh-CN",
         "append_to_response": "external_ids",
     })
     url = f"{TMDB_DETAIL_ENDPOINT.format(id=tmdb_id)}?{params}"
     log(f"query (tmdb detail): {tmdb_id}")
-    return call_tmdb(url, api_key)
+    return call_tmdb(url, read_access_token)
 
 
 def empty_result(reason, **extra):
@@ -175,8 +175,8 @@ def empty_result(reason, **extra):
     return result
 
 
-def resolve(repo_name, tmdb_api_key=None):
-    if not tmdb_api_key:
+def resolve(repo_name, tmdb_read_access_token=None):
+    if not tmdb_read_access_token:
         log(f"status: failed ({ERROR_NO_TOKEN})")
         return empty_result(ERROR_NO_TOKEN, input_repo_name=repo_name)
 
@@ -185,7 +185,7 @@ def resolve(repo_name, tmdb_api_key=None):
         log(f"status: failed ({ERROR_INVALID_REPO_NAME})")
         return empty_result(ERROR_INVALID_REPO_NAME, input_repo_name=repo_name)
 
-    candidate, error = search_movie(title, year, tmdb_api_key)
+    candidate, error = search_movie(title, year, tmdb_read_access_token)
     if error:
         log(f"tmdb error: {error['type']} ({error['detail']})")
         return empty_result(error["type"], input_repo_name=repo_name)
@@ -216,7 +216,7 @@ def resolve(repo_name, tmdb_api_key=None):
         )
 
     tmdb_id = candidate["id"]
-    detail, error = get_movie_detail(tmdb_id, tmdb_api_key)
+    detail, error = get_movie_detail(tmdb_id, tmdb_read_access_token)
     if error:
         log(f"tmdb error: {error['type']} ({error['detail']})")
         return empty_result(error["type"], input_repo_name=repo_name)
@@ -235,21 +235,21 @@ def resolve(repo_name, tmdb_api_key=None):
     }
 
 
-def resolve_api_key(cli_value):
+def resolve_read_access_token(cli_value):
     if cli_value:
         return cli_value
-    return os.environ.get(TMDB_API_KEY_ENV)
+    return os.environ.get(TMDB_READ_ACCESS_TOKEN_ENV)
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("repo_name")
-    parser.add_argument("--tmdb-api-key", default=None)
+    parser.add_argument("--tmdb-read-access-token", default=None)
     args = parser.parse_args()
 
     result = resolve(
         repo_name=args.repo_name,
-        tmdb_api_key=resolve_api_key(args.tmdb_api_key),
+        tmdb_read_access_token=resolve_read_access_token(args.tmdb_read_access_token),
     )
     print(json.dumps(result, ensure_ascii=False))
 
