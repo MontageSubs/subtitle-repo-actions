@@ -3,8 +3,6 @@
 
 <!-- 此"影视内容简介"段落为自动生成，若无错误，请勿手动编辑 -->
 
-{visibility_warning_block}
-
 <p align="center">
   <img src="https://img.shields.io/badge/字幕状态-{status_badge_text}-{status_badge_color}?style=flat-square" alt="字幕状态">
   <img src="https://img.shields.io/badge/翻译进度-{progress_percent}%25-blue?style=flat-square" alt="翻译进度">
@@ -156,3 +154,5 @@
 "用爱发电 ❤️ Powered by love"
 
 </div>
+
+<!-- montagesubs:initialized -->
