@@ -79,7 +79,7 @@
 
 1. {zh_hint}
 2. 请删除当前仓库，使用正确的信息重新创建
-3. 删除方法：前往仓库 **Settings** 页面，滚动至最底部 **Danger Zone** 区域，点击 **Delete this repository（删除此仓库）** 按钮，并按提示输入仓库全名以确认删除
+3. 删除方法：点击 [此链接](../../settings#danger-zone) 直达 Danger Zone，或手动前往 **Settings → General → Danger Zone**，点击 **Delete this repository（删除此仓库）** 按钮，并按提示输入仓库全名以确认删除
 
 ---
 
@@ -92,7 +92,7 @@
 
 1. {zh_tw_hint}
 2. 請刪除目前的儲存庫，使用正確的資訊重新建立
-3. 刪除方法：前往儲存庫 **Settings** 頁面，捲動至最底部 **Danger Zone** 區域，點擊 **Delete this repository（刪除此儲存庫）** 按鈕，並依提示輸入儲存庫全名以確認刪除
+3. 刪除方法：點擊 [此連結](../../settings#danger-zone) 直達 Danger Zone，或手動前往 **Settings → General → Danger Zone**，點擊 **Delete this repository（刪除此儲存庫）** 按鈕，並依提示輸入儲存庫全名以確認刪除
 
 ---
 
@@ -105,7 +105,7 @@
 
 1. {en_hint}
 2. Please delete this repository and recreate it with the correct information
-3. How to delete: go to the repository's **Settings** page, scroll to the bottom **Danger Zone** section, click the **Delete this repository** button, and type the full repository name when prompted to confirm
+3. How to delete: click [this link](../../settings#danger-zone) to jump directly to Danger Zone, or manually go to **Settings → General → Danger Zone**, click the **Delete this repository** button, and type the full repository name when prompted to confirm
 
 ---
 
