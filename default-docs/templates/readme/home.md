@@ -8,7 +8,7 @@
 3. 建议说明字幕制作流程，必要的技术信息（如匹配版本）；
 4. 在下方一行以 ">" 开头后面输入内容 -->
 
-> 请在此处填写一段约 100-500 字的字幕说明，用于发布在字幕网站。你可以介绍翻译过程中的挑战、影视内容的特色、团队付出的努力，或是任何想与观众分享的内容
+> 在这里写一段 100-500 字的字幕说明吧，用于发布在字幕网站。可以聊聊制作过程中的挑战、这部作品的特色、团队的付出，或任何想和观众分享的内容
 
 <h3 id="feedback">字幕反馈</h3>
 
@@ -19,31 +19,72 @@
 
 <h2 id="downloads">字幕下载</h2>
 
-<!-- 此"下载"段落暂时未实现自动生成 你可手动编辑 -->
+<!-- 此"下载"段落暂时未实现自动生成，你可手动编辑。
+     左列为字幕站 profile 链接（常驻，无需等发布后再填）；
+     "下载"列为下载徽章，一个站点可放多个（不同格式/语言版本），
+     发布后将对应占位符替换为如下格式：
+     [![SRT](https://img.shields.io/badge/-SRT-555?style=flat-square)](实际下载链接)
+     "最后更新"列填该站点当前版本的更新日期（YYYY-MM-DD），每次修订字幕后同步更新；
+     新增站点或繁体版本，直接新增一行即可 -->
 
-| 字幕站 | 格式 | 版本 | 下载链接 |
-| :---: | :---: | :---: | :---: |
-| <img src="https://raw.githubusercontent.com/MontageSubs/external-assets/main/icons/subhd/favicon-32x32.png" alt="SubHD" width="20" height="20"/> **SubHD** | `[待发布后更新]` | `[待发布后更新]` | `[待发布后更新]` |
-| <img src="https://raw.githubusercontent.com/MontageSubs/external-assets/main/icons/zimuku/favicon.png" alt="字幕库" width="20" height="20"/> **字幕库** | `[待发布后更新]` | `[待发布后更新]` | `[待发布后更新]` |
-| <img src="https://raw.githubusercontent.com/MontageSubs/external-assets/main/icons/assrt/favicon.png" alt="射手网(伪)" width="20" height="20"/> **射手网(伪)** | `[待发布后更新]` | `[待发布后更新]` | `[待发布后更新]` |
-| <img src="https://raw.githubusercontent.com/MontageSubs/external-assets/main/icons/subrain/favicon.png" alt="暮雨字幕网" width="20" height="20"/> **暮雨字幕网** | `[待发布后更新]` | `[待发布后更新]` | `[待发布后更新]` |
-| <img src="https://raw.githubusercontent.com/MontageSubs/external-assets/main/icons/opensubtitles/org/favicon.png" alt="OpenSubtitles" width="20" height="20"/> **OpenSubtitles** | SRT | `[待发布后更新]` | `[待发布后更新]` |
-| <img src="https://raw.githubusercontent.com/MontageSubs/external-assets/main/icons/opensubtitles/org/favicon.png" alt="OpenSubtitles" width="20" height="20"/> **OpenSubtitles** | ASS | `[待发布后更新]` | `[待发布后更新]` |
+> 以下平台内容完全一致，任选其一下载即可
+
+| 字幕站 | 下载 | 最后更新 |
+| :---: | :--- | :---: |
+| [<img src="https://raw.githubusercontent.com/MontageSubs/external-assets/main/icons/subhd/favicon-32x32.png" alt="SubHD" width="20" height="20"/> **SubHD**](https://subhd.tv/u/%E8%92%99%E5%A4%AA%E5%A5%87%E5%AD%97%E5%B9%95%E7%BB%84) | *(待发布)* | *(待发布)* |
+| [<img src="https://raw.githubusercontent.com/MontageSubs/external-assets/main/icons/zimuku/favicon.png" alt="字幕库" width="20" height="20"/> **字幕库**](https://zimuku.org/u/A3y3QmGy0) | *(待发布)* | *(待发布)* |
+| <img src="https://raw.githubusercontent.com/MontageSubs/external-assets/main/icons/assrt/favicon.png" alt="射手网(伪)" width="20" height="20"/> **射手网(伪)** | *(待发布)* | *(待发布)* |
+| [<img src="https://raw.githubusercontent.com/MontageSubs/external-assets/main/icons/subrain/favicon.png" alt="暮雨字幕网" width="20" height="20"/> **暮雨字幕网**](https://subrain.tv/u/montagesubs) | *(待发布)* | *(待发布)* |
+| [<img src="https://raw.githubusercontent.com/MontageSubs/external-assets/main/icons/opensubtitles/org/favicon.png" alt="OpenSubtitles" width="20" height="20"/> **OpenSubtitles**](https://www.opensubtitles.org/profile/iduser-10447713) | *(待发布)* | *(待发布)* |
 
 <h2 id="contributors">字幕贡献者</h2>
 
-<!-- 此"字幕贡献者"段落为自动生成，来自 ASS 字幕元数据；请勿在此处直接编辑。若需修改，请在 ASS 文件的元数据中更新相应字段 -->
+<!-- 此"字幕贡献者"段落展示形式：一人一张卡片（头像 + GitHub 用户名 + 头衔），按行排列。
+     新增贡献者：复制一个 <td> 单元格，替换用户名与头衔即可，无需改动整体结构；
+     一人多角色：头衔用 " · " 分隔，如 "翻译 · 校对"；
+     一角色多人：为每人各建一张卡片；
+     人数不满一行时，用空 <td></td> 补齐，保持网格对齐 -->
 
-| 角色 | 贡献者 |
-|---|---|
-| 项目协调员 | 贡献者 |
-| 翻译 | 贡献者 |
-| 校对 | 贡献者 |
-| 时间轴 | 贡献者 |
-| 后期/特效 | 贡献者 |
-| 技术支持 | 贡献者 |
+<table>
+  <tr>
+    <td align="center">
+      <a href="https://github.com/USERNAME1"><img src="https://github.com/USERNAME1.png?size=80" width="80" height="80" alt="用户名"/></a><br/>
+      <b>用户名</b><br/>
+      <sub>项目协调员</sub>
+    </td>
+    <td align="center">
+      <a href="https://github.com/USERNAME2"><img src="https://github.com/USERNAME2.png?size=80" width="80" height="80" alt="用户名"/></a><br/>
+      <b>用户名</b><br/>
+      <sub>翻译</sub>
+    </td>
+    <td align="center">
+      <a href="https://github.com/USERNAME3"><img src="https://github.com/USERNAME3.png?size=80" width="80" height="80" alt="用户名"/></a><br/>
+      <b>用户名</b><br/>
+      <sub>校对</sub>
+    </td>
+    <td align="center">
+      <a href="https://github.com/USERNAME4"><img src="https://github.com/USERNAME4.png?size=80" width="80" height="80" alt="用户名"/></a><br/>
+      <b>用户名</b><br/>
+      <sub>时间轴</sub>
+    </td>
+  </tr>
+  <tr>
+    <td align="center">
+      <a href="https://github.com/USERNAME5"><img src="https://github.com/USERNAME5.png?size=80" width="80" height="80" alt="用户名"/></a><br/>
+      <b>用户名</b><br/>
+      <sub>后期 · 特效</sub>
+    </td>
+    <td align="center">
+      <a href="https://github.com/USERNAME7"><img src="https://github.com/USERNAME6.png?size=80" width="80" height="80" alt="用户名"/></a><br/>
+      <b>用户名</b><br/>
+      <sub>技术支持</sub>
+    </td>
+    <td></td>
+    <td></td>
+  </tr>
+</table>
 
-*感谢每一位参与本项目的伙伴——你们的时间与热情，让这份字幕得以完成。*
+*这份字幕，是我们一起做成的！*
 
 <h2 id="about-montagesubs">关于蒙太奇字幕组 (MontageSubs)</h2>
 
