@@ -203,9 +203,8 @@ def render_error_readme(tmdb_result, repo_name):
 
     context = {"input_repo_name": repo_name, "zh_fix": "", "en_fix": ""}
     if tmdb_result.get("expected_title") and tmdb_result.get("expected_year"):
-        context["suggested_repo_name"] = "{}_{}".format(
-            tmdb_result["expected_title"].replace(" ", "_"),
-            tmdb_result["expected_year"],
+        context["suggested_repo_name"] = tmdb_lookup.to_repo_name(
+            tmdb_result["expected_title"], tmdb_result["expected_year"],
         )
         fix_type = "rename"
     else:
@@ -465,9 +464,8 @@ def main():
             and tmdb_result.get("expected_title")
             and tmdb_result.get("expected_year")
         ):
-            corrected_name = "{}_{}".format(
-                tmdb_result["expected_title"].replace(" ", "_"),
-                tmdb_result["expected_year"],
+            corrected_name = tmdb_lookup.to_repo_name(
+                tmdb_result["expected_title"], tmdb_result["expected_year"],
             )
             renamed, new_full_name = rename_repository(args.github_repository, github_token, corrected_name)
             if renamed:
