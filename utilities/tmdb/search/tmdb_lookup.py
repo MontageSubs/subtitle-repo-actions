@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: tmdb_lookup.py
-# Version: 1.1.5
+# Version: 1.1.6
 # Organization: MontageSubs (蒙太奇字幕组)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -106,7 +106,7 @@ def log(message):
 
 
 def parse_repo_name(repo_name):
-    match = REPO_NAME_PATTERN.match(repo_name)
+    match = REPO_NAME_PATTERN.match(repo_name.strip("_-"))
     if not match:
         return None, None
     title_part, year_part = match.groups()
