@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: tmdb_lookup.py
-# Version: 1.1.1
+# Version: 1.1.2
 # Organization: MontageSubs (蒙太奇字幕组)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -76,6 +76,7 @@ import json
 import os
 import re
 import sys
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -162,6 +163,8 @@ def candidate_title(candidate):
         return candidate.get("name", ""), candidate.get("first_air_date", "")
     return "", ""
 
+def normalize_title(text):
+    return "".join(c for c in unicodedata.normalize("NFKD", text) if ord(c) < 128)
 
 def search_title(title, year, read_access_token):
     params = urllib.parse.urlencode({
@@ -257,7 +260,7 @@ def resolve(repo_name, tmdb_read_access_token=None):
             expected_year=tmdb_year,
         )
 
-    if tmdb_title != title:
+    if normalize_title(tmdb_title) != normalize_title(title):
         log(f"status: failed ({ERROR_TITLE_MISMATCH})")
         return empty_result(
             ERROR_TITLE_MISMATCH,
