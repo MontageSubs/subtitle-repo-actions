@@ -62,6 +62,6 @@
 <div align="center">
 
 **蒙太奇字幕组 (MontageSubs)**  
-"用爱发电 ❤️ Powered by love"
+"用爱发电 ❤️ Powered by Love"
 
 </div>
