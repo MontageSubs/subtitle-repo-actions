@@ -35,32 +35,22 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO_ROOT, "tmdb", "search"))
 sys.path.insert(0, os.path.join(REPO_ROOT, "douban", "search"))
 
-import tmdb_lookup  # noqa: E402
-import douban_id_lookup  # noqa: E402
+import tmdb_lookup
+import douban_id_lookup
 
 TEMPLATES_DIR = os.path.join(REPO_ROOT, "readme", "templates")
 ERROR_TEMPLATE = os.path.join(TEMPLATES_DIR, "error", "error.md")
+ERROR_FRAGMENTS_DIR = os.path.join(TEMPLATES_DIR, "error", "fragments")
 FRAGMENTS_DIR = os.path.join(TEMPLATES_DIR, "fragments")
 RELEASE_TEMPLATE = os.path.join(TEMPLATES_DIR, "release.md")
+MANUAL_TEMPLATE = os.path.join(TEMPLATES_DIR, "manual.md")
 
-# Sits at the very bottom of release.md (invisible in rendered Markdown).
-# If it's already present in the checked-out README.md, this repo has been
-# initialized before — orchestrate.py exits immediately without spending any
-# TMDB/Douban calls or touching a README a human may have since edited.
-# 位于release.md最底部（渲染后不可见）。若签出的README.md中已存在该标记，
-# 说明本仓库已初始化过——orchestrate.py会立即退出，不消耗TMDB/豆瓣调用，
-# 也不覆盖人工可能已编辑过的README。
 INIT_MARKER = "<!-- montagesubs:initialized -->"
 
 NAMING_ERROR_REASONS = {"invalid_repo_name", "not_found", "title_mismatch", "year_mismatch"}
 
 GITHUB_API_ENDPOINT = "https://api.github.com/repos/{full_name}"
 
-# Base topics per media type. Douban IDs are never included here — see
-# discussion in project notes: topics are for discoverability, not for
-# tracking cross-referenced IDs.
-# 按内容类型划分的基础 topics。豆瓣 ID 不会出现在 topics 中——topics 是为了
-# 便于检索，而非用来记录跨站 ID。
 TOPIC_MAP = {
     "movie": [
         "movies", "translation", "movie", "subtitles", "subtitle",
@@ -78,11 +68,6 @@ SLUG_INVALID_CHARS_PATTERN = re.compile(r"[^a-z0-9]+")
 
 
 def slugify_title(title_en):
-    # GitHub topics must be lowercase, and may contain hyphens but not
-    # spaces; this collapses any run of non-alphanumeric characters into a
-    # single hyphen. e.g. "The Backrooms" -> "the-backrooms".
-    # GitHub topic 要求小写，可含连字符但不能有空格；这里将任意一段非字母
-    # 数字字符折叠为单个连字符。例如 "The Backrooms" -> "the-backrooms"。
     slug = SLUG_INVALID_CHARS_PATTERN.sub("-", title_en.lower()).strip("-")
     return slug
 
@@ -95,13 +80,6 @@ def build_topics(tmdb_result):
         topics.append(slug)
     return topics
 
-# Matches the leading <!-- ERROR_COPY_JSON ... --> comment block at the top
-# of error.md. This is the only place orchestrate.py parses structure out of
-# a template file, and it does so via json.loads on a clearly delimited
-# block — not by slicing text ad hoc.
-# 匹配 error.md 顶部的 <!-- ERROR_COPY_JSON ... --> 注释块。这是本脚本唯一
-# 从模板文件中解析结构的地方，且是对一个边界清晰的代码块用 json.loads 解析，
-# 而非临时性的文本切割。
 ERROR_COPY_JSON_PATTERN = re.compile(
     r"<!--\s*ERROR_COPY_JSON\s*(.*?)-->\s*(.*)", re.DOTALL
 )
@@ -129,6 +107,25 @@ def write_readme(content):
         f.write(content)
 
 
+def build_fix_block(reason, tmdb_result):
+    suggested_repo_name = None
+    if tmdb_result.get("expected_title") and tmdb_result.get("expected_year"):
+        suggested_repo_name = "{}_{}".format(
+            tmdb_result["expected_title"].replace(" ", "_"),
+            tmdb_result["expected_year"],
+        )
+
+    if suggested_repo_name:
+        return read_template(
+            os.path.join(ERROR_FRAGMENTS_DIR, "fix_rename.md")
+        ).format(suggested_repo_name=suggested_repo_name)
+
+    if reason == "not_found":
+        return read_template(os.path.join(ERROR_FRAGMENTS_DIR, "fix_not_found.md"))
+
+    return read_template(os.path.join(ERROR_FRAGMENTS_DIR, "fix_delete.md"))
+
+
 def render_error_readme(tmdb_result, repo_name):
     reason = tmdb_result["reason"]
 
@@ -145,27 +142,27 @@ def render_error_readme(tmdb_result, repo_name):
         log(f"no copy entry for reason={reason} in ERROR_COPY_JSON, aborting without README change")
         return False
 
-    suggested_repo_name = None
-    if tmdb_result.get("expected_title") and tmdb_result.get("expected_year"):
-        suggested_repo_name = "{}_{}".format(
-            tmdb_result["expected_title"].replace(" ", "_"),
-            tmdb_result["expected_year"],
-        )
-
     format_kwargs = {}
-    for lang in ("zh", "zh_tw", "en"):
+    for lang in ("zh", "en"):
         entry = copy_table[reason][lang]
         format_kwargs[f"{lang}_heading"] = entry["heading"]
         format_kwargs[f"{lang}_body"] = entry["body"].format(input_repo_name=repo_name)
-        format_kwargs[f"{lang}_hint"] = entry["hint"].format(
-            input_repo_name=repo_name,
-            suggested_repo_name=suggested_repo_name or "",
-        )
+    format_kwargs["fix_block"] = build_fix_block(reason, tmdb_result)
 
     content = body_template.format(**format_kwargs)
     write_readme(content)
     log(f"README rendered from error.md (reason={reason})")
     return True
+
+
+def render_manual_readme(repo_name, tmdb_result):
+    content = read_template(MANUAL_TEMPLATE).format(
+        input_title=tmdb_result["input_title"] or repo_name,
+        input_year=tmdb_result["input_year"] or "未知",
+        repo_name=repo_name,
+    )
+    write_readme(content)
+    log("README rendered from manual.md (force_init)")
 
 
 def build_douban_warning_block(douban_result):
@@ -234,7 +231,36 @@ def call_github_api(url, github_token, method, payload_dict):
     )
     try:
         with urllib.request.urlopen(request, timeout=20) as response:
-            response.read()
+            body = json.loads(response.read().decode("utf-8"))
+        return True, body
+    except urllib.error.HTTPError as e:
+        return False, {"http_status": e.code, "body": e.read().decode("utf-8", "ignore")}
+    except Exception as e:
+        return False, {"http_status": None, "body": str(e)}
+
+
+def enable_discussions(node_id, github_token):
+    query = """
+    mutation($id: ID!) {
+      updateRepository(input: {repositoryId: $id, hasDiscussionsEnabled: true}) {
+        repository { hasDiscussionsEnabled }
+      }
+    }
+    """
+    payload = json.dumps({"query": query, "variables": {"id": node_id}}).encode("utf-8")
+    request = urllib.request.Request(
+        "https://api.github.com/graphql",
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {github_token}",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            body = json.loads(response.read().decode("utf-8"))
+        if body.get("errors"):
+            return False, body["errors"]
         return True, None
     except urllib.error.HTTPError as e:
         return False, {"http_status": e.code, "body": e.read().decode("utf-8", "ignore")}
@@ -243,19 +269,6 @@ def call_github_api(url, github_token, method, payload_dict):
 
 
 def update_github_repo_metadata(github_repository, github_token, tmdb_result):
-    # Note: this never touches repository visibility. ORG_ADMIN_TOKEN is an
-    # org-level Actions secret; on free-plan orgs such secrets are not
-    # available to private repos unless explicitly allowlisted. Since the
-    # repo is private at this point, trying to use this very token to flip
-    # it public is circular — if the token isn't reachable, we don't even
-    # get this far. Visibility is handled as a manual pre-requisite step in
-    # the template's initial README instead (see subtitle-repo-template).
-    # 注意：本函数不涉及仓库可见性。ORG_ADMIN_TOKEN 是组织级 Actions
-    # secret，免费版组织默认不对私有仓库开放该 secret，除非显式加入白名单。
-    # 此时仓库仍是私有的，若指望用这个 token 反过来把仓库改公开，逻辑上是
-    # 循环的——token 若不可达，脚本根本走不到这一步。可见性改为在模板仓库
-    # 的初始 README 中作为运行 workflow 前的手动前置步骤（见
-    # subtitle-repo-template）。
     if not github_token:
         log("no ORG_ADMIN_TOKEN provided (or not accessible to this private repo), skipping repo metadata update")
         return
@@ -266,18 +279,25 @@ def update_github_repo_metadata(github_repository, github_token, tmdb_result):
         f"《{tmdb_result['title_zh']}》({tmdb_result['year']}) 中文字幕协作项目 | "
         f"Chinese fansub project for \"{tmdb_result['title_en']}\" ({tmdb_result['year']})"
     )
-    # No homepage: we intentionally don't link out to TMDB (or anywhere) from
-    # the repo's About section.
-    # 不设置 homepage：不从仓库 About 区域链接到 TMDB 或任何外部地址。
-    ok, err = call_github_api(repo_url, github_token, "PATCH", {
+    ok, body = call_github_api(repo_url, github_token, "PATCH", {
         "description": description,
         "homepage": "",
-        "has_discussions": True,
+        "has_wiki": False,
     })
     if ok:
-        log("github repo metadata updated (description/has_discussions)")
+        log("github repo metadata updated (description/has_wiki)")
     else:
-        log(f"failed to update repo metadata: {err}")
+        log(f"failed to update repo metadata: {body}")
+
+    node_id = body.get("node_id") if ok else None
+    if node_id:
+        discussions_ok, discussions_err = enable_discussions(node_id, github_token)
+        if discussions_ok:
+            log("discussions enabled (via GraphQL)")
+        else:
+            log(f"failed to enable discussions: {discussions_err}")
+    else:
+        log("no node_id available (metadata PATCH failed), skipping discussions enable")
 
     topics_ok, topics_err = call_github_api(repo_url + "/topics", github_token, "PUT", {
         "names": build_topics(tmdb_result),
@@ -296,6 +316,7 @@ def main():
     parser.add_argument("--tmdb-read-access-token", default=None)
     parser.add_argument("--tavily-api-key", default=None)
     parser.add_argument("--serpstack-api-key", default=None)
+    parser.add_argument("--force-init", action="store_true", help="仅在 reason=not_found 时生效：跳过 TMDB 校验，生成空白待填写模板")
     args = parser.parse_args()
 
     tmdb_token = args.tmdb_read_access_token or os.environ.get("TMDB_READ_ACCESS_TOKEN")
@@ -312,17 +333,14 @@ def main():
 
     if not tmdb_result["success"]:
         reason = tmdb_result["reason"]
+        if reason == "not_found" and args.force_init:
+            render_manual_readme(args.repo_name, tmdb_result)
+            print(json.dumps({"stage": "manual", "success": True, "forced": True}, ensure_ascii=False))
+            sys.exit(0)
         if reason in NAMING_ERROR_REASONS:
             rendered = render_error_readme(tmdb_result, args.repo_name)
             print(json.dumps({"stage": "tmdb", "success": False, "rendered_error_readme": rendered}, ensure_ascii=False))
             sys.exit(0)
-        # Infrastructure-level failure (no_token / auth_error / rate_limit /
-        # server_error / network_error): this is not the user's naming
-        # mistake, so we do NOT touch README.md. Exit non-zero so the Action
-        # run shows red and a maintainer notices, instead of silently
-        # succeeding with a stale README.
-        # 基础设施类错误：不是用户命名问题，不改动 README，非零退出让 Action
-        # 显示失败，提醒维护者，而不是静默"成功"。
         log(f"infra-level failure ({reason}), leaving README untouched")
         print(json.dumps({"stage": "tmdb", "success": False, "reason": reason}, ensure_ascii=False))
         sys.exit(1)
@@ -330,10 +348,6 @@ def main():
     douban_query = f"{tmdb_result['title_en']} {tmdb_result['year']}"
     douban_result = douban_id_lookup.resolve(douban_query, tavily_key, serpstack_key)
 
-    # Metadata update (description/topics/discussions) runs first; README
-    # rendering doesn't depend on its outcome anymore.
-    # 元数据更新（description/topics/discussions）先执行；README渲染已不再
-    # 依赖其结果。
     update_github_repo_metadata(args.github_repository, github_token, tmdb_result)
     render_release_readme(args.repo_name, tmdb_result, douban_result)
 
