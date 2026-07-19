@@ -209,7 +209,7 @@ def render_error_readme(tmdb_result, repo_name):
         )
         fix_type = "rename"
     else:
-        fix_type = "not_found" if reason == "not_found" else "delete"
+        fix_type = "not_found" if reason == "not_found" else "manual_format"
 
     raw = read_template(ERROR_TEMPLATE)
     match = ERROR_COPY_JSON_PATTERN.match(raw)
@@ -359,6 +359,23 @@ def enable_discussions(node_id, github_token):
         return False, {"http_status": None, "body": str(e)}
 
 
+AUTO_RENAME_REASONS = {"title_mismatch", "year_mismatch"}
+
+
+def rename_repository(github_repository, github_token, new_name):
+    if not github_token:
+        log("no ORG_ADMIN_TOKEN provided, cannot auto-rename")
+        return False, None
+    repo_url = GITHUB_API_ENDPOINT.format(full_name=github_repository)
+    ok, body = call_github_api(repo_url, github_token, "PATCH", {"name": new_name})
+    if not ok:
+        log(f"auto-rename failed: {body}")
+        return False, None
+    new_full_name = body.get("full_name")
+    log(f"auto-renamed repository: {github_repository} -> {new_full_name}")
+    return True, new_full_name
+
+
 def update_github_repo_metadata(github_repository, github_token, tmdb_result):
     if not github_token:
         log("no ORG_ADMIN_TOKEN provided (or not accessible to this private repo), skipping repo metadata update")
@@ -443,13 +460,30 @@ def main():
             render_home_readme(args.repo_name, header_block, forced=True)
             print(json.dumps({"stage": "manual", "success": True, "forced": True}, ensure_ascii=False))
             sys.exit(0)
-        if reason in NAMING_ERROR_REASONS:
-            rendered = render_error_readme(tmdb_result, args.repo_name)
-            print(json.dumps({"stage": "tmdb", "success": False, "rendered_error_readme": rendered}, ensure_ascii=False))
-            sys.exit(0)
-        log(f"infra-level failure ({reason}), leaving README untouched")
-        print(json.dumps({"stage": "tmdb", "success": False, "reason": reason}, ensure_ascii=False))
-        sys.exit(1)
+        if (
+            reason in AUTO_RENAME_REASONS
+            and tmdb_result.get("expected_title")
+            and tmdb_result.get("expected_year")
+        ):
+            corrected_name = "{}_{}".format(
+                tmdb_result["expected_title"].replace(" ", "_"),
+                tmdb_result["expected_year"],
+            )
+            renamed, new_full_name = rename_repository(args.github_repository, github_token, corrected_name)
+            if renamed:
+                log(f"naming mismatch auto-corrected: {args.repo_name} -> {corrected_name}, resuming")
+                args.repo_name = corrected_name
+                args.github_repository = new_full_name
+                tmdb_result = tmdb_lookup.resolve(args.repo_name, tmdb_token)
+        if not tmdb_result["success"]:
+            reason = tmdb_result["reason"]
+            if reason in NAMING_ERROR_REASONS:
+                rendered = render_error_readme(tmdb_result, args.repo_name)
+                print(json.dumps({"stage": "tmdb", "success": False, "rendered_error_readme": rendered}, ensure_ascii=False))
+                sys.exit(0)
+            log(f"infra-level failure ({reason}), leaving README untouched")
+            print(json.dumps({"stage": "tmdb", "success": False, "reason": reason}, ensure_ascii=False))
+            sys.exit(1)
 
     if args.force_init:
         reset_workspace(workspace_dir)
