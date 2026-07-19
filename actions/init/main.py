@@ -485,6 +485,16 @@ def main():
             print(json.dumps({"stage": "tmdb", "success": False, "reason": reason}, ensure_ascii=False))
             sys.exit(1)
 
+    if tmdb_result.get("needs_rename"):
+        canonical_name = tmdb_result["canonical_repo_name"]
+        renamed, new_full_name = rename_repository(args.github_repository, github_token, canonical_name)
+        if renamed:
+            log(f"format normalized: {args.repo_name} -> {canonical_name}")
+            args.repo_name = canonical_name
+            args.github_repository = new_full_name
+        else:
+            log("format-normalization rename unavailable, proceeding with original repo name")
+
     if args.force_init:
         reset_workspace(workspace_dir)
     apply_init_manifest(manifest_path, repo_root, workspace_dir, overwrite=args.force_init)
