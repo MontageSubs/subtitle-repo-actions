@@ -38,29 +38,29 @@
 | [<img src="https://raw.githubusercontent.com/MontageSubs/external-assets/main/icons/subrain/favicon.png" alt="暮雨字幕网" width="20" height="20"/> **暮雨字幕网**](https://subrain.tv/u/montagesubs) | *(待发布)* | *(待发布)* |
 | [<img src="https://raw.githubusercontent.com/MontageSubs/external-assets/main/icons/opensubtitles/org/favicon.png" alt="OpenSubtitles" width="20" height="20"/> **OpenSubtitles**](https://www.opensubtitles.org/profile/iduser-10447713) | *(待发布)* | *(待发布)* |
 
+
 <h2 id="contributors">字幕贡献者</h2>
 
 <!-- 复制一行 <td>...</td> 替换用户名与头衔即可，务必保留 align/valign 属性
-     头像：https://wsrv.nl/?url=github.com/{用户名}.png&w=64&h=64&mask=circle&output=png
+     头像：https://wsrv.nl/?url=github.com/{用户名}.png&w=48&h=48&mask=circle&output=png
      多角色用 <br/> 换行；每行 4 人，不满一行用 <td valign="top"></td> 补齐 -->
 
 <table>
 <tr>
-<td align="center" valign="top"><a href="https://github.com/MontageSubs"><img src="https://wsrv.nl/?url=github.com/MontageSubs.png&w=64&h=64&mask=circle&output=png" width="64" height="64" alt="用户名"/><br/><b>用户名</b></a><br/><sub>项目协调员</sub></td>
-<td align="center" valign="top"><a href="https://github.com/MontageSubs"><img src="https://wsrv.nl/?url=github.com/MontageSubs.png&w=64&h=64&mask=circle&output=png" width="64" height="64" alt="用户名"/><br/><b>用户名</b></a><br/><sub>翻译</sub></td>
-<td align="center" valign="top"><a href="https://github.com/MontageSubs"><img src="https://wsrv.nl/?url=github.com/MontageSubs.png&w=64&h=64&mask=circle&output=png" width="64" height="64" alt="用户名"/><br/><b>用户名</b></a><br/><sub>校对</sub></td>
-<td align="center" valign="top"><a href="https://github.com/MontageSubs"><img src="https://wsrv.nl/?url=github.com/MontageSubs.png&w=64&h=64&mask=circle&output=png" width="64" height="64" alt="用户名"/><br/><b>用户名</b></a><br/><sub>时间轴</sub></td>
+<td align="center" valign="top"><a href="https://github.com/MontageSubs"><img src="https://wsrv.nl/?url=github.com/MontageSubs.png&w=48&h=48&mask=circle&output=png" width="48" height="48" alt="用户名"/><br/><b>用户名</b></a><br/><sub>项目协调员</sub></td>
+<td align="center" valign="top"><a href="https://github.com/MontageSubs"><img src="https://wsrv.nl/?url=github.com/MontageSubs.png&w=48&h=48&mask=circle&output=png" width="48" height="48" alt="用户名"/><br/><b>用户名</b></a><br/><sub>翻译</sub></td>
+<td align="center" valign="top"><a href="https://github.com/MontageSubs"><img src="https://wsrv.nl/?url=github.com/MontageSubs.png&w=48&h=48&mask=circle&output=png" width="48" height="48" alt="用户名"/><br/><b>用户名</b></a><br/><sub>校对</sub></td>
+<td align="center" valign="top"><a href="https://github.com/MontageSubs"><img src="https://wsrv.nl/?url=github.com/MontageSubs.png&w=48&h=48&mask=circle&output=png" width="48" height="48" alt="用户名"/><br/><b>用户名</b></a><br/><sub>时间轴</sub></td>
 </tr>
 <tr>
-<td align="center" valign="top"><a href="https://github.com/MontageSubs"><img src="https://wsrv.nl/?url=github.com/MontageSubs.png&w=64&h=64&mask=circle&output=png" width="64" height="64" alt="用户名"/><br/><b>用户名</b></a><br/><sub>后期<br/>特效</sub></td>
-<td align="center" valign="top"><a href="https://github.com/MontageSubs"><img src="https://wsrv.nl/?url=github.com/MontageSubs.png&w=64&h=64&mask=circle&output=png" width="64" height="64" alt="用户名"/><br/><b>用户名</b></a><br/><sub>技术支持</sub></td>
+<td align="center" valign="top"><a href="https://github.com/MontageSubs"><img src="https://wsrv.nl/?url=github.com/MontageSubs.png&w=48&h=48&mask=circle&output=png" width="48" height="48" alt="用户名"/><br/><b>用户名</b></a><br/><sub>后期<br/>特效</sub></td>
+<td align="center" valign="top"><a href="https://github.com/MontageSubs"><img src="https://wsrv.nl/?url=github.com/MontageSubs.png&w=48&h=48&mask=circle&output=png" width="48" height="48" alt="用户名"/><br/><b>用户名</b></a><br/><sub>技术支持</sub></td>
 <td align="center" valign="top"></td>
 <td align="center" valign="top"></td>
 </tr>
 </table>
 
 *这份字幕，是我们一起做成的！*
-
 
 
 
