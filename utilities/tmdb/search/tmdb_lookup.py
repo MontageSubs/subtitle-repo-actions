@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: tmdb_lookup.py
-# Version: 1.1.2
+# Version: 1.1.3
 # Organization: MontageSubs (蒙太奇字幕组)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -185,7 +185,17 @@ def search_title(title, year, read_access_token):
         log(f"  [{r.get('id')}] {r.get('media_type')}: {name} ({date})")
     if not results:
         return None, None
-    return results[0], None
+    scored = []
+    for r in results:
+        _, date = candidate_title(r)
+        r_year = int((date or "0000")[:4] or 0)
+        if r_year and abs(r_year - year) <= 1:
+            scored.append((abs(r_year - year), r))
+    if not scored:
+        log("tmdb search results: none within ±1 year of expected year, treating as not found")
+        return None, None
+    scored.sort(key=lambda x: x[0])
+    return scored[0][1], None
 
 
 def get_detail(media_type, tmdb_id, read_access_token):
