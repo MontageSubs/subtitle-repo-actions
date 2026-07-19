@@ -1,3 +1,4 @@
+<!-- block:zh -->
 ## 解决方法
 
 > [!TIP]
@@ -12,9 +13,11 @@
 
 > [!NOTE]
 > 改名不会丢失仓库的历史记录、Settings 配置或已有的 secret，比删除重建更省事
+<!-- /block:zh -->
 
 ---
 
+<!-- block:en -->
 ## How to Fix
 
 > [!TIP]
@@ -29,3 +32,4 @@
 
 > [!NOTE]
 > Renaming preserves the repository's history, Settings, and existing secrets — it's simpler than deleting and recreating
+<!-- /block:en -->

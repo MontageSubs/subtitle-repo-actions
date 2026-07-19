@@ -1,3 +1,4 @@
+<!-- block:zh -->
 ## 解决方法
 
 > [!TIP]
@@ -14,9 +15,11 @@
 1. 前往 **[Actions](../../actions/workflows/init.yml)** 页面，重新运行 **"初始化 (Initialize)"** 工作流
 2. 运行前勾选 **force_init** 选项
 3. 这会生成一个空白模板 README，标题、简介、海报等信息取自仓库名，未经验证，需要你自行手动核实并补全
+<!-- /block:zh -->
 
 ---
 
+<!-- block:en -->
 ## How to Fix
 
 > [!TIP]
@@ -33,3 +36,4 @@
 1. Go to **[Actions](../../actions/workflows/init.yml)** and re-run the **"初始化 (Initialize)"** workflow
 2. Before running, check the **force_init** option
 3. This generates a blank template README — the title comes from the repository name and is unverified, you'll need to manually verify and fill in the synopsis, poster, and other details yourself
+<!-- /block:en -->
