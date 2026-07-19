@@ -6,7 +6,7 @@
 # Organization: MontageSubs (蒙太奇字幕组)
 # Contributors: Meow P (小p)
 # License: MIT License
-# Source: https://github.com/MontageSubs/subtitle-repo-actions/tmdb/search/
+# Source: https://github.com/MontageSubs/subtitle-repo-actions/utilities/tmdb/search/
 #
 # Description / 描述:
 #    Resolves and validates a repository name (format: EnglishTitle_Year)

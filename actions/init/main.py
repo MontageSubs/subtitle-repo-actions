@@ -12,7 +12,7 @@
 #   public），该项由模板仓库初始 README 中的手动前置步骤处理。
 #
 # Usage / 用法:
-#   python init/main.py --repo-name Cosmos_Laundromat_2015 \
+#   python actions/init/main.py --repo-name Cosmos_Laundromat_2015 \
 #       --github-repository MontageSubs/Cosmos_Laundromat_2015 \
 #       --github-token $ORG_ADMIN_TOKEN \
 #       --tmdb-read-access-token $TMDB_READ_ACCESS_TOKEN \
@@ -20,8 +20,22 @@
 #
 # 设计原则 / Design principle:
 #   文案（README 措辞）与逻辑（本脚本）分离：所有面向用户的文本均来自
-#   readme/templates/ 下的 .md 文件，本脚本只负责“选文件 + 填变量”，
+#   default-docs/templates/ 下的 .md 文件，本脚本只负责“选文件 + 填变量”，
 #   不做任何文本拼接或按语言/段落切割的解析。
+#
+# force_init 语义 / force_init semantics:
+#   幂等检查（README 是否已带 INIT_MARKER）在 force_init 下被忽略；一旦进入
+#   实际渲染分支（TMDB 校验通过，或 reason=not_found 时的空白模板），会先
+#   清空工作区（.git、.github 除外）再按 manifest 重新铺设默认文件，等效于
+#   “建新目录填充、删旧目录、把新目录改名为旧名”，但通过 git commit 完成，
+#   不重写、不删除任何历史记录。
+#   The idempotency check (whether README already carries INIT_MARKER) is
+#   bypassed under force_init; once an actual render branch is reached (TMDB
+#   validation passed, or reason=not_found with force_init), the workspace is
+#   wiped clean (except .git and .github) before manifest files are laid down
+#   again — equivalent to "build a new folder, delete the old one, rename the
+#   new one to the old name", but done via git commits, never rewriting or
+#   deleting history.
 # ============================================================================
 import argparse
 import json
@@ -34,14 +48,14 @@ import shutil
 import subprocess
 from pathlib import Path
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(REPO_ROOT, "tmdb", "search"))
-sys.path.insert(0, os.path.join(REPO_ROOT, "douban", "search"))
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(REPO_ROOT, "utilities", "tmdb", "search"))
+sys.path.insert(0, os.path.join(REPO_ROOT, "utilities", "douban", "search"))
 
 import tmdb_lookup
 import douban_id_lookup
 
-TEMPLATES_DIR = os.path.join(REPO_ROOT, "readme", "templates")
+TEMPLATES_DIR = os.path.join(REPO_ROOT, "default-docs", "templates", "readme")
 ERROR_TEMPLATE = os.path.join(TEMPLATES_DIR, "error", "error.md")
 ERROR_FRAGMENTS_DIR = os.path.join(TEMPLATES_DIR, "error", "fragments")
 FRAGMENTS_DIR = os.path.join(TEMPLATES_DIR, "fragments")
@@ -54,6 +68,8 @@ INIT_MARKER = "<!-- montagesubs:initialized -->"
 NAMING_ERROR_REASONS = {"invalid_repo_name", "not_found", "title_mismatch", "year_mismatch"}
 
 GITHUB_API_ENDPOINT = "https://api.github.com/repos/{full_name}"
+
+PROTECTED_RESET_ENTRIES = {".git", ".github"}
 
 TOPIC_MAP = {
     "movie": [
@@ -97,6 +113,22 @@ def setup_git_identity():
         subprocess.run(f'git config user.email "{actor_id}+{actor}@users.noreply.github.com"', shell=True, check=True)
 
 
+def reset_workspace(workspace_dir):
+    for entry in workspace_dir.iterdir():
+        if entry.name in PROTECTED_RESET_ENTRIES:
+            continue
+        if entry.is_dir():
+            shutil.rmtree(entry)
+        else:
+            entry.unlink()
+        log(f"force_init: removed {entry.relative_to(workspace_dir)}")
+    subprocess.run(["git", "add", "-A"], check=True)
+    subprocess.run(
+        'git diff --staged --quiet || git commit -m "reset: force re-initialization"',
+        shell=True, check=True,
+    )
+
+
 MANIFEST_TABLE_SEPARATOR_PATTERN = re.compile(r"^\|[\s:|-]+\|$")
 
 
@@ -120,12 +152,14 @@ def parse_manifest_table(manifest_path):
     return rows
 
 
-def apply_init_manifest(manifest_path, source_root, dest_root):
+def apply_init_manifest(manifest_path, source_root, dest_root, overwrite):
     if not manifest_path.exists():
         return
     commits = {}
     for action, source, destination, commit_message in parse_manifest_table(manifest_path):
         dest_path = dest_root / destination
+        if dest_path.exists() and not overwrite:
+            continue
         dest_path.parent.mkdir(parents=True, exist_ok=True)
         if action == "copy":
             shutil.copy2(source_root / source, dest_path)
@@ -376,7 +410,14 @@ def main():
     parser.add_argument("--tmdb-read-access-token", default=None)
     parser.add_argument("--tavily-api-key", default=None)
     parser.add_argument("--serpstack-api-key", default=None)
-    parser.add_argument("--force-init", action="store_true", help="仅在 reason=not_found 时生效：跳过 TMDB 校验，生成空白待填写模板")
+    parser.add_argument(
+        "--force-init", action="store_true",
+        help=(
+            "强制初始化：忽略仓库是否已初始化，清空工作区（.git/.github 除外）"
+            "后按 manifest 重新铺设默认文件并重新渲染 README；"
+            "reason=not_found 时额外跳过命名校验，生成空白待填写模板"
+        ),
+    )
     args = parser.parse_args()
 
     tmdb_token = args.tmdb_read_access_token or os.environ.get("TMDB_READ_ACCESS_TOKEN")
@@ -384,21 +425,23 @@ def main():
     tavily_key = args.tavily_api_key or os.environ.get("TAVILY_API_KEY")
     serpstack_key = args.serpstack_api_key or os.environ.get("SERPSTACK_API_KEY")
 
-    if already_initialized():
+    if already_initialized() and not args.force_init:
         log("README.md already carries the init marker, this repo was initialized before — skipping to avoid overwriting manual edits")
         print(json.dumps({"stage": "idempotency", "success": True, "skipped": True}, ensure_ascii=False))
         sys.exit(0)
 
     setup_git_identity()
-    action_dir = Path(__file__).parent.parent
+    repo_root = Path(REPO_ROOT)
     workspace_dir = Path(os.environ.get("GITHUB_WORKSPACE", "."))
-    apply_init_manifest(Path(__file__).parent / "manifest.md", action_dir, workspace_dir)
+    manifest_path = Path(__file__).parent / "manifest.md"
 
     tmdb_result = tmdb_lookup.resolve(args.repo_name, tmdb_token)
 
     if not tmdb_result["success"]:
         reason = tmdb_result["reason"]
         if reason == "not_found" and args.force_init:
+            reset_workspace(workspace_dir)
+            apply_init_manifest(manifest_path, repo_root, workspace_dir, overwrite=True)
             header_block = build_manual_header(args.repo_name, tmdb_result)
             render_home_readme(args.repo_name, header_block, forced=True)
             print(json.dumps({"stage": "manual", "success": True, "forced": True}, ensure_ascii=False))
@@ -411,12 +454,16 @@ def main():
         print(json.dumps({"stage": "tmdb", "success": False, "reason": reason}, ensure_ascii=False))
         sys.exit(1)
 
+    if args.force_init:
+        reset_workspace(workspace_dir)
+    apply_init_manifest(manifest_path, repo_root, workspace_dir, overwrite=args.force_init)
+
     douban_query = f"{tmdb_result['title_en']} {tmdb_result['year']}"
     douban_result = douban_id_lookup.resolve(douban_query, tavily_key, serpstack_key)
 
     update_github_repo_metadata(args.github_repository, github_token, tmdb_result)
     header_block = build_verified_header(args.repo_name, tmdb_result, douban_result)
-    render_home_readme(args.repo_name, header_block, forced=False)
+    render_home_readme(args.repo_name, header_block, forced=args.force_init)
 
     print(json.dumps({
         "stage": "home",

@@ -6,7 +6,7 @@
 # Organization: MontageSubs (蒙太奇字幕组)
 # Contributors: Meow P (小p)
 # License: MIT License
-# Source: https://github.com/MontageSubs/subtitle-repo-actions/douban/search/
+# Source: https://github.com/MontageSubs/subtitle-repo-actions/utilities/douban/search/
 #
 # Description / 描述:
 #    Resolves a Douban movie subject ID from a movie title. Tries Tavily first,
