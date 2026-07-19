@@ -86,6 +86,7 @@ TOPIC_MAP = {
 
 SLUG_INVALID_CHARS_PATTERN = re.compile(r"[^a-z0-9]+")
 
+BLOCK_EXTRACT_PATTERN = re.compile(r"<!--\s*block:(\w+)\s*-->(.*?)<!--\s*/block:\1\s*-->", re.DOTALL)
 
 def slugify_title(title_en):
     slug = SLUG_INVALID_CHARS_PATTERN.sub("-", title_en.lower()).strip("-")
@@ -197,27 +198,18 @@ def write_readme(content):
         f.write(content)
 
 
-def build_fix_block(reason, tmdb_result):
-    suggested_repo_name = None
+def render_error_readme(tmdb_result, repo_name):
+    reason = tmdb_result["reason"]
+
+    context = {"input_repo_name": repo_name, "zh_fix": "", "en_fix": ""}
     if tmdb_result.get("expected_title") and tmdb_result.get("expected_year"):
-        suggested_repo_name = "{}_{}".format(
+        context["suggested_repo_name"] = "{}_{}".format(
             tmdb_result["expected_title"].replace(" ", "_"),
             tmdb_result["expected_year"],
         )
-
-    if suggested_repo_name:
-        return read_template(
-            os.path.join(ERROR_FRAGMENTS_DIR, "fix_rename.md")
-        ).format(suggested_repo_name=suggested_repo_name)
-
-    if reason == "not_found":
-        return read_template(os.path.join(ERROR_FRAGMENTS_DIR, "fix_not_found.md"))
-
-    return read_template(os.path.join(ERROR_FRAGMENTS_DIR, "fix_delete.md"))
-
-
-def render_error_readme(tmdb_result, repo_name):
-    reason = tmdb_result["reason"]
+        fix_type = "rename"
+    else:
+        fix_type = "not_found" if reason == "not_found" else "delete"
 
     raw = read_template(ERROR_TEMPLATE)
     match = ERROR_COPY_JSON_PATTERN.match(raw)
@@ -226,32 +218,29 @@ def render_error_readme(tmdb_result, repo_name):
         return False
 
     copy_table = json.loads(match.group(1))
-    body_template = match.group(2)
+    content = match.group(2)
 
     if reason not in copy_table:
         log(f"no copy entry for reason={reason} in ERROR_COPY_JSON, aborting without README change")
         return False
 
-    format_kwargs = {}
-    for lang in ("zh", "en"):
-        entry = copy_table[reason][lang]
-        format_kwargs[f"{lang}_heading"] = entry["heading"]
-        format_kwargs[f"{lang}_body"] = entry["body"].format(input_repo_name=repo_name)
+    for lang, entry in copy_table[reason].items():
+        for key, val in entry.items():
+            context[f"{lang}_{key}"] = val.format(**context)
 
-    full_fix = build_fix_block(reason, tmdb_result)
-    if "---\n## How to Fix" in full_fix:
-        zh_fix, en_fix = full_fix.split("---\n## How to Fix", 1)
-        format_kwargs["zh_fix"] = zh_fix.strip()
-        format_kwargs["en_fix"] = "## How to Fix" + en_fix
-    else:
-        format_kwargs["zh_fix"] = full_fix
-        format_kwargs["en_fix"] = ""
+    frag_path = os.path.join(ERROR_FRAGMENTS_DIR, f"fix_{fix_type}.md")
+    if os.path.exists(frag_path):
+        frag_raw = read_template(frag_path)
+        for block_match in BLOCK_EXTRACT_PATTERN.finditer(frag_raw):
+            lang = block_match.group(1)
+            context[f"{lang}_fix"] = block_match.group(2).strip()
 
-    content = body_template.format(**format_kwargs)
+    for key, value in context.items():
+        content = content.replace(f"{{{key}}}", str(value))
+
     write_readme(content)
     log(f"README rendered from error.md (reason={reason})")
     return True
-
 
 def build_douban_warning_block(douban_result):
     if douban_result["success"]:
