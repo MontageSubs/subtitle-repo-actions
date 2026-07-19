@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================================
-# Name: orchestrate.py
+# Name: main.py
 # Organization: MontageSubs (蒙太奇字幕组)
 # License: MIT License
 #
@@ -12,7 +12,7 @@
 #   public），该项由模板仓库初始 README 中的手动前置步骤处理。
 #
 # Usage / 用法:
-#   python init/orchestrate.py --repo-name Cosmos_Laundromat_2015 \
+#   python init/main.py --repo-name Cosmos_Laundromat_2015 \
 #       --github-repository MontageSubs/Cosmos_Laundromat_2015 \
 #       --github-token $ORG_ADMIN_TOKEN \
 #       --tmdb-read-access-token $TMDB_READ_ACCESS_TOKEN \
@@ -30,6 +30,9 @@ import re
 import sys
 import urllib.error
 import urllib.request
+import shutil
+import subprocess
+from pathlib import Path
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO_ROOT, "tmdb", "search"))
@@ -84,6 +87,35 @@ def build_topics(tmdb_result):
 ERROR_COPY_JSON_PATTERN = re.compile(
     r"<!--\s*ERROR_COPY_JSON\s*(.*?)-->\s*(.*)", re.DOTALL
 )
+
+
+def setup_git_identity():
+    actor = os.environ.get("GITHUB_ACTOR")
+    actor_id = os.environ.get("GITHUB_ACTOR_ID")
+    if actor and actor_id:
+        subprocess.run(f'git config user.name "{actor}"', shell=True, check=True)
+        subprocess.run(f'git config user.email "{actor_id}+{actor}@users.noreply.github.com"', shell=True, check=True)
+
+
+def apply_init_manifest(manifest_path, source_root, dest_root):
+    if not manifest_path.exists():
+        return
+    commits = {}
+    with open(manifest_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            if not line.strip() or line.strip().startswith('| source') or line.strip().startswith('| :---'):
+                continue
+            parts = [p.strip() for p in line.split('|') if p.strip()]
+            if len(parts) == 3:
+                src_path = source_root / parts[0]
+                dest_path = dest_root / parts[1]
+                dest_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src_path, dest_path)
+                commits.setdefault(parts[2], []).append(dest_path)
+    for msg, files in commits.items():
+        for file_path in files:
+            subprocess.run(["git", "add", str(file_path)], check=True)
+        subprocess.run(f'git diff --staged --quiet || git commit -m "{msg}"', shell=True, check=True)
 
 
 def log(message):
@@ -333,6 +365,11 @@ def main():
         log("README.md already carries the init marker, this repo was initialized before — skipping to avoid overwriting manual edits")
         print(json.dumps({"stage": "idempotency", "success": True, "skipped": True}, ensure_ascii=False))
         sys.exit(0)
+
+    setup_git_identity()
+    action_dir = Path(__file__).parent.parent
+    workspace_dir = Path(os.environ.get("GITHUB_WORKSPACE", "."))
+    apply_init_manifest(Path(__file__).parent / "copy_manifest.md", action_dir, workspace_dir)
 
     tmdb_result = tmdb_lookup.resolve(args.repo_name, tmdb_token)
 
