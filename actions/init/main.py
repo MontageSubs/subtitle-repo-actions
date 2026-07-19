@@ -69,7 +69,7 @@ NAMING_ERROR_REASONS = {"invalid_repo_name", "not_found", "title_mismatch", "yea
 
 GITHUB_API_ENDPOINT = "https://api.github.com/repos/{full_name}"
 
-PROTECTED_RESET_ENTRIES = {".git", ".github"}
+PROTECTED_RESET_ENTRIES = {".git", ".github", ".actions"}
 
 TOPIC_MAP = {
     "movie": [
