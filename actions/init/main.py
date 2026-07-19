@@ -281,7 +281,7 @@ def build_verified_header(repo_name, tmdb_result, douban_result):
             else "#"
         ),
         tmdb_id=tmdb_result["tmdb_id"],
-        tmdb_url=f"https://www.themoviedb.org/movie/{tmdb_result['tmdb_id']}?language=zh-CN",
+        tmdb_url=f"https://www.themoviedb.org/{tmdb_result['media_type']}/{tmdb_result['tmdb_id']}?language=zh-CN",
         repo_name=repo_name,
         status_badge_text="制作中",
         status_badge_color="orange",
