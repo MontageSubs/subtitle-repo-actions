@@ -129,6 +129,28 @@ def log_raw_result(provider, url, title, score, matched):
     log(f"  [{provider}] {url} | {title}{score_part}{marker}")
 
 
+def clean_title(title):
+    return " ".join((title or "").split())
+
+
+def normalize_for_match(text):
+    return re.sub(r"\s+", "", (text or "").lower())
+
+
+def filter_by_title_hints(candidates, title_hints):
+    hints = [normalize_for_match(h) for h in title_hints if h]
+    if not hints:
+        return candidates
+    matched = [
+        c for c in candidates
+        if any(h in normalize_for_match(c["title"]) for h in hints)
+    ]
+    for c in candidates:
+        if c not in matched:
+            log(f"  [filtered out] {c['url']} | {c['title']} (title mismatch)")
+    return matched or candidates
+
+
 def call_tavily(query, api_key, domains):
     if not api_key:
         return [], {"provider": "tavily", "type": ERROR_NO_TOKEN, "detail": "no api key provided"}
@@ -174,7 +196,7 @@ def call_tavily(query, api_key, domains):
     candidates = []
     for result in raw_results:
         url = result.get("url", "")
-        title = result.get("title", "")
+        title = clean_title(result.get("title", ""))
         score = result.get("score")
         subject_id = extract_subject_id(url)
         log_raw_result("tavily", url, title, score, subject_id is not None)
@@ -243,6 +265,7 @@ def call_serpstack(query, api_key):
     log(f"serpstack raw results: {len(raw_items)}")
     candidates = []
     for url, title in raw_items:
+        title = clean_title(title)
         subject_id = extract_subject_id(url)
         log_raw_result("serpstack", url, title, None, subject_id is not None)
         if subject_id is None:
@@ -296,7 +319,7 @@ def determine_error_reason(errors):
     return "multiple_errors"
 
 
-def resolve(query_terms, tavily_api_key=None, serpstack_api_key=None):
+def resolve(query_terms, tavily_api_key=None, serpstack_api_key=None, title_hints=None):
     if not tavily_api_key and not serpstack_api_key:
         log(f"status: failed ({ERROR_NO_TOKEN})")
         return {
@@ -339,6 +362,7 @@ def resolve(query_terms, tavily_api_key=None, serpstack_api_key=None):
             "candidates": [],
         }
 
+    candidates = filter_by_title_hints(candidates, title_hints or [])
     ranked = summarize_candidates(candidates)
 
     log(f"result: {len(ranked)} candidate(s) found via {provider_used}")
