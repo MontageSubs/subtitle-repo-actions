@@ -5,7 +5,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/字幕状态-{status_badge_text}-{status_badge_color}?style=flat-square" alt="字幕状态">
-  <img src="https://img.shields.io/badge/翻译进度-{progress_percent}%25-blue?style=flat-square" alt="翻译进度">
+  <img src="https://img.shields.io/badge/制作进度-{progress_percent}%25-blue?style=flat-square" alt="翻译进度">
   <img src="https://img.shields.io/badge/版本-{version}-brightgreen?style=flat-square" alt="版本">
 </p>
 
