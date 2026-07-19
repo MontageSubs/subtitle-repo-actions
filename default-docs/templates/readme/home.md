@@ -41,49 +41,51 @@
 <h2 id="contributors">字幕贡献者</h2>
 
 <!-- 此"字幕贡献者"段落展示形式：一人一张卡片（头像 + GitHub 用户名 + 头衔），按行排列。
-     新增贡献者：复制一个 <td> 单元格，替换用户名与头衔即可，无需改动整体结构；
+     新增贡献者：复制一个 <td> 单元格，将 MontageSubs 替换为真实 GitHub 用户名，并填写头衔即可，无需改动整体结构；
+     头像使用 wsrv.nl 图片代理裁剪为圆形，写法固定为：
+     https://wsrv.nl/?url=github.com/{用户名}.png&w=80&h=80&mask=circle
      所有 <td> 均需带 valign="top"，确保头像顶部对齐，不受同行内其他人头衔行数影响；
      一人多角色：头衔用 <br/> 换行堆叠显示，避免横向撑开列宽；
      一角色多人：为每人各建一张卡片；
      无 GitHub 主页的贡献者：去掉 <a> 标签，仅保留头像图片与文字，不做超链接；
-     人数不满一行时，用空 <td valign="top"></td> 补齐，保持网格对齐 -->
+     人数不满一行时，用空 <td></td> 补齐，保持网格对齐 -->
 
 <table>
   <tr>
     <td align="center" valign="top">
-      <a href="https://github.com/USERNAME1"><img src="https://github.com/USERNAME1.png?size=80" width="80" height="80" alt="用户名"/></a><br/>
+      <a href="https://github.com/MontageSubs"><img src="https://wsrv.nl/?url=github.com/MontageSubs.png&w=80&h=80&mask=circle" width="80" height="80" alt="用户名"/></a><br/>
       <b>用户名</b><br/>
       <sub>项目协调员</sub>
     </td>
     <td align="center" valign="top">
-      <a href="https://github.com/USERNAME2"><img src="https://github.com/USERNAME2.png?size=80" width="80" height="80" alt="用户名"/></a><br/>
+      <a href="https://github.com/MontageSubs"><img src="https://wsrv.nl/?url=github.com/MontageSubs.png&w=80&h=80&mask=circle" width="80" height="80" alt="用户名"/></a><br/>
       <b>用户名</b><br/>
       <sub>翻译</sub>
     </td>
     <td align="center" valign="top">
-      <a href="https://github.com/USERNAME3"><img src="https://github.com/USERNAME3.png?size=80" width="80" height="80" alt="用户名"/></a><br/>
+      <a href="https://github.com/MontageSubs"><img src="https://wsrv.nl/?url=github.com/MontageSubs.png&w=80&h=80&mask=circle" width="80" height="80" alt="用户名"/></a><br/>
       <b>用户名</b><br/>
       <sub>校对</sub>
     </td>
     <td align="center" valign="top">
-      <a href="https://github.com/USERNAME4"><img src="https://github.com/USERNAME4.png?size=80" width="80" height="80" alt="用户名"/></a><br/>
+      <a href="https://github.com/MontageSubs"><img src="https://wsrv.nl/?url=github.com/MontageSubs.png&w=80&h=80&mask=circle" width="80" height="80" alt="用户名"/></a><br/>
       <b>用户名</b><br/>
       <sub>时间轴</sub>
     </td>
   </tr>
   <tr>
     <td align="center" valign="top">
-      <a href="https://github.com/USERNAME5"><img src="https://github.com/USERNAME5.png?size=80" width="80" height="80" alt="用户名"/></a><br/>
+      <a href="https://github.com/MontageSubs"><img src="https://wsrv.nl/?url=github.com/MontageSubs.png&w=80&h=80&mask=circle" width="80" height="80" alt="用户名"/></a><br/>
       <b>用户名</b><br/>
       <sub>后期<br/>特效</sub>
     </td>
     <td align="center" valign="top">
-      <a href="https://github.com/USERNAME6"><img src="https://github.com/USERNAME6.png?size=80" width="80" height="80" alt="用户名"/></a><br/>
+      <a href="https://github.com/MontageSubs"><img src="https://wsrv.nl/?url=github.com/MontageSubs.png&w=80&h=80&mask=circle" width="80" height="80" alt="用户名"/></a><br/>
       <b>用户名</b><br/>
       <sub>技术支持</sub>
     </td>
-    <td valign="top"></td>
-    <td valign="top"></td>
+    <td></td>
+    <td></td>
   </tr>
 </table>
 
