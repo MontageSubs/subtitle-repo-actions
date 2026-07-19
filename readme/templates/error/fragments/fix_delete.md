@@ -1,4 +1,4 @@
-## 🛠️ 解决方法
+## 解决方法
 
 > [!WARNING]
 > 仓库名中找不到可用的年份信息，无法自动给出改名建议，请删除本仓库后重新创建。
@@ -9,7 +9,7 @@
 
 ---
 
-## 🛠️ How to Fix
+## How to Fix
 
 > [!WARNING]
 > No usable year could be found in the repository name, so no rename suggestion can be generated automatically — please delete this repository and recreate it.

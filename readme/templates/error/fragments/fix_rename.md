@@ -1,4 +1,4 @@
-## 🛠️ 解决方法
+## 解决方法
 
 > [!TIP]
 > 正确的仓库名应为：
@@ -15,7 +15,7 @@
 
 ---
 
-## 🛠️ How to Fix
+## How to Fix
 
 > [!TIP]
 > The correct repository name should be:

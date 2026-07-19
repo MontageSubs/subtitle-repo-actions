@@ -1,4 +1,4 @@
-## 🛠️ 解决方法
+## 解决方法
 
 > [!TIP]
 > TMDB 未能找到匹配的影片，有两种处理方式：
@@ -17,7 +17,7 @@
 
 ---
 
-## 🛠️ How to Fix
+## How to Fix
 
 > [!TIP]
 > TMDB couldn't find a matching title — there are two ways to proceed:
