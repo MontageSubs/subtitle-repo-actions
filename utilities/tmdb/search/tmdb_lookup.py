@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: tmdb_lookup.py
-# Version: 1.1.3
+# Version: 1.1.4
 # Organization: MontageSubs (蒙太奇字幕组)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -72,6 +72,7 @@
 #
 # ============================================================================
 import argparse
+import difflib
 import json
 import os
 import re
@@ -85,7 +86,7 @@ TMDB_READ_ACCESS_TOKEN_ENV = "TMDB_READ_ACCESS_TOKEN"
 TMDB_SEARCH_ENDPOINT = "https://api.themoviedb.org/3/search/multi"
 TMDB_DETAIL_ENDPOINT = "https://api.themoviedb.org/3/{media_type}/{id}"
 
-REPO_NAME_PATTERN = re.compile(r"^(.+)_(\d{4})$")
+REPO_NAME_PATTERN = re.compile(r"^(.+)[_-](\d{4})$")
 
 SUPPORTED_MEDIA_TYPES = ("movie", "tv")
 
@@ -109,7 +110,7 @@ def parse_repo_name(repo_name):
     if not match:
         return None, None
     title_part, year_part = match.groups()
-    return title_part.replace("_", " "), int(year_part)
+    return re.sub(r"[_-]+", " ", title_part).strip(), int(year_part)
 
 
 LOOSE_YEAR_PATTERN = re.compile(r"(19\d{2}|20\d{2})")
@@ -166,6 +167,13 @@ def candidate_title(candidate):
 def normalize_title(text):
     return "".join(c for c in unicodedata.normalize("NFKD", text) if ord(c) < 128)
 
+TITLE_SIMILARITY_THRESHOLD = 0.5
+
+
+def title_similarity(a, b):
+    a, b = normalize_title(a).lower(), normalize_title(b).lower()
+    return difflib.SequenceMatcher(None, a, b).ratio()
+
 def search_title(title, year, read_access_token):
     params = urllib.parse.urlencode({
         "query": title,
@@ -187,15 +195,17 @@ def search_title(title, year, read_access_token):
         return None, None
     scored = []
     for r in results:
-        _, date = candidate_title(r)
+        name, date = candidate_title(r)
         r_year = int((date or "0000")[:4] or 0)
-        if r_year and abs(r_year - year) <= 1:
-            scored.append((abs(r_year - year), r))
+        similarity = title_similarity(title, name)
+        if r_year and abs(r_year - year) <= 1 and similarity >= TITLE_SIMILARITY_THRESHOLD:
+            scored.append((similarity, abs(r_year - year), r))
     if not scored:
-        log("tmdb search results: none within ±1 year of expected year, treating as not found")
+        log("tmdb search results: none within ±1 year AND above title-similarity threshold, treating as not found")
         return None, None
-    scored.sort(key=lambda x: x[0])
-    return scored[0][1], None
+    scored.sort(key=lambda x: (-x[0], x[1]))
+    log(f"best candidate: [{scored[0][2].get('id')}] similarity={scored[0][0]:.2f} year_diff={scored[0][1]}")
+    return scored[0][2], None
 
 
 def get_detail(media_type, tmdb_id, read_access_token):
@@ -212,6 +222,8 @@ def empty_result(reason, **extra):
     result = {
         "success": False,
         "reason": reason,
+        "needs_rename": False,
+        "canonical_repo_name": None,
         "media_type": None,
         "tmdb_id": None,
         "imdb_id": None,
@@ -296,10 +308,17 @@ def resolve(repo_name, tmdb_read_access_token=None):
 
     title_zh = detail.get("title") if media_type == "movie" else detail.get("name")
 
-    log("status: success")
+    canonical_repo_name = "{}_{}".format(tmdb_title.replace(" ", "_"), tmdb_year)
+    needs_rename = canonical_repo_name != repo_name
+    if needs_rename:
+        log(f"status: success (needs_rename: {repo_name} -> {canonical_repo_name})")
+    else:
+        log("status: success")
     return {
         "success": True,
         "reason": None,
+        "needs_rename": needs_rename,
+        "canonical_repo_name": canonical_repo_name if needs_rename else None,
         "media_type": media_type,
         "tmdb_id": tmdb_id,
         "imdb_id": detail.get("external_ids", {}).get("imdb_id"),
