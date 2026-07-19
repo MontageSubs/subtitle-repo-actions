@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: tmdb_lookup.py
-# Version: 1.1.4
+# Version: 1.1.5
 # Organization: MontageSubs (蒙太奇字幕组)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -167,11 +167,24 @@ def candidate_title(candidate):
 def normalize_title(text):
     return "".join(c for c in unicodedata.normalize("NFKD", text) if ord(c) < 128)
 
+GITHUB_UNSAFE_CHARS_PATTERN = re.compile(r"[^A-Za-z0-9 .]+")
+
+
+def repo_safe_title(text):
+    ascii_text = normalize_title(text).replace("-", " ").replace("_", " ")
+    sanitized = GITHUB_UNSAFE_CHARS_PATTERN.sub(" ", ascii_text)
+    return re.sub(r"\s+", " ", sanitized).strip()
+
+
+def to_repo_name(title, year):
+    return "{}_{}".format(re.sub(r"\s+", "_", repo_safe_title(title)), year)
+
+
 TITLE_SIMILARITY_THRESHOLD = 0.5
 
 
 def title_similarity(a, b):
-    a, b = normalize_title(a).lower(), normalize_title(b).lower()
+    a, b = repo_safe_title(a).lower(), repo_safe_title(b).lower()
     return difflib.SequenceMatcher(None, a, b).ratio()
 
 def search_title(title, year, read_access_token):
@@ -282,7 +295,7 @@ def resolve(repo_name, tmdb_read_access_token=None):
             expected_year=tmdb_year,
         )
 
-    if normalize_title(tmdb_title) != normalize_title(title):
+    if repo_safe_title(tmdb_title) != repo_safe_title(title):
         log(f"status: failed ({ERROR_TITLE_MISMATCH})")
         return empty_result(
             ERROR_TITLE_MISMATCH,
@@ -308,7 +321,7 @@ def resolve(repo_name, tmdb_read_access_token=None):
 
     title_zh = detail.get("title") if media_type == "movie" else detail.get("name")
 
-    canonical_repo_name = "{}_{}".format(tmdb_title.replace(" ", "_"), tmdb_year)
+    canonical_repo_name = to_repo_name(tmdb_title, tmdb_year)
     needs_rename = canonical_repo_name != repo_name
     if needs_rename:
         log(f"status: success (needs_rename: {repo_name} -> {canonical_repo_name})")
