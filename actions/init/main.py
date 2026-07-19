@@ -237,7 +237,15 @@ def render_error_readme(tmdb_result, repo_name):
         entry = copy_table[reason][lang]
         format_kwargs[f"{lang}_heading"] = entry["heading"]
         format_kwargs[f"{lang}_body"] = entry["body"].format(input_repo_name=repo_name)
-    format_kwargs["fix_block"] = build_fix_block(reason, tmdb_result)
+
+    full_fix = build_fix_block(reason, tmdb_result)
+    if "---\n## How to Fix" in full_fix:
+        zh_fix, en_fix = full_fix.split("---\n## How to Fix", 1)
+        format_kwargs["zh_fix"] = zh_fix.strip()
+        format_kwargs["en_fix"] = "## How to Fix" + en_fix
+    else:
+        format_kwargs["zh_fix"] = full_fix
+        format_kwargs["en_fix"] = ""
 
     content = body_template.format(**format_kwargs)
     write_readme(content)
