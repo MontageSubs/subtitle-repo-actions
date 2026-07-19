@@ -42,21 +42,20 @@
   }
 }
 -->
-## ⚠️ {zh_heading}
+## {zh_heading}
 
 > [!CAUTION]
 > {zh_body}
 
----
+{zh_fix}
 
-## ⚠️ {en_heading}
+---
+## {en_heading}
 
 > [!CAUTION]
 > {en_body}
 
----
-
-{fix_block}
+{en_fix}
 
 ---
 
