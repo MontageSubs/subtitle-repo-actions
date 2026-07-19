@@ -459,7 +459,12 @@ def main():
     apply_init_manifest(manifest_path, repo_root, workspace_dir, overwrite=args.force_init)
 
     douban_query = f"{tmdb_result['title_en']} {tmdb_result['year']}"
-    douban_result = douban_id_lookup.resolve(douban_query, tavily_key, serpstack_key)
+    douban_result = douban_id_lookup.resolve(
+        douban_query,
+        tavily_key,
+        serpstack_key,
+        title_hints=[tmdb_result["title_zh"], tmdb_result["title_en"]],
+    )
 
     update_github_repo_metadata(args.github_repository, github_token, tmdb_result)
     header_block = build_verified_header(args.repo_name, tmdb_result, douban_result)
