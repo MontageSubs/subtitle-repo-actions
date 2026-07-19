@@ -42,8 +42,9 @@ TEMPLATES_DIR = os.path.join(REPO_ROOT, "readme", "templates")
 ERROR_TEMPLATE = os.path.join(TEMPLATES_DIR, "error", "error.md")
 ERROR_FRAGMENTS_DIR = os.path.join(TEMPLATES_DIR, "error", "fragments")
 FRAGMENTS_DIR = os.path.join(TEMPLATES_DIR, "fragments")
-RELEASE_TEMPLATE = os.path.join(TEMPLATES_DIR, "release.md")
-MANUAL_TEMPLATE = os.path.join(TEMPLATES_DIR, "manual.md")
+HOME_TEMPLATE = os.path.join(TEMPLATES_DIR, "home.md")
+HEADER_VERIFIED_FRAGMENT = os.path.join(FRAGMENTS_DIR, "header_verified.md")
+HEADER_MANUAL_FRAGMENT = os.path.join(FRAGMENTS_DIR, "header_manual.md")
 
 INIT_MARKER = "<!-- montagesubs:initialized -->"
 
@@ -155,16 +156,6 @@ def render_error_readme(tmdb_result, repo_name):
     return True
 
 
-def render_manual_readme(repo_name, tmdb_result):
-    content = read_template(MANUAL_TEMPLATE).format(
-        input_title=tmdb_result["input_title"] or repo_name,
-        input_year=tmdb_result["input_year"] or "未知",
-        repo_name=repo_name,
-    )
-    write_readme(content)
-    log("README rendered from manual.md (force_init)")
-
-
 def build_douban_warning_block(douban_result):
     if douban_result["success"]:
         return ""
@@ -179,14 +170,14 @@ def build_douban_warning_block(douban_result):
     return read_template(os.path.join(FRAGMENTS_DIR, "douban_not_found.md"))
 
 
-def render_release_readme(repo_name, tmdb_result, douban_result):
+def build_verified_header(repo_name, tmdb_result, douban_result):
     douban_id = douban_result["douban_id"] or "待核实"
     douban_url = (
         f"https://m.douban.com/movie/subject/{douban_result['douban_id']}"
         if douban_result["success"]
         else "#"
     )
-    content = read_template(RELEASE_TEMPLATE).format(
+    return read_template(HEADER_VERIFIED_FRAGMENT).format(
         title_zh=tmdb_result["title_zh"] or tmdb_result["title_en"],
         title_en=tmdb_result["title_en"],
         year=tmdb_result["year"],
@@ -213,8 +204,22 @@ def render_release_readme(repo_name, tmdb_result, douban_result):
         version="v1.0",
         douban_warning_block=build_douban_warning_block(douban_result),
     )
+
+
+def build_manual_header(repo_name, tmdb_result):
+    return read_template(HEADER_MANUAL_FRAGMENT).format(
+        input_title=tmdb_result["input_title"] or repo_name,
+        input_year=tmdb_result["input_year"] or "未知",
+    )
+
+
+def render_home_readme(repo_name, header_block, forced):
+    content = read_template(HOME_TEMPLATE).format(
+        header_block=header_block,
+        repo_name=repo_name,
+    )
     write_readme(content)
-    log("README rendered from release.md")
+    log(f"README rendered from home.md (forced={forced})")
 
 
 def call_github_api(url, github_token, method, payload_dict):
@@ -334,7 +339,8 @@ def main():
     if not tmdb_result["success"]:
         reason = tmdb_result["reason"]
         if reason == "not_found" and args.force_init:
-            render_manual_readme(args.repo_name, tmdb_result)
+            header_block = build_manual_header(args.repo_name, tmdb_result)
+            render_home_readme(args.repo_name, header_block, forced=True)
             print(json.dumps({"stage": "manual", "success": True, "forced": True}, ensure_ascii=False))
             sys.exit(0)
         if reason in NAMING_ERROR_REASONS:
@@ -349,10 +355,11 @@ def main():
     douban_result = douban_id_lookup.resolve(douban_query, tavily_key, serpstack_key)
 
     update_github_repo_metadata(args.github_repository, github_token, tmdb_result)
-    render_release_readme(args.repo_name, tmdb_result, douban_result)
+    header_block = build_verified_header(args.repo_name, tmdb_result, douban_result)
+    render_home_readme(args.repo_name, header_block, forced=False)
 
     print(json.dumps({
-        "stage": "release",
+        "stage": "home",
         "success": True,
         "tmdb": tmdb_result,
         "douban": douban_result,
