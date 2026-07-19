@@ -97,21 +97,44 @@ def setup_git_identity():
         subprocess.run(f'git config user.email "{actor_id}+{actor}@users.noreply.github.com"', shell=True, check=True)
 
 
+MANIFEST_TABLE_SEPARATOR_PATTERN = re.compile(r"^\|[\s:|-]+\|$")
+
+
+def parse_manifest_table(manifest_path):
+    lines = manifest_path.read_text(encoding="utf-8").splitlines()
+    separator_index = next(
+        (i for i, line in enumerate(lines) if MANIFEST_TABLE_SEPARATOR_PATTERN.match(line.strip())),
+        None,
+    )
+    if separator_index is None:
+        return []
+
+    rows = []
+    for line in lines[separator_index + 1:]:
+        stripped = line.strip()
+        if not (stripped.startswith("|") and stripped.endswith("|")):
+            break
+        cells = [c.strip() for c in stripped.strip("|").split("|")]
+        if len(cells) >= 4:
+            rows.append(cells[:4])
+    return rows
+
+
 def apply_init_manifest(manifest_path, source_root, dest_root):
     if not manifest_path.exists():
         return
     commits = {}
-    with open(manifest_path, 'r', encoding='utf-8') as f:
-        for line in f:
-            if not line.strip() or line.strip().startswith('| source') or line.strip().startswith('| :---'):
-                continue
-            parts = [p.strip() for p in line.split('|') if p.strip()]
-            if len(parts) == 3:
-                src_path = source_root / parts[0]
-                dest_path = dest_root / parts[1]
-                dest_path.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(src_path, dest_path)
-                commits.setdefault(parts[2], []).append(dest_path)
+    for action, source, destination, commit_message in parse_manifest_table(manifest_path):
+        dest_path = dest_root / destination
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        if action == "copy":
+            shutil.copy2(source_root / source, dest_path)
+        elif action == "touch":
+            dest_path.touch(exist_ok=True)
+        else:
+            log(f"unknown manifest action {action!r} for {destination}, skipping")
+            continue
+        commits.setdefault(commit_message, []).append(dest_path)
     for msg, files in commits.items():
         for file_path in files:
             subprocess.run(["git", "add", str(file_path)], check=True)
