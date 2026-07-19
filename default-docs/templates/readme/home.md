@@ -100,7 +100,7 @@
 - **加入项目：** 在 Discussions 或 Telegram 群组中，找到正在进行的项目，认领翻译、校对、时间轴、后期等任一环节
 - **了解协作方式：** 开始前建议先浏览 **[贡献指南](./docs/CONTRIBUTING.md)**、**[翻译与风格指南](./docs/TRANSLATION_GUIDE.md)**、**[GitHub 使用指南](./docs/GITHUB_USAGE_GUIDE.md)**
 
-<h2 id="community">社区</h2>
+<h2 id="community">社群</h2>
 
 <h3 id="collaborate">加入交流与协作</h3>
 
