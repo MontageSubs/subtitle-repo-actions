@@ -12,9 +12,10 @@
 
 <h3 id="feedback">字幕反馈</h3>
 
-| Issues | Discussions | Projects |
-|:---:|:---:|:---:|
-| [字幕问题反馈](https://github.com/montagesubs/{repo_name}/issues) | [本字幕留言区](https://github.com/montagesubs/{repo_name}/discussions) | [待办事项](https://github.com/montagesubs/{repo_name}/projects) |
+| 类型 | 用途 | 入口 |
+|:---:|:---|:---:|
+| **问题反馈** | 字幕错误、时间轴错位、下载链接失效等 | [提交 Issue](https://github.com/montagesubs/{repo_name}/issues) |
+| **交流讨论** | 剧情感想、字幕点评、与制作组交流 | [参与 Discussions](https://github.com/montagesubs/{repo_name}/discussions) |
 
 <h2 id="downloads">字幕下载</h2>
 
@@ -60,6 +61,10 @@
 
 <h2 id="community">社区</h2>
 
+<h3 id="collaborate">加入交流与协作</h3>
+
+我们的主要活动场所是 Telegram 群组与 IRC，以下平台也都能找到我们。
+
 <table>
   <tr>
     <th><div align="center">Telegram 社群</div></th>
@@ -77,27 +82,38 @@
   </tr>
 </table>
 
-<h3 id="social-media">社交媒体</h3>
+<h3 id="updates">获取更新通知</h3>
+
+以下平台发布内容完全同步，关注任一渠道即可及时获取字幕发布通知。
 
 <table>
   <tr>
     <th><div align="center">Telegram 频道</div></th>
     <th><div align="center">微博</div></th>
     <th><div align="center">BlueSky</div></th>
-    <th><div align="center">YouTube</div></th>
-    <th><div align="center">哔哩哔哩</div></th>
     <th><div align="center">Mastodon</div></th>
     <th><div align="center">X (Twitter)</div></th>
-    <th><div align="center">Instagram</div></th>
   </tr>
   <tr>
     <td><div align="center"><a href="https://t.me/s/MTSubs"><img src="https://raw.githubusercontent.com/MontageSubs/external-assets/main/icons/telegram/favicon-32x32.png" width="20" alt="Telegram"/><br/>@MTSubs</a></div></td>
     <td><div align="center"><a href="https://weibo.com/u/8358891788"><img src="https://raw.githubusercontent.com/MontageSubs/external-assets/main/icons/weibo/favicon.png" width="20" alt="微博"/><br/>蒙太奇字幕组</a></div></td>
     <td><div align="center"><a href="https://bsky.app/profile/montagesubs.bsky.social"><img src="https://raw.githubusercontent.com/MontageSubs/external-assets/main/icons/bluesky/favicon-32x32.png" width="20" alt="BlueSky"/><br/>@MontageSubs</a></div></td>
-    <td><div align="center"><a href="https://www.youtube.com/@MontageSubs"><img src="https://raw.githubusercontent.com/MontageSubs/external-assets/main/icons/youtube/favicon-32.png" width="20" alt="YouTube"/><br/>@MontageSubs</a></div></td>
-    <td><div align="center"><a href="https://space.bilibili.com/3493120803080246"><img src="https://raw.githubusercontent.com/MontageSubs/external-assets/main/icons/bilibili/favicon.png" width="20" alt="Bilibili"/><br/>蒙太奇字幕组</a></div></td>
     <td><div align="center"><a href="https://mastodon.social/@montagesubs"><img src="https://raw.githubusercontent.com/MontageSubs/external-assets/main/icons/mastodon/favicon-32x32.png" width="20" alt="Mastodon"/><br/>@MontageSubs</a></div></td>
     <td><div align="center"><a href="https://x.com/Montage_Subs"><img src="https://raw.githubusercontent.com/MontageSubs/external-assets/main/icons/x/favicon.png" width="20" alt="X (Twitter)"/><br/>@Montage_Subs</a></div></td>
+  </tr>
+</table>
+
+<h3 id="media">预告与花絮</h3>
+
+<table>
+  <tr>
+    <th><div align="center">YouTube</div></th>
+    <th><div align="center">哔哩哔哩</div></th>
+    <th><div align="center">Instagram</div></th>
+  </tr>
+  <tr>
+    <td><div align="center"><a href="https://www.youtube.com/@MontageSubs"><img src="https://raw.githubusercontent.com/MontageSubs/external-assets/main/icons/youtube/favicon-32.png" width="20" alt="YouTube"/><br/>@MontageSubs</a></div></td>
+    <td><div align="center"><a href="https://space.bilibili.com/3493120803080246"><img src="https://raw.githubusercontent.com/MontageSubs/external-assets/main/icons/bilibili/favicon.png" width="20" alt="Bilibili"/><br/>蒙太奇字幕组</a></div></td>
     <td><div align="center"><a href="https://www.instagram.com/MontageSubs/"><img src="https://raw.githubusercontent.com/MontageSubs/external-assets/main/icons/instagram/favicon.png" width="20" alt="Instagram"/><br/>@MontageSubs</a></div></td>
   </tr>
 </table>
@@ -107,11 +123,9 @@
 <table>
   <tr>
     <th><div align="center">字幕组网站</div></th>
-    <th><div align="center">字幕组知识库</div></th>
   </tr>
   <tr>
     <td><div align="center"><a href="https://montagesubs.github.io/"><img src="https://raw.githubusercontent.com/MontageSubs/brand-assets/main/logos/favicon/default/png/favicon-32.png" width="20" alt="Official site"/><br/>蒙太奇字幕组网站</a></div></td>
-    <td><div align="center"><a href="https://montagesubs.github.io/"><img src="https://raw.githubusercontent.com/MontageSubs/brand-assets/main/logos/favicon/default/png/favicon-32.png" width="20" alt="Wiki"/><br/>蒙太奇字幕组百科</a></div></td>
   </tr>
 </table>
 
