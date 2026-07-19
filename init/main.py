@@ -369,7 +369,7 @@ def main():
     setup_git_identity()
     action_dir = Path(__file__).parent.parent
     workspace_dir = Path(os.environ.get("GITHUB_WORKSPACE", "."))
-    apply_init_manifest(Path(__file__).parent / "copy_manifest.md", action_dir, workspace_dir)
+    apply_init_manifest(Path(__file__).parent / "manifest.md", action_dir, workspace_dir)
 
     tmdb_result = tmdb_lookup.resolve(args.repo_name, tmdb_token)
 
