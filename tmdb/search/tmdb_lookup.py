@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: tmdb_lookup.py
-# Version: 1.1.0
+# Version: 1.1.1
 # Organization: MontageSubs (蒙太奇字幕组)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -111,6 +111,22 @@ def parse_repo_name(repo_name):
     return title_part.replace("_", " "), int(year_part)
 
 
+LOOSE_YEAR_PATTERN = re.compile(r"(19\d{2}|20\d{2})")
+
+
+def parse_repo_name_loose(repo_name):
+    match = LOOSE_YEAR_PATTERN.search(repo_name)
+    if not match:
+        return None, None
+    year = int(match.group(1))
+    remainder = repo_name[:match.start()] + repo_name[match.end():]
+    remainder = remainder.strip("_- ")
+    title_guess = re.sub(r"[_\-]+", " ", remainder).strip()
+    if not title_guess:
+        return None, None
+    return title_guess, year
+
+
 def classify_http_error(code):
     if code in (401, 403):
         return ERROR_AUTH
@@ -139,8 +155,6 @@ def call_tmdb(url, read_access_token):
 
 
 def candidate_title(candidate):
-    # movie uses "title"/"release_date", tv uses "name"/"first_air_date"
-    # 电影用"title"/"release_date"字段，剧集用"name"/"first_air_date"字段
     media_type = candidate.get("media_type")
     if media_type == "movie":
         return candidate.get("title", ""), candidate.get("release_date", "")
@@ -193,6 +207,8 @@ def empty_result(reason, **extra):
         "year": None,
         "overview_zh": None,
         "poster_path": None,
+        "input_title": None,
+        "input_year": None,
     }
     result.update(extra)
     return result
@@ -204,9 +220,14 @@ def resolve(repo_name, tmdb_read_access_token=None):
         return empty_result(ERROR_NO_TOKEN, input_repo_name=repo_name)
 
     title, year = parse_repo_name(repo_name)
+    loose = False
     if title is None:
-        log(f"status: failed ({ERROR_INVALID_REPO_NAME})")
-        return empty_result(ERROR_INVALID_REPO_NAME, input_repo_name=repo_name)
+        title, year = parse_repo_name_loose(repo_name)
+        loose = True
+        if title is None:
+            log(f"status: failed ({ERROR_INVALID_REPO_NAME}, no year found even in loose parse)")
+            return empty_result(ERROR_INVALID_REPO_NAME, input_repo_name=repo_name)
+        log(f"format invalid, attempting loose-parse rename suggestion: {title!r} ({year})")
 
     candidate, error = search_title(title, year, tmdb_read_access_token)
     if error:
@@ -214,12 +235,27 @@ def resolve(repo_name, tmdb_read_access_token=None):
         return empty_result(error["type"], input_repo_name=repo_name)
 
     if not candidate:
+        if loose:
+            log(f"status: failed ({ERROR_INVALID_REPO_NAME}, loose-parse search found nothing)")
+            return empty_result(ERROR_INVALID_REPO_NAME, input_repo_name=repo_name)
         log(f"status: failed ({ERROR_NOT_FOUND})")
-        return empty_result(ERROR_NOT_FOUND, input_repo_name=repo_name)
+        return empty_result(
+            ERROR_NOT_FOUND, input_repo_name=repo_name,
+            input_title=title, input_year=year,
+        )
 
     media_type = candidate["media_type"]
     tmdb_title, release_date = candidate_title(candidate)
     tmdb_year = int((release_date or "0000")[:4] or 0)
+
+    if loose:
+        log(f"status: failed ({ERROR_INVALID_REPO_NAME}, suggesting rename based on loose-parse match)")
+        return empty_result(
+            ERROR_INVALID_REPO_NAME,
+            input_repo_name=repo_name,
+            expected_title=tmdb_title,
+            expected_year=tmdb_year,
+        )
 
     if tmdb_title != title:
         log(f"status: failed ({ERROR_TITLE_MISMATCH})")
