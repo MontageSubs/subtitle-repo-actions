@@ -298,11 +298,18 @@ def build_manual_header(repo_name, tmdb_result):
     )
 
 
-def render_home_readme(repo_name, header_block, forced):
-    content = read_template(HOME_TEMPLATE).format(
-        header_block=header_block,
-        repo_name=repo_name,
-    )
+def render_home_readme(repo_name, header_block, forced, github_repository=""):
+    owner = github_repository.split("/")[0] if github_repository else ""
+    content = read_template(HOME_TEMPLATE)
+    
+    context = {
+        "header_block": header_block,
+        "repo_name": repo_name,
+        "用户名": owner
+    }
+    for key, value in context.items():
+        content = content.replace(f"{{{key}}}", str(value))
+        
     write_readme(content)
     log(f"README rendered from home.md (forced={forced})")
 
