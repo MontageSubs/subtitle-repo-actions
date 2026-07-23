@@ -1,40 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# ============================================================================
-# Name: prompt_build.py
-# Version: 1.0.0
-# Organization: MontageSubs (蒙太奇字幕组)
-# Contributors: Meow P (小p)
-# License: MIT License
-# Source: https://github.com/MontageSubs/subtitle-repo-actions/utilities/wiki/
-#
-# Description / 描述:
-#    LLM prompt engineering and construction module.
-#    Combines fetched Wikipedia and TMDB metadata into structured message
-#    arrays for the LLM core. Separates prompt logic from API execution.
-#    LLM 提示词工程与构建模块。负责将抓取到的 Wikipedia 与 TMDB 元数据
-#    组装为结构化的 messages 数组供 LLM 核心调用。实现提示词业务逻辑与 
-#    API 执行层（llm_core）的代码分离。
-#
-# Usage / 用法:
-#    from prompt_build import build_metadata_prompt
-#    
-#    messages = build_metadata_prompt(wiki_data, tmdb_data)
-#
-# Output / 输出:
-#    Returns a list of message dictionaries compatible with llm_core.py:
-#    返回完全兼容 llm_core.py 格式的消息字典列表：
-#    [
-#      {"role": "system", "content": "..."},
-#      {"role": "user", "content": "..."}
-#    ]
-# ============================================================================
 import argparse
 import json
 import os
 import sys
 
-DEFAULT_MAX_TOKENS = 3072
+DEFAULT_MAX_TOKENS = 8192
 DEFAULT_TEMPERATURE = 0.7
 DEBUG_ENV = "DEBUG"
 
@@ -151,12 +122,13 @@ def debug_dump(messages, language_limit, languages_used):
 
 
 def fail(reason, detail=None):
-    print(json.dumps({"success": False, "reason": reason, "detail": detail}, ensure_ascii=False), file=sys.stderr)
-    sys.exit(1)
+    print(json.dumps({"success": False, "reason": reason, "detail": detail}, ensure_ascii=False), file=sys.stdout)
+    sys.exit(0)
 
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--wiki-data", default=None, help="JSON from wiki_tmdb_fetch.py")
     parser.add_argument("--original-language", default="en")
     parser.add_argument("--language-priority", default=None,
                          help="comma-separated language codes, e.g. en,zh,fr,de,es,ja")
@@ -166,10 +138,17 @@ def main():
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
 
-    try:
-        fetch_result = json.loads(sys.stdin.read())
-    except json.JSONDecodeError as e:
-        fail("invalid_input", str(e))
+    if args.wiki_data:
+        try:
+            fetch_result = json.loads(args.wiki_data)
+        except json.JSONDecodeError as e:
+            fail("invalid_input", str(e))
+    else:
+        try:
+            raw_input = sys.stdin.read()
+            fetch_result = json.loads(raw_input) if raw_input.strip() else {}
+        except json.JSONDecodeError as e:
+            fail("invalid_input", str(e))
 
     if not fetch_result.get("success"):
         fail("upstream_failed", fetch_result.get("reason"))
@@ -183,6 +162,7 @@ def main():
         debug_dump(messages, args.language_limit, languages_used)
 
     print(json.dumps({
+        "success": True,
         "messages": messages,
         "max_tokens": args.max_tokens,
         "temperature": args.temperature,
