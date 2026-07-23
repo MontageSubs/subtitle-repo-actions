@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: wiki_tmdb_fetch.py
-# Version: 1.0.0
+# Version: 1.0.1
 # Organization: MontageSubs (蒙太奇字幕组)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -93,6 +93,7 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 import urllib.error
 import urllib.parse
@@ -100,13 +101,22 @@ import urllib.request
 
 try:
     from bs4 import BeautifulSoup
-except ImportError as e:
-    print(json.dumps({
-        "success": False,
-        "reason": "missing_dependency",
-        "detail": f"{e}; run: pip install beautifulsoup4 lxml",
-    }, ensure_ascii=False))
-    sys.exit(0)
+except ImportError:
+    try:
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install", "beautifulsoup4", "lxml"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=60
+        )
+        from bs4 import BeautifulSoup
+    except Exception as e:
+        print(json.dumps({
+            "success": False,
+            "reason": "dependency_install_failed",
+            "detail": str(e)
+        }, ensure_ascii=False))
+        sys.exit(0)
 
 VERSION = "1.0.0"
 REPOSITORY = "https://github.com/MontageSubs/subtitle-repo-actions"
