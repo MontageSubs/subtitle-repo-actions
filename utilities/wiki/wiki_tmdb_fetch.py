@@ -1,5 +1,94 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# ============================================================================
+# Name: wiki_tmdb_fetch.py
+# Version: 1.1.0
+# Organization: MontageSubs (蒙太奇字幕组)
+# Contributors: Meow P (小p)
+# License: MIT License
+# Source: https://github.com/MontageSubs/subtitle-repo-actions/utilities/wiki/
+#
+# Description / 描述:
+#    Resolves a film's Wikidata entity from its IMDb ID, follows sitelinks
+#    to fetch multilingual Wikipedia pages (Parsoid HTML via REST API), and
+#    extracts Plot/Cast/lead sections through DOM structure alone (no LLM
+#    judgment involved in extraction). Crew and cast are pulled from TMDB's
+#    credits endpoint; production companies and distributor are cross-
+#    checked against the English infobox. Output is the structured payload
+#    intended for the prompt-assembly step ahead of the LLM core, not yet
+#    the LLM call itself.
+#    通过IMDb ID解析出对应的Wikidata词条，沿sitelinks拉取多语言Wikipedia
+#    页面（REST API返回的Parsoid HTML），仅凭DOM结构提取剧情/演员表/开头
+#    简介（提取阶段不涉及LLM判断）。演职员从TMDB的credits接口获取，制片
+#    公司与发行商则与英文版infobox交叉核对。输出的是喂给LLM核心之前一步
+#    提示词组装阶段的结构化数据，本脚本本身不调用LLM。
+#
+# Features:
+#    - Resolves Wikidata entity via IMDb ID (P345), avoiding ambiguous
+#      title-based Wikipedia search entirely.
+#    - Plot extracted in five languages by default: en/de/fr/es/zh, plus
+#      the film's original language if different.
+#    - Cast extracted from the original-language page (completeness) and
+#      the Chinese page (naming/translation reference), with per-language
+#      actor/role separators (" as " / "饰演" / " als " / " como " / etc.).
+#    - Section headings matched exactly first, falling back to keyword-
+#      based fuzzy matching when a wiki page uses an unlisted heading
+#      variant.
+#    - Wikipedia pages are fetched once per language and cached, even when
+#      needed by both the Plot and Cast extraction passes.
+#
+# 功能:
+#    - 通过IMDb ID (P345) 解析Wikidata词条，完全避免基于片名的模糊
+#      Wikipedia搜索。
+#    - 默认提取五种语言的剧情：en/de/fr/es/zh，若原始语言不在其中则一并
+#      加入。
+#    - 演员表提取原始语言版本（信息完整）与中文版本（译名/命名参考），
+#      按语言使用不同的演员/角色分隔符（" as " / "饰演" / " als " /
+#      " como " 等）。
+#    - 章节标题优先精确匹配，未命中时按关键词模糊匹配兜底，应对未收录
+#      的标题变体。
+#    - 同一语言的Wikipedia页面只抓取一次并缓存，即使Plot与Cast两个阶段
+#      都需要用到。
+#
+# Usage / 用法:
+#    python wiki_tmdb_fetch.py --imdb-id tt1234567 --tmdb-id 358332 \
+#        --media-type movie --original-language en
+#
+#    python wiki_tmdb_fetch.py --imdb-id tt1234567 --tmdb-id 358332 \
+#        --tmdb-read-access-token KEY
+#
+#    TMDB token is read from --tmdb-read-access-token, falling back to the
+#    TMDB_READ_ACCESS_TOKEN environment variable.
+#    TMDB密钥可通过--tmdb-read-access-token传入，缺省时读取
+#    TMDB_READ_ACCESS_TOKEN环境变量。
+#
+#    --send is a placeholder for a future step that pipes the assembled
+#    prompt directly into the LLM core; passing it today returns
+#    not_implemented, since the prompt-assembly module has not been built
+#    yet. Without it (the default), this script only prints the extracted
+#    payload for manual preview and tuning.
+#    --send是为未来"直接串联LLM核心"预留的参数，由于提示词组装模块尚未
+#    开发，目前传入会返回not_implemented。默认（不传）只输出提取到的
+#    数据供人工预览和微调。
+#
+# Dependencies / 依赖:
+#    - beautifulsoup4 (pip install beautifulsoup4)
+#
+# Output / 输出:
+#    Diagnostic logs (stderr) / 诊断日志（标准错误）:
+#      - Wikidata resolution, each language page fetched or skipped, TMDB
+#        calls, final status / Wikidata解析结果、每个语言页面的抓取或
+#        跳过情况、TMDB调用、最终状态
+#
+#    Result data (stdout) / 结果数据（标准输出）:
+#      - A single JSON object / 单个JSON对象
+#
+# Exit codes / 退出码:
+#    0    normal completion, regardless of whether success is true or false
+#         正常完成，无论success为true还是false
+#    130  interrupted by Ctrl+C / 被Ctrl+C中断
+#
+# ============================================================================
 import argparse
 import json
 import os

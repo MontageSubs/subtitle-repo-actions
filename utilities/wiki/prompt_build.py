@@ -1,5 +1,34 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# ============================================================================
+# Name: prompt_build.py
+# Version: 1.1.0
+# Organization: MontageSubs (蒙太奇字幕组)
+# Contributors: Meow P (小p)
+# License: MIT License
+# Source: https://github.com/MontageSubs/subtitle-repo-actions/utilities/wiki/
+#
+# Description / 描述:
+#    LLM prompt engineering and construction module.
+#    Combines fetched Wikipedia and TMDB metadata into structured message
+#    arrays for the LLM core. Separates prompt logic from API execution.
+#    LLM 提示词工程与构建模块。负责将抓取到的 Wikipedia 与 TMDB 元数据
+#    组装为结构化的 messages 数组供 LLM 核心调用。实现提示词业务逻辑与 
+#    API 执行层（llm_core）的代码分离。
+#
+# Usage / 用法:
+#    from prompt_build import build_metadata_prompt
+#    
+#    messages = build_metadata_prompt(wiki_data, tmdb_data)
+#
+# Output / 输出:
+#    Returns a list of message dictionaries compatible with llm_core.py:
+#    返回完全兼容 llm_core.py 格式的消息字典列表：
+#    [
+#      {"role": "system", "content": "..."},
+#      {"role": "user", "content": "..."}
+#    ]
+# ============================================================================
 import argparse
 import json
 import os
