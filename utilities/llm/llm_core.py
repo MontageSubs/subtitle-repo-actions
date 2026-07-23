@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: llm_core.py
-# Version: 2.0.0
+# Version: 2.0.1
 # Organization: MontageSubs (蒙太奇字幕组)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -68,7 +68,6 @@ GOOGLE_MODEL_ENV = "GEMINI_LLM_MODEL"
 GOOGLE_THINKING_BUDGET_ENV = "GEMINI_THINKING_BUDGET"
 GOOGLE_DEFAULT_MODEL = "gemma-4-31b-it"
 GOOGLE_DEFAULT_THINKING_BUDGET = None
-GOOGLE_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{model}:streamGenerateContent?alt=sse&key={token}"
 
 HF_TOKEN_ENV = "HUGGINGFACE_LLM_TOKEN"
 HF_MODEL_ENV = "HUGGINGFACE_LLM_MODEL"
@@ -443,6 +442,7 @@ def complete(messages, max_tokens=4096, temperature=0.7,
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--prompt-data", default=None, help="JSON from prompt_build.py")
     parser.add_argument("--google-token", default=None)
     parser.add_argument("--google-model", default=None)
     parser.add_argument("--thinking-budget", type=int, default=None)
@@ -453,17 +453,33 @@ def main():
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
 
-    try:
-        raw_input = sys.stdin.read()
-        input_data = json.loads(raw_input) if raw_input.strip() else {}
-    except json.JSONDecodeError as e:
-        print(json.dumps(fail(ERROR_INVALID_INPUT, f"invalid json on stdin: {e}"), ensure_ascii=False))
-        return
+    if args.prompt_data:
+        try:
+            prompt_data = json.loads(args.prompt_data)
+        except json.JSONDecodeError as e:
+            print(json.dumps(fail(ERROR_INVALID_INPUT, f"invalid json in prompt_data: {e}"), ensure_ascii=False))
+            return
+        if not prompt_data.get("success"):
+            print(json.dumps(fail("prompt_data_failed", prompt_data.get("reason")), ensure_ascii=False))
+            return
+        messages = prompt_data.get("messages")
+        max_tokens = prompt_data.get("max_tokens", args.max_tokens)
+        temperature = prompt_data.get("temperature", args.temperature)
+    else:
+        try:
+            raw_input = sys.stdin.read()
+            input_data = json.loads(raw_input) if raw_input.strip() else {}
+        except json.JSONDecodeError as e:
+            print(json.dumps(fail(ERROR_INVALID_INPUT, f"invalid json on stdin: {e}"), ensure_ascii=False))
+            return
+        messages = input_data.get("messages")
+        max_tokens = input_data.get("max_tokens", args.max_tokens)
+        temperature = input_data.get("temperature", args.temperature)
 
     result = complete(
-        messages=input_data.get("messages"),
-        max_tokens=input_data.get("max_tokens", args.max_tokens),
-        temperature=input_data.get("temperature", args.temperature),
+        messages=messages,
+        max_tokens=max_tokens,
+        temperature=temperature,
         google_token=resolve_google_token(args.google_token),
         google_model=resolve_google_model(args.google_model),
         thinking_budget=resolve_google_thinking_budget(args.thinking_budget),
