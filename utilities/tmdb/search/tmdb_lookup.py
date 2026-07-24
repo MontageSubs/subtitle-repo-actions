@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: tmdb_lookup.py
-# Version: 1.3.0
+# Version: 1.4.0
 # Organization: MontageSubs (蒙太奇字幕组)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -58,11 +58,11 @@
 #
 # Example execution / 执行示例:
 #    $ python tmdb_lookup.py Cosmos_Laundromat_2015
-#    query (tmdb search): Cosmos Laundromat (2015)
-#    tmdb search results: 1
-#      [358332] movie: Cosmos Laundromat (2015-08-10)
-#    query (tmdb detail): movie/358332
-#    status: success
+#    tmdb_lookup: query (tmdb search): Cosmos Laundromat (2015)
+#    tmdb_lookup: tmdb search results: 1
+#    tmdb_lookup:   [358332] movie: Cosmos Laundromat (2015-08-10)
+#    tmdb_lookup: query (tmdb detail): movie/358332
+#    tmdb_lookup: status: success
 #    {"success": true, "reason": null, "media_type": "movie", "tmdb_id": 358332, "imdb_id": "tt4957236", ...}
 #
 # Exit codes / 退出码:
@@ -120,8 +120,11 @@ ERROR_NETWORK = "network_error"
 ERROR_NO_TOKEN = "no_token"
 
 
+SCRIPT_NAME = "tmdb_lookup"
+
+
 def log(message):
-    print(message, file=sys.stderr)
+    print(f"{SCRIPT_NAME}: {message}", file=sys.stderr)
 
 
 def parse_repo_name(repo_name):
