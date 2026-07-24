@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: wiki_tmdb_fetch.py
-# Version: 1.3.0
+# Version: 1.4.0
 # Organization: MontageSubs (蒙太奇字幕组)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -133,7 +133,18 @@ except ImportError:
         }, ensure_ascii=False))
         sys.exit(0)
 
-VERSION = "1.4.0"
+def read_own_version():
+    try:
+        with open(__file__, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("# Version:"):
+                    return line.split(":", 1)[1].strip()
+    except OSError:
+        pass
+    return "DEV"
+
+
+VERSION = read_own_version()
 REPOSITORY = "https://github.com/MontageSubs/subtitle-repo-actions"
 
 TMDB_READ_ACCESS_TOKEN_ENV = "TMDB_READ_ACCESS_TOKEN"

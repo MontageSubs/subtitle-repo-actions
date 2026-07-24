@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: synopsis_render.py
-# Version: 1.0.0
+# Version: 1.1.0
 # Organization: MontageSubs (蒙太奇字幕组)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -70,6 +70,19 @@ PROVIDER_DISPLAY_NAMES = {
     "google": "Google Gemini",
     "huggingface": "Hugging Face",
 }
+
+GITHUB_REPOSITORY_ENV = "GITHUB_REPOSITORY"
+SYNOPSIS_WORKFLOW_FILE = "synopsis.yml"
+
+
+def resolve_repository(cli_value):
+    return cli_value or os.environ.get(GITHUB_REPOSITORY_ENV)
+
+
+def render_regenerate_url(repository):
+    if not repository:
+        return "#"
+    return f"https://github.com/{repository}/actions/workflows/{SYNOPSIS_WORKFLOW_FILE}"
 
 REQUIRED_SECTIONS = ("人物与译名对照", "情节线", "背景故事", "剧情", "主题")
 
@@ -219,7 +232,8 @@ def write_file(path, content):
 
 
 def render(title_en, title_zh, year, wiki_result, llm_result, output_dir=None,
-           synopsis_out=None, glossary_out=None, with_glossary=False, templates_dir=None):
+           synopsis_out=None, glossary_out=None, with_glossary=False, templates_dir=None,
+           repository=None):
     try:
         if not llm_result.get("success"):
             raise RenderError("upstream_llm_failed", llm_result.get("reason"))
@@ -247,6 +261,7 @@ def render(title_en, title_zh, year, wiki_result, llm_result, output_dir=None,
         resolved_templates_dir = resolve_templates_dir(templates_dir)
         provider = provider_display(llm_result.get("provider"))
         wiki_links_line = render_wiki_links_line(title_en, year, wiki_result.get("wiki_links") or [])
+        regenerate_action_url = render_regenerate_url(resolve_repository(repository))
 
         write_file(resolved_synopsis_out, read_template(os.path.join(resolved_templates_dir, "SYNOPSIS.md")).format(
             title_zh=title_zh, year=year,
@@ -257,6 +272,7 @@ def render(title_en, title_zh, year, wiki_result, llm_result, output_dir=None,
             synopsis=clean_prose(resolved["剧情"]),
             theme=clean_prose(resolved["主题"]),
             wiki_links_line=wiki_links_line, provider=provider,
+            regenerate_action_url=regenerate_action_url,
         ))
         log(f"wrote: {resolved_synopsis_out}")
 
@@ -265,6 +281,7 @@ def render(title_en, title_zh, year, wiki_result, llm_result, output_dir=None,
                 title_zh=title_zh, year=year,
                 table_cast=table_cast, table_production=table_production,
                 wiki_links_line=wiki_links_line, provider=provider,
+                regenerate_action_url=regenerate_action_url,
             ))
             log(f"wrote: {resolved_glossary_out}")
 
@@ -294,6 +311,8 @@ def main():
     parser.add_argument("--glossary-out", default=None)
     parser.add_argument("--with-glossary", action="store_true",
                          help="also render GLOSSARY.md (skip on routine manual reruns)")
+    parser.add_argument("--repository", default=None,
+                         help="owner/repo for the regenerate button; defaults to GITHUB_REPOSITORY env var")
     args = parser.parse_args()
 
     wiki_result, llm_result = resolve_inputs(args)
@@ -303,6 +322,7 @@ def main():
         args.title_en, args.title_zh, args.year, wiki_result, llm_result,
         output_dir=args.output_dir, synopsis_out=synopsis_out, glossary_out=glossary_out,
         with_glossary=args.with_glossary, templates_dir=args.templates_dir,
+        repository=args.repository,
     )
     print(json.dumps(result, ensure_ascii=False))
 
