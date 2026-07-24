@@ -82,6 +82,13 @@ def log(message):
     print(message, file=sys.stderr)
 
 
+class RenderError(Exception):
+    def __init__(self, reason, detail=None):
+        super().__init__(reason)
+        self.reason = reason
+        self.detail = detail
+
+
 def fail(reason, detail=None):
     print(json.dumps({"success": False, "reason": reason, "detail": detail}, ensure_ascii=False))
     sys.exit(0)
@@ -140,7 +147,7 @@ def resolve_templates_dir(cli_value):
         if os.path.isfile(os.path.join(normalized, "SYNOPSIS.md")):
             return normalized
     tried = [os.path.normpath(c) for c in candidates]
-    fail("templates_not_found", f"none of these contain SYNOPSIS.md: {tried}; pass --templates-dir explicitly")
+    raise RenderError("templates_not_found", f"none of these contain SYNOPSIS.md: {tried}; pass --templates-dir explicitly")
 
 
 def parse_llm_sections(content):
@@ -211,6 +218,65 @@ def write_file(path, content):
         f.write(content)
 
 
+def render(title_en, title_zh, year, wiki_result, llm_result, output_dir=None,
+           synopsis_out=None, glossary_out=None, with_glossary=False, templates_dir=None):
+    try:
+        if not llm_result.get("success"):
+            raise RenderError("upstream_llm_failed", llm_result.get("reason"))
+        if not wiki_result.get("success", True):
+            raise RenderError("upstream_wiki_failed", wiki_result.get("reason"))
+
+        sections = parse_llm_sections(llm_result["content"])
+        resolved, missing_name = resolve_required_sections(sections)
+        if missing_name:
+            raise RenderError("malformed_llm_output", f"missing section: {missing_name}")
+
+        table_cast, table_production = split_glossary_tables(resolved["人物与译名对照"])
+        if table_cast is None:
+            raise RenderError("malformed_llm_output", "expected exactly two tables in 人物与译名对照")
+
+        resolved_synopsis_out = synopsis_out
+        resolved_glossary_out = glossary_out
+        if resolved_synopsis_out is None and output_dir:
+            resolved_synopsis_out = os.path.join(output_dir, "SYNOPSIS.md")
+        if resolved_glossary_out is None and output_dir and with_glossary:
+            resolved_glossary_out = os.path.join(output_dir, "GLOSSARY.md")
+        if resolved_synopsis_out is None:
+            raise RenderError("invalid_input", "either synopsis_out or output_dir is required")
+
+        resolved_templates_dir = resolve_templates_dir(templates_dir)
+        provider = provider_display(llm_result.get("provider"))
+        wiki_links_line = render_wiki_links_line(title_en, year, wiki_result.get("wiki_links") or [])
+
+        write_file(resolved_synopsis_out, read_template(os.path.join(resolved_templates_dir, "SYNOPSIS.md")).format(
+            title_zh=title_zh, year=year,
+            overview_zh=fix_emphasis_spacing(wiki_result.get("overview_zh") or ""),
+            table_cast=table_cast, table_production=table_production,
+            plot_outline=clean_prose(resolved["情节线"]),
+            background=clean_prose(resolved["背景故事"]),
+            synopsis=clean_prose(resolved["剧情"]),
+            theme=clean_prose(resolved["主题"]),
+            wiki_links_line=wiki_links_line, provider=provider,
+        ))
+        log(f"wrote: {resolved_synopsis_out}")
+
+        if resolved_glossary_out:
+            write_file(resolved_glossary_out, read_template(os.path.join(resolved_templates_dir, "GLOSSARY.md")).format(
+                title_zh=title_zh, year=year,
+                table_cast=table_cast, table_production=table_production,
+                wiki_links_line=wiki_links_line, provider=provider,
+            ))
+            log(f"wrote: {resolved_glossary_out}")
+
+        return {
+            "success": True, "reason": None,
+            "synopsis_path": resolved_synopsis_out,
+            "glossary_path": resolved_glossary_out,
+        }
+    except RenderError as e:
+        return {"success": False, "reason": e.reason, "detail": e.detail}
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--title-en", required=True)
@@ -231,54 +297,14 @@ def main():
     args = parser.parse_args()
 
     wiki_result, llm_result = resolve_inputs(args)
-
-    if not llm_result.get("success"):
-        fail("upstream_llm_failed", llm_result.get("reason"))
-    if not wiki_result.get("success", True):
-        fail("upstream_wiki_failed", wiki_result.get("reason"))
-
-    sections = parse_llm_sections(llm_result["content"])
-    resolved, missing_name = resolve_required_sections(sections)
-    if missing_name:
-        fail("malformed_llm_output", f"missing section: {missing_name}")
-
-    table_cast, table_production = split_glossary_tables(resolved["人物与译名对照"])
-    if table_cast is None:
-        fail("malformed_llm_output", "expected exactly two tables in 人物与译名对照")
-
     synopsis_out, glossary_out = resolve_output_paths(args)
-    if synopsis_out is None:
-        fail("invalid_input", "either --synopsis-out or --output-dir is required")
 
-    templates_dir = resolve_templates_dir(args.templates_dir)
-    provider = provider_display(llm_result.get("provider"))
-    wiki_links_line = render_wiki_links_line(args.title_en, args.year, wiki_result.get("wiki_links") or [])
-
-    write_file(synopsis_out, read_template(os.path.join(templates_dir, "SYNOPSIS.md")).format(
-        title_zh=args.title_zh, year=args.year,
-        overview_zh=fix_emphasis_spacing(wiki_result.get("overview_zh") or ""),
-        table_cast=table_cast, table_production=table_production,
-        plot_outline=clean_prose(resolved["情节线"]),
-        background=clean_prose(resolved["背景故事"]),
-        synopsis=clean_prose(resolved["剧情"]),
-        theme=clean_prose(resolved["主题"]),
-        wiki_links_line=wiki_links_line, provider=provider,
-    ))
-    log(f"wrote: {synopsis_out}")
-
-    if glossary_out:
-        write_file(glossary_out, read_template(os.path.join(templates_dir, "GLOSSARY.md")).format(
-            title_zh=args.title_zh, year=args.year,
-            table_cast=table_cast, table_production=table_production,
-            wiki_links_line=wiki_links_line, provider=provider,
-        ))
-        log(f"wrote: {glossary_out}")
-
-    print(json.dumps({
-        "success": True, "reason": None,
-        "synopsis_path": synopsis_out,
-        "glossary_path": glossary_out,
-    }, ensure_ascii=False))
+    result = render(
+        args.title_en, args.title_zh, args.year, wiki_result, llm_result,
+        output_dir=args.output_dir, synopsis_out=synopsis_out, glossary_out=glossary_out,
+        with_glossary=args.with_glossary, templates_dir=args.templates_dir,
+    )
+    print(json.dumps(result, ensure_ascii=False))
 
 
 if __name__ == "__main__":
