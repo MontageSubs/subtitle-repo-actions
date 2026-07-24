@@ -1,14 +1,14 @@
 <!-- 本文件由自动化流程生成，默认每次运行都会重新生成并覆盖，如需保留请自行备份 -->
 
-<div align="right">
-
-**[🔄 前往 Actions 重新生成]({regenerate_action_url})**
-
-</div><br/>
-
 # 《{title_zh}》({year}) 剧情摘要
 
 > 简介来自 TMDB，剧情、背景故事、主题部分基于 Wikipedia 词条整理生成，仅供字幕制作与创作参考。
+
+<div align="right">
+
+**[前往 Actions 重新生成]({regenerate_action_url})**
+
+</div><br/>
 
 ## 简介
 
