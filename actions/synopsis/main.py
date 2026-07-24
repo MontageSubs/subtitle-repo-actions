@@ -36,8 +36,11 @@ README_TMDB_PATTERN = re.compile(r"themoviedb\.org/(movie|tv)/(\d+)")
 README_IMDB_PATTERN = re.compile(r"imdb\.com/title/(tt\d+)")
 
 
+SCRIPT_NAME = "synopsis_main"
+
+
 def log(message):
-    print(message, file=sys.stderr)
+    print(f"{SCRIPT_NAME}: {message}", file=sys.stderr)
 
 
 def extract_ids_from_readme(readme_text):
@@ -94,6 +97,7 @@ def main():
     args = parser.parse_args()
 
     tmdb_token = os.environ.get("TMDB_READ_ACCESS_TOKEN")
+    log(f"start: manual_id={args.manual_id!r} readme_path={args.readme_path} force={args.force}")
     tmdb_result = resolve_tmdb_result(args.manual_id, tmdb_token, Path(args.readme_path))
 
     if not tmdb_result["success"]:
