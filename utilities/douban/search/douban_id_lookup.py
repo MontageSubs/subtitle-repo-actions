@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: douban_id_lookup.py
-# Version: 1.1.0
+# Version: 1.2.0
 # Organization: MontageSubs (蒙太奇字幕组)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -49,12 +49,12 @@
 #
 # Example execution / 执行示例:
 #    $ python douban_id_lookup.py "Cosmos Laundromat 2015"
-#    query (tavily): Cosmos Laundromat 2015 [domains: m.douban.com/movie/subject/, movie.douban.com/subject/]
-#    tavily raw results: 1
-#      [tavily] https://m.douban.com/movie/subject/26798719 | 宇宙自助洗衣店- 电影 score=0.748
-#    result: 1 candidate(s) found via tavily
-#      - https://m.douban.com/movie/subject/26798719 | 宇宙自助洗衣店- 电影 score=0.748
-#    status: success
+#    douban_id_lookup: query (tavily): Cosmos Laundromat 2015 [domains: m.douban.com/movie/subject/, movie.douban.com/subject/]
+#    douban_id_lookup: tavily raw results: 1
+#    douban_id_lookup:   [tavily] https://m.douban.com/movie/subject/26798719 | 宇宙自助洗衣店- 电影 score=0.748
+#    douban_id_lookup: result: 1 candidate(s) found via tavily
+#    douban_id_lookup:   - https://m.douban.com/movie/subject/26798719 | 宇宙自助洗衣店- 电影 score=0.748
+#    douban_id_lookup: status: success
 #    {"success": true, "douban_id": "26798719", "provider": "tavily", "reason": null, "candidates": []}
 #
 # Exit codes / 退出码:
@@ -105,8 +105,11 @@ ERROR_SERVER = "server_error"
 ERROR_NETWORK = "network_error"
 
 
+SCRIPT_NAME = "douban_id_lookup"
+
+
 def log(message):
-    print(message, file=sys.stderr)
+    print(f"{SCRIPT_NAME}: {message}", file=sys.stderr)
 
 
 def build_scoped_query(query_terms, sites):
