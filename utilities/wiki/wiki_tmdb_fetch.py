@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: wiki_tmdb_fetch.py
-# Version: 1.4.0
+# Version: 1.5.0
 # Organization: MontageSubs (蒙太奇字幕组)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -625,8 +625,11 @@ CITATION_PATTERN = re.compile(r"\[\s*\d+\s*\]")
 WHITESPACE_PATTERN = re.compile(r"\s+")
 
 
+SCRIPT_NAME = "wiki_tmdb_fetch"
+
+
 def log(message):
-    print(message, file=sys.stderr)
+    print(f"{SCRIPT_NAME}: {message}", file=sys.stderr)
 
 
 def clean_text(text):
@@ -958,6 +961,7 @@ def fetch(imdb_id, tmdb_id, media_type, original_language, tmdb_token, language_
         log(f"status: failed ({error['type']})")
         return empty_result(error["type"], detail=error["detail"])
 
+    log(f"summary: plot={list(plot.keys())} cast={list(cast.keys())} reception={list(reception.keys())} infobox={list(infobox.keys())}")
     log("status: success")
     return {
         "success": True, "reason": None, "detail": None,

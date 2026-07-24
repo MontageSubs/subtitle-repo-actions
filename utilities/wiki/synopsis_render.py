@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: synopsis_render.py
-# Version: 1.1.0
+# Version: 1.2.0
 # Organization: MontageSubs (蒙太奇字幕组)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -91,8 +91,11 @@ TABLE_PATTERN = re.compile(r"(\|.+\|(?:\n\|.+\|)+)")
 EMPHASIS_PATTERN = re.compile(r"(\*\*[^\n*]+?\*\*|\*[^\n*]+?\*)")
 
 
+SCRIPT_NAME = "synopsis_render"
+
+
 def log(message):
-    print(message, file=sys.stderr)
+    print(f"{SCRIPT_NAME}: {message}", file=sys.stderr)
 
 
 class RenderError(Exception):
@@ -241,6 +244,7 @@ def render(title_en, title_zh, year, wiki_result, llm_result, output_dir=None,
             raise RenderError("upstream_wiki_failed", wiki_result.get("reason"))
 
         sections = parse_llm_sections(llm_result["content"])
+        log(f"parsed sections: {list(sections.keys())}")
         resolved, missing_name = resolve_required_sections(sections)
         if missing_name:
             raise RenderError("malformed_llm_output", f"missing section: {missing_name}")

@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: prompt_build.py
-# Version: 1.3.0
+# Version: 1.4.0
 # Organization: MontageSubs (蒙太奇字幕组)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -137,8 +137,11 @@ def build_messages(fetch_result, original_language, language_priority, language_
     ]
 
 
+SCRIPT_NAME = "prompt_build"
+
+
 def log(message):
-    print(message, file=sys.stderr)
+    print(f"{SCRIPT_NAME}: {message}", file=sys.stderr)
 
 
 def is_debug(cli_debug):
@@ -181,6 +184,8 @@ def main():
 
     language_priority = parse_language_priority(args.language_priority)
     messages = build_messages(fetch_result, args.original_language, language_priority, args.language_limit)
+    total_chars = sum(len(m["content"]) for m in messages)
+    log(f"assembled: {len(messages)} messages, {total_chars} chars, max_tokens={args.max_tokens}")
 
     if is_debug(args.debug):
         languages_used = resolve_languages(args.original_language, language_priority, args.language_limit)
@@ -199,4 +204,5 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
+        log("interrupted")
         sys.exit(130)

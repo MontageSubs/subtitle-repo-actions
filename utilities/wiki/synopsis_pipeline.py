@@ -29,8 +29,11 @@ import synopsis_render
 import llm_core
 
 
+SCRIPT_NAME = "synopsis_pipeline"
+
+
 def log(message):
-    print(message, file=sys.stderr)
+    print(f"{SCRIPT_NAME}: {message}", file=sys.stderr)
 
 
 def run(tmdb_result, output_dir, tmdb_token,
@@ -46,11 +49,13 @@ def run(tmdb_result, output_dir, tmdb_token,
         media_type=tmdb_result["media_type"], original_language=original_language,
         tmdb_token=tmdb_token, language_priority=plot_languages, language_limit=language_limit,
     )
+    log(f"stage (wiki): imdb_id={tmdb_result['imdb_id']} tmdb_id={tmdb_result['tmdb_id']}")
     if not wiki_result["success"]:
-        log(f"synopsis pipeline: wiki fetch failed ({wiki_result['reason']})")
+        log(f"wiki fetch failed ({wiki_result['reason']})")
         return {"stage": "wiki", **wiki_result}
 
     messages = prompt_build.build_messages(wiki_result, original_language, plot_languages, language_limit)
+    log(f"stage (llm): {len(messages)} messages assembled, dispatching to llm_core")
     llm_result = llm_core.complete(
         messages=messages,
         max_tokens=max_tokens or prompt_build.DEFAULT_MAX_TOKENS,
@@ -63,14 +68,15 @@ def run(tmdb_result, output_dir, tmdb_token,
         debug=debug,
     )
     if not llm_result["success"]:
-        log(f"synopsis pipeline: llm failed ({llm_result['reason']})")
+        log(f"llm failed ({llm_result['reason']})")
         return {"stage": "llm", **llm_result}
 
+    log(f"stage (render): provider={llm_result.get('provider')} with_glossary={with_glossary}")
     rendered = synopsis_render.render(
         title_en=tmdb_result["title_en"],
         title_zh=tmdb_result["title_zh"] or tmdb_result["title_en"],
         year=tmdb_result["year"], wiki_result=wiki_result, llm_result=llm_result,
         output_dir=output_dir, with_glossary=with_glossary,
     )
-    log(f"synopsis pipeline: {'success' if rendered['success'] else 'render failed (' + str(rendered['reason']) + ')'}")
+    log(f"status: {'success' if rendered['success'] else 'render failed (' + str(rendered['reason']) + ')'}")
     return {"stage": "render", **rendered}
