@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: tmdb_lookup.py
-# Version: 1.2.0
+# Version: 1.3.0
 # Organization: MontageSubs (蒙太奇字幕组)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -82,6 +82,21 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+def read_own_version():
+    try:
+        with open(__file__, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("# Version:"):
+                    return line.split(":", 1)[1].strip()
+    except OSError:
+        pass
+    return "DEV"
+
+
+VERSION = read_own_version()
+REPOSITORY = "https://github.com/MontageSubs/subtitle-repo-actions"
+USER_AGENT = f"tmdb_lookup/{VERSION} (+{REPOSITORY}; GitHub Actions)"
+
 TMDB_READ_ACCESS_TOKEN_ENV = "TMDB_READ_ACCESS_TOKEN"
 TMDB_SEARCH_ENDPOINT = "https://api.themoviedb.org/3/search/multi"
 TMDB_DETAIL_ENDPOINT = "https://api.themoviedb.org/3/{media_type}/{id}"
@@ -149,6 +164,7 @@ def call_tmdb(url, read_access_token):
         headers={
             "Authorization": f"Bearer {read_access_token}",
             "accept": "application/json",
+            "User-Agent": USER_AGENT,
         },
     )
     try:
