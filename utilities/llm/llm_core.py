@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: llm_core.py
-# Version: 2.1.0
+# Version: 2.2.0
 # Organization: MontageSubs (蒙太奇字幕组)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -62,6 +62,21 @@ import threading
 import time
 import urllib.error
 import urllib.request
+
+def read_own_version():
+    try:
+        with open(__file__, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("# Version:"):
+                    return line.split(":", 1)[1].strip()
+    except OSError:
+        pass
+    return "DEV"
+
+
+VERSION = read_own_version()
+REPOSITORY = "https://github.com/MontageSubs/subtitle-repo-actions"
+USER_AGENT = f"llm_core/{VERSION} (+{REPOSITORY}; GitHub Actions)"
 
 GOOGLE_TOKEN_ENV = "GOOGLE_LLM_TOKEN"
 GOOGLE_MODEL_ENV = "GEMINI_LLM_MODEL"
@@ -190,7 +205,7 @@ def call_gemini(messages, token, model, max_tokens, temperature, thinking_budget
             headers={
                 "Content-Type": "application/json",
                 "x-goog-api-key": token,
-                "User-Agent": "aistudio-build"
+                "User-Agent": USER_AGENT,
             },
             method="POST",
         )
@@ -296,7 +311,7 @@ def call_huggingface(messages, token, model, max_tokens, temperature, debug):
         request = urllib.request.Request(
             HF_ENDPOINT,
             data=payload,
-            headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}", "User-Agent": USER_AGENT},
             method="POST",
         )
         log(f"[huggingface] payload: {len(payload)} bytes, streaming (timeout {REQUEST_TIMEOUT}s per chunk)")
