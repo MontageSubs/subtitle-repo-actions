@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: llm_core.py
-# Version: 2.2.0
+# Version: 2.3.0
 # Organization: MontageSubs (蒙太奇字幕组)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -106,8 +106,11 @@ ERROR_EMPTY_RESPONSE = "empty_response"
 ERROR_ALL_PROVIDERS_FAILED = "all_providers_failed"
 
 
+SCRIPT_NAME = "llm_core"
+
+
 def log(message):
-    print(message, file=sys.stderr)
+    print(f"{SCRIPT_NAME}: {message}", file=sys.stderr)
 
 
 def is_debug(cli_debug):
@@ -275,6 +278,7 @@ def call_gemini(messages, token, model, max_tokens, temperature, thinking_budget
 
     thoughts_tokens = usage_meta.get("thoughtsTokenCount") or 0
     completion_tokens = usage_meta.get("candidatesTokenCount") or 0
+    log(f"[google] tokens: sent={usage_meta.get('promptTokenCount')} received={completion_tokens} thinking={thoughts_tokens} total={usage_meta.get('totalTokenCount')}")
     if finish_reason == "MAX_TOKENS":
         log(f"[google] warning: hit MAX_TOKENS (thinking={thoughts_tokens}, output={completion_tokens})")
     elif thinking_budget and thoughts_tokens >= thinking_budget:
@@ -376,6 +380,7 @@ def call_huggingface(messages, token, model, max_tokens, temperature, debug):
     if not content or not content.strip():
         return None, fail(ERROR_EMPTY_RESPONSE, "empty content in response")
 
+    log(f"[huggingface] tokens: sent={usage.get('prompt_tokens')} received={usage.get('completion_tokens')} total={usage.get('total_tokens')}")
     if finish_reason == "length":
         log(f"[huggingface] warning: output truncated by max_tokens ({max_tokens})")
     elif finish_reason and finish_reason != "stop":
