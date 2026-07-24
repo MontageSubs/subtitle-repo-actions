@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: prompt_build.py
-# Version: 1.1.0
+# Version: 1.0.0
 # Organization: MontageSubs (蒙太奇字幕组)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -56,21 +56,21 @@ You compile subtitle-team background notes from structured Wikipedia/TMDB JSON (
 
 Emit both tables first so later sections reuse the same names consistently.
 
-**Table 1: 演职员与专有名词**
+**演职员与专有名词**
 
 | 原文 | 建议译名 | 身份/关系 | 理由 |
 |---|---|---|---|
 
-This exact header row and separator row are required. Include only entities that actually appear in the story: named cast members and their characters, and every story-named entity/org/place/object. Do NOT include director/writer/crew here — they belong to Table 2.
+This exact header row and separator row are required. Include only entities that actually appear in the story: named cast members and their characters, and every story-named entity/org/place/object. Do NOT include director/writer/crew here — they belong to the production table below.
 - 身份/关系: one phrase covering the character's identity plus their relation to other already-listed characters (e.g. "饰演角色的兄长", "饰演角色的上级"), not identity alone
 - 理由 (3-8 chars): 意译/音译/沿用/存疑 etc.
 
-**Table 2: 制作信息**
+**制作信息**
 
 | 原文 | 建议译名 | 职务 |
 |---|---|---|
 
-This exact header row and separator row are required. Always include the director if present in tmdb_credits. Order by role priority, skipping only roles missing from the source: 发行公司 > 制作公司 > 导演 > 制片人 > 编剧 > 摄影 > 剪辑 > 配乐 > and any other important positions (series may instead have 出品方/总导演/编剧统筹 — map to the source's actual role names).
+This exact header row and separator row are required. Include every crew role actually documented in infobox/tmdb_credits, not only the ones named below — if the source lists a role omitted here (选角导演、服装设计、视觉特效等), still include it using the source's own role name. Always include the director if present. Order the commonly-known roles by priority, skipping only ones missing from the source: 发行公司 > 制作公司 > 导演 > 制片人 > 编剧 > 摄影 > 剪辑 > 配乐, then append any other documented role after them (series may instead have 出品方/总导演/编剧统筹).
 
 **Shared translation rule for both tables:**
 Prefer an entity's existing common Simplified Chinese rendering (e.g. Walt Disney Pictures --> 华特迪士尼影业, James Wan --> 温子仁, not a literal transliteration). Otherwise, translate meaningful/descriptive words semantically and transliterate proper or mythological names by convention, then append the role suffix (影业/公司/工作室 etc) matching the source. Only keep untranslated a pure brand abbreviation with no descriptive or proper-noun content (e.g. HBO) — never leave a name untranslated merely out of uncertainty.
@@ -151,33 +151,27 @@ def debug_dump(messages, language_limit, languages_used):
 
 
 def fail(reason, detail=None):
-    print(json.dumps({"success": False, "reason": reason, "detail": detail}, ensure_ascii=False), file=sys.stdout)
+    print(json.dumps({"success": False, "reason": reason, "detail": detail}, ensure_ascii=False))
     sys.exit(0)
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--wiki-data", default=None, help="JSON from wiki_tmdb_fetch.py")
     parser.add_argument("--original-language", default="en")
     parser.add_argument("--language-priority", default=None,
                          help="comma-separated language codes, e.g. en,zh,fr,de,es,ja")
     parser.add_argument("--language-limit", type=int, default=None)
+    parser.add_argument("--wiki-data", default=None,
+                         help="JSON output from wiki_tmdb_fetch.py; reads stdin if omitted")
     parser.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS)
     parser.add_argument("--temperature", type=float, default=DEFAULT_TEMPERATURE)
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
 
-    if args.wiki_data:
-        try:
-            fetch_result = json.loads(args.wiki_data)
-        except json.JSONDecodeError as e:
-            fail("invalid_input", str(e))
-    else:
-        try:
-            raw_input = sys.stdin.read()
-            fetch_result = json.loads(raw_input) if raw_input.strip() else {}
-        except json.JSONDecodeError as e:
-            fail("invalid_input", str(e))
+    try:
+        fetch_result = json.loads(args.wiki_data) if args.wiki_data is not None else json.loads(sys.stdin.read())
+    except json.JSONDecodeError as e:
+        fail("invalid_input", str(e))
 
     if not fetch_result.get("success"):
         fail("upstream_failed", fetch_result.get("reason"))

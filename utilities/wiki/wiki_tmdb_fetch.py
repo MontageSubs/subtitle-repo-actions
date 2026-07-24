@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: wiki_tmdb_fetch.py
-# Version: 1.1.0
+# Version: 1.0.1
 # Organization: MontageSubs (蒙太奇字幕组)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -118,20 +118,21 @@ except ImportError:
         }, ensure_ascii=False))
         sys.exit(0)
 
-VERSION = "1.0.1"
+VERSION = "1.0.0"
 REPOSITORY = "https://github.com/MontageSubs/subtitle-repo-actions"
 
 TMDB_READ_ACCESS_TOKEN_ENV = "TMDB_READ_ACCESS_TOKEN"
 TMDB_API_BASE = "https://api.themoviedb.org/3"
 WIKIDATA_API = "https://www.wikidata.org/w/api.php"
 WIKIPEDIA_REST_HTML = "https://{lang}.wikipedia.org/api/rest_v1/page/html/{title}"
-WIKIPEDIA_PAGE_URL = "https://{lang}.wikipedia.org/wiki/{title}"
 IMDB_PROPERTY = "P345"
 USER_AGENT = f"wiki_tmdb_fetch/{VERSION} (+{REPOSITORY}; GitHub Actions)"
 REQUEST_TIMEOUT = 20
 
 DEFAULT_LANGUAGE_PRIORITY = ("en", "zh", "fr", "de", "es")
 CAST_LANGUAGES = ("zh",)
+
+WIKIPEDIA_PAGE_URL = "https://{lang}.wikipedia.org/wiki/{title}"
 
 LANGUAGE_DISPLAY_NAMES = {
     "en": "English",
@@ -140,10 +141,18 @@ LANGUAGE_DISPLAY_NAMES = {
     "de": "Deutsch",
     "es": "Español",
     "ja": "日本語",
-    "pt": "Português",
-    "ko": "한국어",
-    "ru": "Русский",
 }
+
+
+def parse_language_priority(raw):
+    if not raw:
+        return DEFAULT_LANGUAGE_PRIORITY
+    return tuple(code.strip() for code in raw.split(",") if code.strip())
+
+
+def resolve_plot_languages(original_language, language_priority, language_limit):
+    order = list(dict.fromkeys([original_language, *language_priority]))
+    return order[:language_limit] if language_limit else order
 
 SECTION_ALIASES = {
     "plot": {
@@ -213,6 +222,7 @@ ERROR_AUTH = "auth_error"
 ERROR_RATE_LIMIT = "rate_limit"
 ERROR_SERVER = "server_error"
 ERROR_NETWORK = "network_error"
+ERROR_NOT_IMPLEMENTED = "not_implemented"
 
 CITATION_PATTERN = re.compile(r"\[\s*\d+\s*\]")
 WHITESPACE_PATTERN = re.compile(r"\s+")
@@ -416,28 +426,12 @@ def build_wiki_links(plot_languages, plot, sitelinks):
     links = []
     for lang in plot_languages:
         if lang in plot and lang in sitelinks:
-            url = WIKIPEDIA_PAGE_URL.format(
-                lang=lang,
-                title=urllib.parse.quote(sitelinks[lang], safe="")
-            )
             links.append({
                 "lang": lang,
                 "label": LANGUAGE_DISPLAY_NAMES.get(lang, lang),
-                "title": sitelinks[lang],
-                "url": url,
+                "url": WIKIPEDIA_PAGE_URL.format(lang=lang, title=urllib.parse.quote(sitelinks[lang], safe="")),
             })
     return links
-
-
-def parse_language_priority(raw):
-    if not raw:
-        return DEFAULT_LANGUAGE_PRIORITY
-    return tuple(code.strip() for code in raw.split(",") if code.strip())
-
-
-def resolve_plot_languages(original_language, language_priority, language_limit):
-    order = list(dict.fromkeys([original_language, *language_priority]))
-    return order[:language_limit] if language_limit else order
 
 
 def empty_result(reason, **extra):
@@ -549,7 +543,13 @@ def main():
                          help="comma-separated language codes, e.g. en,zh,fr,de,es,ja")
     parser.add_argument("--language-limit", type=int, default=None)
     parser.add_argument("--tmdb-read-access-token", default=None)
+    parser.add_argument("--send", action="store_true")
     args = parser.parse_args()
+
+    if args.send:
+        log(f"status: failed ({ERROR_NOT_IMPLEMENTED})")
+        print(json.dumps(empty_result(ERROR_NOT_IMPLEMENTED, detail="prompt-assembly module not built yet"), ensure_ascii=False))
+        return
 
     result = fetch(
         imdb_id=args.imdb_id,
