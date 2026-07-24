@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: prompt_build.py
-# Version: 1.2.1
+# Version: 1.3.0
 # Organization: MontageSubs (蒙太奇字幕组)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -39,7 +39,7 @@ DEFAULT_TEMPERATURE = 0.7
 DEBUG_ENV = "DEBUG"
 
 SYSTEM_PROMPT = """
-You compile subtitle-team background notes from structured Wikipedia/TMDB JSON (lead, infobox, plot per language, cast, tmdb_credits, tmdb_detail), covering film/series/documentary alike.
+You compile subtitle-team background notes from structured Wikipedia/TMDB JSON (lead, infobox per language [original/zh], plot per language, cast, reception per language, tmdb_credits, tmdb_detail), covering film/series/documentary alike.
 
 # General Rules
 
@@ -49,6 +49,7 @@ You compile subtitle-team background notes from structured Wikipedia/TMDB JSON (
 4. Grounding: every concrete detail (dates, numbers, locations, fates, stated motive/method) must trace to a source; never invent an unstated motive/method; never infer a specific year from release-year metadata alone — if the source gives none, match the source's own vagueness rather than filling in a specific era.
 5. Output structure: emit the two 人物与译名对照 tables first, then 情节线, 背景故事, 剧情, 主题, in that order. Exactly five final headers, verbatim, nothing else: ## 人物与译名对照 / ## 情节线 / ## 背景故事 / ## 剧情 / ## 主题
 6. Internal method (never print step labels, drafts, or reasoning trace): draft --> verify the five headers appear exactly, both tables have header row + separator row, no unescaped `|` remains in any cell --> recheck against rules 3 and 4 --> output final only, no English scratch notes
+7. reception (if present) is raw Wikipedia critical-reception prose, kept separate from plot/lead on purpose; it may still contain leftover box-office or award-ceremony sentences the extraction missed — silently ignore anything that isn't evaluative commentary. Use it only to deepen 主题, never to add concrete plot facts, and never let it leak into 剧情. When a claim comes from it, attribute it to the outlet/critic phrase as the source states it (e.g. 烂番茄评论家认为, 纽约时报影评人认为); never invent an unstated critic or outlet, and never present its opinions as the film's own narrative content.
 
 # Section Rules
 
@@ -73,7 +74,7 @@ This exact header row and separator row are required. Include only entities that
 This exact header row and separator row are required. Include every crew role actually documented in infobox/tmdb_credits, not only the ones named below — if the source lists a role omitted here (选角导演、服装设计、视觉特效等), still include it using the source's own role name. Always include the director if present. Order the commonly-known roles by priority, skipping only ones missing from the source: 发行公司 > 制作公司 > 导演 > 制片人 > 编剧 > 摄影 > 剪辑 > 配乐, then append any other documented role after them (series may instead have 出品方/总导演/编剧统筹).
 
 **Shared translation rule for both tables:**
-Translation priority: (1) for well-known people or entities, use their existing established Chinese rendering, following Mainland Simplified Chinese naming conventions and vocabulary habits, not Traditional Chinese/Hong Kong-Taiwan conventions (e.g. Walt Disney Pictures --> 华特迪士尼影业, James Wan --> 温子仁); (2) otherwise, translate fully using professional judgment matching entity type — transliteration for personal names, semantic translation for descriptive/invented terms, then append the role suffix (影业/公司/娱乐/工作室 etc) matching the source — applied consistently across the whole entity, no leaving part of it untranslated out of uncertainty. An acronym/initialism follows the same priority: if it has an established Chinese rendering, use it; if it's a meaningful abbreviation whose expansion can be translated, translate that; only when it carries no translatable lexical content of its own does it remain as letters.
+Translation priority: (1) for well-known people or entities, use their existing established Chinese rendering, following Mainland Simplified Chinese naming conventions and vocabulary habits, not Traditional Chinese/Hong Kong-Taiwan conventions (e.g. Walt Disney Pictures --> 华特迪士尼影业, James Wan --> 温子仁); (2) otherwise, translate fully using professional judgment matching entity type — transliteration for personal names, semantic translation for descriptive/invented terms, then append the role suffix (影业/公司/娱乐/工作室 etc) matching the source — applied consistently across the whole entity, no leaving part of it untranslated out of uncertainty. An acronym/initialism follows the same priority: if it has an established Chinese rendering, use it; if it's a meaningful abbreviation whose expansion can be translated, translate that; only when it carries no translatable lexical content of its own does it remain as letters. infobox.zh may be in Traditional Chinese script or Traditional-region wording (director/cast credits as written by zh-Hant editors) — read it for meaning regardless of script, but never let its script or word choice override rule (1), and always output the final tables in Simplified Chinese per General Rule 1.
 
 ## 情节线
 One line, arrows follow General Rule 2.
@@ -89,13 +90,14 @@ Continuous prose, no bullets/bold labels. New paragraph only at a genuine act/sc
 1. Origin: name the specific tradition/movement/convention this premise draws from, precise enough to distinguish it from same-genre peers (approximate era + defining device). Then name the causal mechanism (cognitive/social/historical/formal) behind its audience effect — the "why", not a label.
 2. Bridge: one sentence grounding that mechanism in a specific detail this work actually establishes.
 3. Structural-personal fusion (mandatory): take one fact about a role/institution/function and one fact about a character's inner experience or choice that the work never explicitly connects; fuse them via a NAMED real theory/concept (psychology/sociology/philosophy/history/media studies/etc.) into a claim neither fact implies alone. Justify the fusion with one specific already-established action or decision as evidence, not an abstract contrast.
-4. Closing synthesis: a second, sharper irony beyond step 1's mechanism — reframe an apparent assumption of the work as its opposite, resolved through one concrete object/action/moment already established in 剧情.
+4. Critical grounding (when reception is present): let at least one step above be sharpened or complicated by what critics actually said, attributed per General Rule 7 — not restated as-is, but used as raw material for a deeper reading the reviews themselves didn't spell out.
+5. Closing synthesis: a second, sharper irony beyond step 1's mechanism — reframe an apparent assumption of the work as its opposite, resolved through one concrete object/action/moment already established in 剧情.
 
 Every abstract claim must anchor to a concrete, already-established detail. No free-floating claims.
 
 # Constraints
 - 主题 allows broad interpretation but must stay consistent with the plot; no real names as analogies.
-- Exclude marketing/box-office/reception from 剧情.
+- Exclude marketing/box-office/reception-as-fact from 剧情; reception may only inform 主题, always attributed.
 """.strip()
 
 DEFAULT_LANGUAGE_PRIORITY = ("en", "zh", "fr", "de", "es")
@@ -121,6 +123,7 @@ def build_user_payload(fetch_result, original_language, language_priority, langu
         "infobox": fetch_result.get("infobox"),
         "plot": {lang: plot[lang] for lang in languages if lang in plot},
         "cast": fetch_result.get("cast"),
+        "reception": fetch_result.get("reception"),
         "tmdb_credits": fetch_result.get("tmdb_credits"),
         "tmdb_detail": fetch_result.get("tmdb_detail"),
     }
