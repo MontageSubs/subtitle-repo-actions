@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: tmdb_lookup.py
-# Version: 1.1.6
+# Version: 1.2.0
 # Organization: MontageSubs (蒙太奇字幕组)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -85,6 +85,10 @@ import urllib.request
 TMDB_READ_ACCESS_TOKEN_ENV = "TMDB_READ_ACCESS_TOKEN"
 TMDB_SEARCH_ENDPOINT = "https://api.themoviedb.org/3/search/multi"
 TMDB_DETAIL_ENDPOINT = "https://api.themoviedb.org/3/{media_type}/{id}"
+TMDB_FIND_ENDPOINT = "https://api.themoviedb.org/3/find/{imdb_id}"
+
+IMDB_ID_PATTERN = re.compile(r"tt\d{6,9}")
+DIGITS_PATTERN = re.compile(r"\d+")
 
 REPO_NAME_PATTERN = re.compile(r"^(.+)[_-](\d{4})$")
 
@@ -247,6 +251,7 @@ def empty_result(reason, **extra):
         "poster_path": None,
         "input_title": None,
         "input_year": None,
+        "original_language": None,
     }
     result.update(extra)
     return result
@@ -340,6 +345,91 @@ def resolve(repo_name, tmdb_read_access_token=None):
         "year": tmdb_year,
         "overview_zh": detail.get("overview"),
         "poster_path": detail.get("poster_path"),
+        "original_language": detail.get("original_language"),
+    }
+
+
+def parse_manual_identifier(raw):
+    raw = (raw or "").strip()
+    imdb_match = IMDB_ID_PATTERN.search(raw)
+    if imdb_match:
+        return "imdb", imdb_match.group(0)
+    digits_match = DIGITS_PATTERN.search(raw)
+    if digits_match:
+        return "tmdb", digits_match.group(0)
+    return None, None
+
+
+def find_by_imdb(imdb_id, read_access_token):
+    params = urllib.parse.urlencode({"external_source": "imdb_id"})
+    url = f"{TMDB_FIND_ENDPOINT.format(imdb_id=imdb_id)}?{params}"
+    log(f"query (tmdb find): imdb_id={imdb_id}")
+    body, error = call_tmdb(url, read_access_token)
+    if error:
+        return None, None, error
+    for media_type in SUPPORTED_MEDIA_TYPES:
+        results = body.get(f"{media_type}_results") or []
+        if results:
+            return media_type, results[0]["id"], None
+    return None, None, None
+
+
+def resolve_manual(raw, tmdb_read_access_token=None):
+    if not tmdb_read_access_token:
+        log(f"status: failed ({ERROR_NO_TOKEN})")
+        return empty_result(ERROR_NO_TOKEN, input_repo_name=raw)
+
+    kind, value = parse_manual_identifier(raw)
+    if kind is None:
+        log(f"status: failed ({ERROR_INVALID_REPO_NAME}, no tmdb/imdb id found in {raw!r})")
+        return empty_result(ERROR_INVALID_REPO_NAME, input_repo_name=raw)
+
+    if kind == "imdb":
+        media_type, tmdb_id, error = find_by_imdb(value, tmdb_read_access_token)
+        if error:
+            log(f"tmdb error: {error['type']} ({error['detail']})")
+            return empty_result(error["type"], input_repo_name=raw)
+        if not tmdb_id:
+            log(f"status: failed ({ERROR_NOT_FOUND}, imdb id has no tmdb match)")
+            return empty_result(ERROR_NOT_FOUND, input_repo_name=raw)
+        detail, error = get_detail(media_type, tmdb_id, tmdb_read_access_token)
+        if error:
+            log(f"tmdb error: {error['type']} ({error['detail']})")
+            return empty_result(error["type"], input_repo_name=raw)
+    else:
+        tmdb_id = int(value)
+        media_type, detail, last_error = None, None, None
+        for candidate_type in SUPPORTED_MEDIA_TYPES:
+            candidate_detail, error = get_detail(candidate_type, tmdb_id, tmdb_read_access_token)
+            if error is None:
+                media_type, detail = candidate_type, candidate_detail
+                break
+            last_error = error
+        if detail is None:
+            reason = last_error["type"] if last_error else ERROR_NOT_FOUND
+            log(f"status: failed ({reason}, tmdb id matched neither movie nor tv)")
+            return empty_result(reason, input_repo_name=raw)
+
+    title_zh = detail.get("title") if media_type == "movie" else detail.get("name")
+    title_en = detail.get("original_title") if media_type == "movie" else detail.get("original_name")
+    release_date = detail.get("release_date") if media_type == "movie" else detail.get("first_air_date")
+    year = int((release_date or "0000")[:4] or 0)
+
+    log(f"status: success (manual, {media_type}/{tmdb_id})")
+    return {
+        "success": True,
+        "reason": None,
+        "needs_rename": False,
+        "canonical_repo_name": None,
+        "media_type": media_type,
+        "tmdb_id": tmdb_id,
+        "imdb_id": detail.get("external_ids", {}).get("imdb_id"),
+        "title_en": title_en,
+        "title_zh": title_zh,
+        "year": year,
+        "overview_zh": detail.get("overview"),
+        "poster_path": detail.get("poster_path"),
+        "original_language": detail.get("original_language"),
     }
 
 
