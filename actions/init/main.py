@@ -166,8 +166,10 @@ def apply_init_manifest(manifest_path, source_root, dest_root, overwrite):
         dest_path.parent.mkdir(parents=True, exist_ok=True)
         if action == "copy":
             shutil.copy2(source_root / source, dest_path)
+            log(f"manifest: copied {source} -> {destination}")
         elif action == "touch":
             dest_path.touch(exist_ok=True)
+            log(f"manifest: touched {destination}")
         else:
             log(f"unknown manifest action {action!r} for {destination}, skipping")
             continue
@@ -178,8 +180,11 @@ def apply_init_manifest(manifest_path, source_root, dest_root, overwrite):
         subprocess.run(f'git diff --staged --quiet || git commit -m "{msg}"', shell=True, check=True)
 
 
+SCRIPT_NAME = "init_main"
+
+
 def log(message):
-    print(message, file=sys.stderr)
+    print(f"{SCRIPT_NAME}: {message}", file=sys.stderr)
 
 
 def read_template(path):
@@ -317,6 +322,7 @@ def render_home_readme(repo_name, header_block, forced, github_repository=""):
 
 
 def call_github_api(url, github_token, method, payload_dict):
+    log(f"query (github api): {method} {url}")
     payload = json.dumps(payload_dict).encode("utf-8")
     request = urllib.request.Request(
         url,
@@ -450,6 +456,8 @@ def main():
     github_token = args.github_token or os.environ.get("ORG_ADMIN_TOKEN")
     tavily_key = args.tavily_api_key or os.environ.get("TAVILY_API_KEY")
     serpstack_key = args.serpstack_api_key or os.environ.get("SERPSTACK_API_KEY")
+
+    log(f"start: repo_name={args.repo_name} github_repository={args.github_repository} force_init={args.force_init} manual_id={args.manual_id!r}")
 
     if already_initialized() and not args.force_init:
         log("README.md already carries the init marker, this repo was initialized before — skipping to avoid overwriting manual edits")
