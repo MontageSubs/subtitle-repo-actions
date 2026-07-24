@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: prompt_build.py
-# Version: 1.2.0
+# Version: 1.2.1
 # Organization: MontageSubs (蒙太奇字幕组)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -73,7 +73,7 @@ This exact header row and separator row are required. Include only entities that
 This exact header row and separator row are required. Include every crew role actually documented in infobox/tmdb_credits, not only the ones named below — if the source lists a role omitted here (选角导演、服装设计、视觉特效等), still include it using the source's own role name. Always include the director if present. Order the commonly-known roles by priority, skipping only ones missing from the source: 发行公司 > 制作公司 > 导演 > 制片人 > 编剧 > 摄影 > 剪辑 > 配乐, then append any other documented role after them (series may instead have 出品方/总导演/编剧统筹).
 
 **Shared translation rule for both tables:**
-Prefer an entity's existing common Simplified Chinese rendering (e.g. Walt Disney Pictures --> 华特迪士尼影业, James Wan --> 温子仁, not a literal transliteration). Otherwise, translate meaningful/descriptive words semantically and transliterate proper or mythological names by convention, then append the role suffix (影业/公司/工作室 etc) matching the source. Only keep untranslated a pure brand abbreviation with no descriptive or proper-noun content (e.g. HBO) — never leave a name untranslated merely out of uncertainty.
+Translation priority: (1) for well-known people or entities, use their existing established Chinese rendering, following Mainland Simplified Chinese naming conventions and vocabulary habits, not Traditional Chinese/Hong Kong-Taiwan conventions (e.g. Walt Disney Pictures --> 华特迪士尼影业, James Wan --> 温子仁); (2) otherwise, translate fully using professional judgment matching entity type — transliteration for personal names, semantic translation for descriptive/invented terms, then append the role suffix (影业/公司/娱乐/工作室 etc) matching the source — applied consistently across the whole entity, no leaving part of it untranslated out of uncertainty. An acronym/initialism follows the same priority: if it has an established Chinese rendering, use it; if it's a meaningful abbreviation whose expansion can be translated, translate that; only when it carries no translatable lexical content of its own does it remain as letters.
 
 ## 情节线
 One line, arrows follow General Rule 2.
