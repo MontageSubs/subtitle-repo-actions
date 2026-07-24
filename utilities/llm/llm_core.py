@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: llm_core.py
-# Version: 2.0.1
+# Version: 2.0.0
 # Organization: MontageSubs (蒙太奇字幕组)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -400,7 +400,7 @@ def resolve_hf_model(cli_value):
     return cli_value or os.environ.get(HF_MODEL_ENV, HF_DEFAULT_MODEL)
 
 
-def complete(messages, max_tokens=4096, temperature=0.7,
+def complete(messages, max_tokens=8192, temperature=0.7,
              google_token=None, google_model=None, thinking_budget=None,
              hf_token=None, hf_model=None, debug=False):
     if not isinstance(messages, list) or not messages:
@@ -442,44 +442,35 @@ def complete(messages, max_tokens=4096, temperature=0.7,
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--prompt-data", default=None, help="JSON from prompt_build.py")
     parser.add_argument("--google-token", default=None)
     parser.add_argument("--google-model", default=None)
     parser.add_argument("--thinking-budget", type=int, default=None)
     parser.add_argument("--hf-token", default=None)
     parser.add_argument("--hf-model", default=None)
-    parser.add_argument("--max-tokens", type=int, default=4096)
+    parser.add_argument("--max-tokens", type=int, default=8192)
     parser.add_argument("--temperature", type=float, default=0.7)
+    parser.add_argument("--prompt-data", default=None,
+                         help="JSON output from prompt_build.py; reads stdin if omitted")
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
 
-    if args.prompt_data:
-        try:
-            prompt_data = json.loads(args.prompt_data)
-        except json.JSONDecodeError as e:
-            print(json.dumps(fail(ERROR_INVALID_INPUT, f"invalid json in prompt_data: {e}"), ensure_ascii=False))
-            return
-        if not prompt_data.get("success"):
-            print(json.dumps(fail("prompt_data_failed", prompt_data.get("reason")), ensure_ascii=False))
-            return
-        messages = prompt_data.get("messages")
-        max_tokens = prompt_data.get("max_tokens", args.max_tokens)
-        temperature = prompt_data.get("temperature", args.temperature)
-    else:
-        try:
-            raw_input = sys.stdin.read()
-            input_data = json.loads(raw_input) if raw_input.strip() else {}
-        except json.JSONDecodeError as e:
-            print(json.dumps(fail(ERROR_INVALID_INPUT, f"invalid json on stdin: {e}"), ensure_ascii=False))
-            return
-        messages = input_data.get("messages")
-        max_tokens = input_data.get("max_tokens", args.max_tokens)
-        temperature = input_data.get("temperature", args.temperature)
+    try:
+        raw_input = args.prompt_data if args.prompt_data is not None else sys.stdin.read()
+        input_data = json.loads(raw_input) if raw_input.strip() else {}
+    except json.JSONDecodeError as e:
+        print(json.dumps(fail(ERROR_INVALID_INPUT, f"invalid json on stdin: {e}"), ensure_ascii=False))
+        return
+
+    if not input_data.get("success", True):
+        result = fail("prompt_data_failed", input_data.get("reason"))
+        result["provider"] = None
+        print(json.dumps(result, ensure_ascii=False))
+        return
 
     result = complete(
-        messages=messages,
-        max_tokens=max_tokens,
-        temperature=temperature,
+        messages=input_data.get("messages"),
+        max_tokens=input_data.get("max_tokens", args.max_tokens),
+        temperature=input_data.get("temperature", args.temperature),
         google_token=resolve_google_token(args.google_token),
         google_model=resolve_google_model(args.google_model),
         thinking_budget=resolve_google_thinking_budget(args.thinking_budget),
