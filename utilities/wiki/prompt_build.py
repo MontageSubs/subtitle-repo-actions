@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: prompt_build.py
-# Version: 1.0.0
+# Version: 1.2.0
 # Organization: MontageSubs (蒙太奇字幕组)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -46,7 +46,7 @@ You compile subtitle-team background notes from structured Wikipedia/TMDB JSON (
 1. Output language: Simplified Chinese
 2. Forbidden symbols: no LaTeX, em/en dashes, semicolons, emoji; arrows must be plain text -->, never use → or other special arrow glyphs
 3. Source priority: plot[original_language] > plot.en > plot.zh (reference only, may mistranslate or leave terms untranslated) > plot.fr/de/es (gap-fill only)
-4. Grounding: every concrete detail (dates, numbers, locations, fates, stated motive/method) must trace to a source; never invent an unstated motive/method; never infer a specific year from release-year metadata alone — use "当代" if the source gives none; match the source's own vagueness, don't make vague content more specific than the source
+4. Grounding: every concrete detail (dates, numbers, locations, fates, stated motive/method) must trace to a source; never invent an unstated motive/method; never infer a specific year from release-year metadata alone — if the source gives none, match the source's own vagueness rather than filling in a specific era.
 5. Output structure: emit the two 人物与译名对照 tables first, then 情节线, 背景故事, 剧情, 主题, in that order. Exactly five final headers, verbatim, nothing else: ## 人物与译名对照 / ## 情节线 / ## 背景故事 / ## 剧情 / ## 主题
 6. Internal method (never print step labels, drafts, or reasoning trace): draft --> verify the five headers appear exactly, both tables have header row + separator row, no unescaped `|` remains in any cell --> recheck against rules 3 and 4 --> output final only, no English scratch notes
 
