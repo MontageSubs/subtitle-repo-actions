@@ -51,9 +51,11 @@ from pathlib import Path
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(REPO_ROOT, "utilities", "tmdb", "search"))
 sys.path.insert(0, os.path.join(REPO_ROOT, "utilities", "douban", "search"))
+sys.path.insert(0, os.path.join(REPO_ROOT, "utilities", "wiki"))
 
 import tmdb_lookup
 import douban_id_lookup
+import synopsis_pipeline
 
 TEMPLATES_DIR = os.path.join(REPO_ROOT, "default-docs", "templates", "readme")
 ERROR_TEMPLATE = os.path.join(TEMPLATES_DIR, "error", "error.md")
@@ -431,6 +433,10 @@ def main():
     parser.add_argument("--tavily-api-key", default=None)
     parser.add_argument("--serpstack-api-key", default=None)
     parser.add_argument(
+        "--manual-id", default=None,
+        help="手动指定 TMDB/IMDb ID 或其页面 URL，跳过按仓库名的 TMDB 搜索与命名校验，直接按该 ID 拉取详情",
+    )
+    parser.add_argument(
         "--force-init", action="store_true",
         help=(
             "强制初始化：忽略仓库是否已初始化，清空工作区（.git/.github 除外）"
@@ -455,50 +461,58 @@ def main():
     workspace_dir = Path(os.environ.get("GITHUB_WORKSPACE", "."))
     manifest_path = Path(__file__).parent / "manifest.md"
 
-    tmdb_result = tmdb_lookup.resolve(args.repo_name, tmdb_token)
-
-    if not tmdb_result["success"]:
-        reason = tmdb_result["reason"]
-        if reason == "not_found" and args.force_init:
-            reset_workspace(workspace_dir)
-            apply_init_manifest(manifest_path, repo_root, workspace_dir, overwrite=True)
-            header_block = build_manual_header(args.repo_name, tmdb_result)
-            render_home_readme(args.repo_name, header_block, forced=True)
-            print(json.dumps({"stage": "manual", "success": True, "forced": True}, ensure_ascii=False))
-            sys.exit(0)
-        if (
-            reason in AUTO_RENAME_REASONS
-            and tmdb_result.get("expected_title")
-            and tmdb_result.get("expected_year")
-        ):
-            corrected_name = tmdb_lookup.to_repo_name(
-                tmdb_result["expected_title"], tmdb_result["expected_year"],
-            )
-            renamed, new_full_name = rename_repository(args.github_repository, github_token, corrected_name)
-            if renamed:
-                log(f"naming mismatch auto-corrected: {args.repo_name} -> {corrected_name}, resuming")
-                args.repo_name = corrected_name
-                args.github_repository = new_full_name
-                tmdb_result = tmdb_lookup.resolve(args.repo_name, tmdb_token)
+    if args.manual_id:
+        tmdb_result = tmdb_lookup.resolve_manual(args.manual_id, tmdb_token)
         if not tmdb_result["success"]:
             reason = tmdb_result["reason"]
-            if reason in NAMING_ERROR_REASONS:
-                rendered = render_error_readme(tmdb_result, args.repo_name)
-                print(json.dumps({"stage": "tmdb", "success": False, "rendered_error_readme": rendered}, ensure_ascii=False))
-                sys.exit(0)
-            log(f"infra-level failure ({reason}), leaving README untouched")
-            print(json.dumps({"stage": "tmdb", "success": False, "reason": reason}, ensure_ascii=False))
+            log(f"manual id resolution failed ({reason}), leaving README untouched")
+            print(json.dumps({"stage": "tmdb_manual", "success": False, "reason": reason}, ensure_ascii=False))
             sys.exit(1)
+    else:
+        tmdb_result = tmdb_lookup.resolve(args.repo_name, tmdb_token)
 
-    if tmdb_result.get("needs_rename"):
-        canonical_name = tmdb_result["canonical_repo_name"]
-        renamed, new_full_name = rename_repository(args.github_repository, github_token, canonical_name)
-        if renamed:
-            log(f"format normalized: {args.repo_name} -> {canonical_name}")
-            args.repo_name = canonical_name
-            args.github_repository = new_full_name
-        else:
-            log("format-normalization rename unavailable, proceeding with original repo name")
+        if not tmdb_result["success"]:
+            reason = tmdb_result["reason"]
+            if reason == "not_found" and args.force_init:
+                reset_workspace(workspace_dir)
+                apply_init_manifest(manifest_path, repo_root, workspace_dir, overwrite=True)
+                header_block = build_manual_header(args.repo_name, tmdb_result)
+                render_home_readme(args.repo_name, header_block, forced=True)
+                print(json.dumps({"stage": "manual", "success": True, "forced": True}, ensure_ascii=False))
+                sys.exit(0)
+            if (
+                reason in AUTO_RENAME_REASONS
+                and tmdb_result.get("expected_title")
+                and tmdb_result.get("expected_year")
+            ):
+                corrected_name = tmdb_lookup.to_repo_name(
+                    tmdb_result["expected_title"], tmdb_result["expected_year"],
+                )
+                renamed, new_full_name = rename_repository(args.github_repository, github_token, corrected_name)
+                if renamed:
+                    log(f"naming mismatch auto-corrected: {args.repo_name} -> {corrected_name}, resuming")
+                    args.repo_name = corrected_name
+                    args.github_repository = new_full_name
+                    tmdb_result = tmdb_lookup.resolve(args.repo_name, tmdb_token)
+            if not tmdb_result["success"]:
+                reason = tmdb_result["reason"]
+                if reason in NAMING_ERROR_REASONS:
+                    rendered = render_error_readme(tmdb_result, args.repo_name)
+                    print(json.dumps({"stage": "tmdb", "success": False, "rendered_error_readme": rendered}, ensure_ascii=False))
+                    sys.exit(0)
+                log(f"infra-level failure ({reason}), leaving README untouched")
+                print(json.dumps({"stage": "tmdb", "success": False, "reason": reason}, ensure_ascii=False))
+                sys.exit(1)
+
+        if tmdb_result.get("needs_rename"):
+            canonical_name = tmdb_result["canonical_repo_name"]
+            renamed, new_full_name = rename_repository(args.github_repository, github_token, canonical_name)
+            if renamed:
+                log(f"format normalized: {args.repo_name} -> {canonical_name}")
+                args.repo_name = canonical_name
+                args.github_repository = new_full_name
+            else:
+                log("format-normalization rename unavailable, proceeding with original repo name")
 
     if args.force_init:
         reset_workspace(workspace_dir)
@@ -516,11 +530,19 @@ def main():
     header_block = build_verified_header(args.repo_name, tmdb_result, douban_result)
     render_home_readme(args.repo_name, header_block, forced=args.force_init)
 
+    synopsis_result = synopsis_pipeline.run(
+        tmdb_result,
+        output_dir=str(workspace_dir / "docs" / "synopsis"),
+        tmdb_token=tmdb_token,
+        with_glossary=True,
+    )
+
     print(json.dumps({
         "stage": "home",
         "success": True,
         "tmdb": tmdb_result,
         "douban": douban_result,
+        "synopsis": synopsis_result,
     }, ensure_ascii=False))
 
 
