@@ -851,9 +851,9 @@ def fetch_tmdb_detail(tmdb_id, media_type, token):
     }, None
 
 
-def fetch_tmdb_overview_zh(tmdb_id, media_type, token):
-    log(f"query (tmdb overview zh): {media_type}/{tmdb_id}")
-    body, error = call_tmdb(f"/{media_type}/{tmdb_id}", token, params={"language": "zh-CN"})
+def fetch_tmdb_overview(tmdb_id, media_type, token, language):
+    log(f"query (tmdb overview {language}): {media_type}/{tmdb_id}")
+    body, error = call_tmdb(f"/{media_type}/{tmdb_id}", token, params={"language": language})
     if error:
         return None, error
     return body.get("overview"), None
@@ -874,12 +874,26 @@ def build_wiki_links(plot_languages, plot, sitelinks):
 def empty_result(reason, **extra):
     result = {
         "success": False, "reason": reason, "detail": None,
-        "wikidata_qid": None, "lead": None, "infobox": {},
+        "wiki_available": False, "wikidata_qid": None, "lead": None, "infobox": {},
         "plot": {}, "cast": {}, "reception": {}, "tmdb_credits": None, "tmdb_detail": None,
-        "overview_zh": None, "wiki_links": [],
+        "overview_zh": None, "overview_en": None, "wiki_links": [],
     }
     result.update(extra)
     return result
+
+
+def resolve_wiki_entity(imdb_id):
+    if not imdb_id:
+        log("wiki degraded: no imdb id to resolve against wikidata")
+        return None
+    entity, error = resolve_wikidata_entity(imdb_id)
+    if error:
+        log(f"wiki degraded: wikidata lookup failed ({error['type']})")
+        return None
+    if not entity:
+        log("wiki degraded: no wikidata entity for this imdb id")
+        return None
+    return entity
 
 
 def fetch(imdb_id, tmdb_id, media_type, original_language, tmdb_token, language_priority=DEFAULT_LANGUAGE_PRIORITY, language_limit=None):
@@ -887,15 +901,31 @@ def fetch(imdb_id, tmdb_id, media_type, original_language, tmdb_token, language_
         log(f"status: failed ({ERROR_NO_TOKEN})")
         return empty_result(ERROR_NO_TOKEN)
 
-    entity, error = resolve_wikidata_entity(imdb_id)
+    tmdb_credits, error = fetch_tmdb_credits(tmdb_id, media_type, tmdb_token)
     if error:
         log(f"status: failed ({error['type']})")
         return empty_result(error["type"], detail=error["detail"])
-    if not entity:
-        log(f"status: failed ({ERROR_NOT_FOUND})")
-        return empty_result(ERROR_NOT_FOUND, detail="no wikidata entity for this imdb id")
 
-    sitelinks = entity["sitelinks"]
+    tmdb_detail, error = fetch_tmdb_detail(tmdb_id, media_type, tmdb_token)
+    if error:
+        log(f"status: failed ({error['type']})")
+        return empty_result(error["type"], detail=error["detail"])
+
+    overview_zh, error = fetch_tmdb_overview(tmdb_id, media_type, tmdb_token, "zh-CN")
+    if error:
+        log(f"status: failed ({error['type']})")
+        return empty_result(error["type"], detail=error["detail"])
+
+    overview_en = None
+    if not overview_zh:
+        overview_en, error = fetch_tmdb_overview(tmdb_id, media_type, tmdb_token, "en-US")
+        if error:
+            log(f"overview_en fallback failed ({error['type']}), continuing without it")
+            overview_en = None
+
+    entity = resolve_wiki_entity(imdb_id)
+    wiki_available = entity is not None
+    sitelinks = entity["sitelinks"] if entity else {}
     plot_languages = resolve_plot_languages(original_language, language_priority, language_limit)
     cast_languages = list(dict.fromkeys([original_language, *CAST_LANGUAGES]))
     reception_languages = list(dict.fromkeys([original_language, "en", "fr"]))
@@ -960,30 +990,17 @@ def fetch(imdb_id, tmdb_id, media_type, original_language, tmdb_token, language_
         else:
             log(f"infobox not found or unmapped ({lang}), check INFOBOX_FIELD_MAP")
 
-    tmdb_credits, error = fetch_tmdb_credits(tmdb_id, media_type, tmdb_token)
-    if error:
-        log(f"status: failed ({error['type']})")
-        return empty_result(error["type"], detail=error["detail"])
-
-    tmdb_detail, error = fetch_tmdb_detail(tmdb_id, media_type, tmdb_token)
-    if error:
-        log(f"status: failed ({error['type']})")
-        return empty_result(error["type"], detail=error["detail"])
-
-    overview_zh, error = fetch_tmdb_overview_zh(tmdb_id, media_type, tmdb_token)
-    if error:
-        log(f"status: failed ({error['type']})")
-        return empty_result(error["type"], detail=error["detail"])
-
-    log(f"summary: plot={list(plot.keys())} cast={list(cast.keys())} reception={list(reception.keys())} infobox={list(infobox.keys())}")
-    log("status: success")
+    log(f"summary: wiki_available={wiki_available} plot={list(plot.keys())} cast={list(cast.keys())} "
+        f"reception={list(reception.keys())} infobox={list(infobox.keys())}")
+    log("status: success" if wiki_available else "status: success (degraded, no wiki)")
     return {
         "success": True, "reason": None, "detail": None,
-        "wikidata_qid": entity["qid"],
+        "wiki_available": wiki_available,
+        "wikidata_qid": entity["qid"] if entity else None,
         "lead": lead, "infobox": infobox,
         "plot": plot, "cast": cast, "reception": reception,
         "tmdb_credits": tmdb_credits, "tmdb_detail": tmdb_detail,
-        "overview_zh": overview_zh,
+        "overview_zh": overview_zh, "overview_en": overview_en,
         "wiki_links": build_wiki_links(plot_languages, plot, sitelinks),
     }
 

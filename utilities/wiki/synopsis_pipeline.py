@@ -49,9 +49,10 @@ def run(tmdb_result, output_dir, tmdb_token,
         media_type=tmdb_result["media_type"], original_language=original_language,
         tmdb_token=tmdb_token, language_priority=plot_languages, language_limit=language_limit,
     )
-    log(f"stage (wiki): imdb_id={tmdb_result['imdb_id']} tmdb_id={tmdb_result['tmdb_id']}")
+    log(f"stage (wiki): imdb_id={tmdb_result['imdb_id']} tmdb_id={tmdb_result['tmdb_id']} "
+        f"wiki_available={wiki_result.get('wiki_available')}")
     if not wiki_result["success"]:
-        log(f"wiki fetch failed ({wiki_result['reason']})")
+        log(f"data fetch failed ({wiki_result['reason']})")
         return {"stage": "wiki", **wiki_result}
 
     messages = prompt_build.build_messages(wiki_result, original_language, plot_languages, language_limit)
@@ -78,10 +79,11 @@ def run(tmdb_result, output_dir, tmdb_token,
         return {"stage": "llm", **llm_result}
 
     log(f"stage (render): provider={llm_result.get('provider')} with_glossary={with_glossary}")
+    tmdb_url = f"https://www.themoviedb.org/{tmdb_result['media_type']}/{tmdb_result['tmdb_id']}?language=zh-CN"
     rendered = synopsis_render.render(
         title_en=tmdb_result["title_en"],
         title_zh=tmdb_result["title_zh"] or tmdb_result["title_en"],
-        year=tmdb_result["year"], wiki_result=wiki_result, llm_result=llm_result,
+        year=tmdb_result["year"], wiki_result=wiki_result, llm_result=llm_result, tmdb_url=tmdb_url,
         output_dir=output_dir, with_glossary=with_glossary,
     )
     log(f"status: {'success' if rendered['success'] else 'render failed (' + str(rendered['reason']) + ')'}")

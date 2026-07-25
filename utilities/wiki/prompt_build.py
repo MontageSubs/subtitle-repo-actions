@@ -59,11 +59,15 @@ You compile subtitle-team background notes from structured Wikipedia/TMDB JSON, 
 2. Forbidden symbols: no LaTeX, em/en dashes, semicolons, emoji; arrows must be plain text -->, never use → or other special arrow glyphs
 3. Source priority: plot[original_language] > plot.en > plot.zh (reference only, may mistranslate or leave terms untranslated) > plot.fr/de/es (gap-fill only)
 4. Grounding: every concrete detail (dates, numbers, locations, fates, stated motive/method) must trace to a source; never invent an unstated motive/method; never infer a specific year from release-year metadata alone — if the source gives none, match the source's own vagueness rather than filling in a specific era.
-5. Output structure: emit the two 人物与译名对照 tables first, then 情节线, 背景故事, 剧情, 主题, in that order. Exactly five final headers, verbatim, nothing else: ## 人物与译名对照 / ## 情节线 / ## 背景故事 / ## 剧情 / ## 主题
-6. Internal method (never print step labels, drafts, or reasoning trace): draft --> verify the five headers appear exactly, both tables have header row + separator row, no unescaped `|` remains in any cell --> recheck against rules 3 and 4 --> output final only, no English scratch notes
+5. Output structure: emit 简介 first, then the two 人物与译名对照 tables, then 情节线, 背景故事, 剧情, 主题, in that order. Exactly six final headers, verbatim, nothing else: ## 简介 / ## 人物与译名对照 / ## 情节线 / ## 背景故事 / ## 剧情 / ## 主题
+6. Internal method (never print step labels, drafts, or reasoning trace): draft --> verify the six headers appear exactly, both tables have header row + separator row, no unescaped `|` remains in any cell --> recheck against rules 3 and 4 --> output final only, no English scratch notes
 7. reception (if present) is raw Wikipedia critical-reception prose, kept separate from plot/lead on purpose; it may still contain leftover box-office or award-ceremony sentences the extraction missed — silently ignore anything that isn't evaluative commentary. Use it only to deepen 主题, never to add concrete plot facts, and never let it leak into 剧情. When a claim comes from it, attribute it to the outlet/critic phrase as the source states it (e.g. 纽约时报影评人认为); **Maintain strict 1:1 accuracy for outlets and critics; never conflate similar entities (e.g., The New Yorker is NOT The New York Times).** Never invent an unstated critic or outlet, and never present its opinions as the film's own narrative content.
 
 # Section Rules
+
+## 简介
+A short non-spoiler back-cover-style blurb in Simplified Chinese, roughly 80-200 characters, one paragraph, no bullets. State only the premise/setup (who, where, what situation) that a synopsis on a streaming platform would reveal; never state how the story resolves, twists, or ends, and never state facts that only appear deep in 剧情/背景故事.
+`human_overview` in the input (if present) is an existing human/TMDB-sourced blurb for the same film, possibly machine-translated or awkwardly phrased. Treat it only as a factual reference for the premise, never copy its wording verbatim, and never reproduce its phrasing or sentence structure. Your version must read as fluent, professional Simplified Chinese prose and must not fall short of it in clarity, correctness, or polish; if `human_overview` is missing entirely, write the blurb from `lead`/`infobox`/`tmdb_credits` alone.
 
 ## 人物与译名对照
 
@@ -170,6 +174,7 @@ def build_user_payload(fetch_result, original_language, language_priority, langu
         "reception": fetch_result.get("reception"),
         "tmdb_credits": dedupe_tmdb_credits(fetch_result.get("tmdb_credits"), cast, infobox),
         "tmdb_detail": fetch_result.get("tmdb_detail"),
+        "human_overview": fetch_result.get("overview_zh") or fetch_result.get("overview_en"),
     }
 
 

@@ -84,7 +84,7 @@ def render_regenerate_url(repository):
         return "#"
     return f"https://github.com/{repository}/actions/workflows/{SYNOPSIS_WORKFLOW_FILE}"
 
-REQUIRED_SECTIONS = ("人物与译名对照", "情节线", "背景故事", "剧情", "主题")
+REQUIRED_SECTIONS = ("简介", "人物与译名对照", "情节线", "背景故事", "剧情", "主题")
 
 SECTION_PATTERN = re.compile(r"^## (.+?)\s*$\n(.*?)(?=^## |\Z)", re.MULTILINE | re.DOTALL)
 TABLE_PATTERN = re.compile(r"(\|.+\|(?:\n\|.+\|)+)")
@@ -192,10 +192,12 @@ def split_glossary_tables(tables_block):
     return tables[0].strip(), tables[1].strip()
 
 
-def render_wiki_links_line(title_en, year, wiki_links):
-    anchors = " · ".join(f"[{link['label']}]({link['url']})" for link in wiki_links)
+def render_source_links_line(title_en, year, wiki_links, tmdb_url):
     heading = f"**{title_en} ({year})**"
-    return f"{heading} · {anchors}" if anchors else heading
+    if wiki_links:
+        anchors = " · ".join(f"[{link['label']}]({link['url']})" for link in wiki_links)
+        return f"{heading} · {anchors}"
+    return f"{heading} · [TMDB]({tmdb_url})"
 
 
 def provider_display(provider):
@@ -234,14 +236,14 @@ def write_file(path, content):
         f.write(content)
 
 
-def render(title_en, title_zh, year, wiki_result, llm_result, output_dir=None,
+def render(title_en, title_zh, year, wiki_result, llm_result, tmdb_url, output_dir=None,
            synopsis_out=None, glossary_out=None, with_glossary=False, templates_dir=None,
            repository=None):
     try:
         if not llm_result.get("success"):
             raise RenderError("upstream_llm_failed", llm_result.get("reason"))
         if not wiki_result.get("success", True):
-            raise RenderError("upstream_wiki_failed", wiki_result.get("reason"))
+            raise RenderError("upstream_data_failed", wiki_result.get("reason"))
 
         sections = parse_llm_sections(llm_result["content"])
         log(f"parsed sections: {list(sections.keys())}")
@@ -264,18 +266,19 @@ def render(title_en, title_zh, year, wiki_result, llm_result, output_dir=None,
 
         resolved_templates_dir = resolve_templates_dir(templates_dir)
         provider = provider_display(llm_result.get("provider"))
-        wiki_links_line = render_wiki_links_line(title_en, year, wiki_result.get("wiki_links") or [])
+        overview = clean_prose(resolved["简介"])
+        source_links_line = render_source_links_line(title_en, year, wiki_result.get("wiki_links") or [], tmdb_url)
         regenerate_action_url = render_regenerate_url(resolve_repository(repository))
 
         write_file(resolved_synopsis_out, read_template(os.path.join(resolved_templates_dir, "SYNOPSIS.md")).format(
             title_zh=title_zh, year=year,
-            overview_zh=fix_emphasis_spacing(wiki_result.get("overview_zh") or ""),
+            overview=overview,
             table_cast=table_cast, table_production=table_production,
             plot_outline=clean_prose(resolved["情节线"]),
             background=clean_prose(resolved["背景故事"]),
             synopsis=clean_prose(resolved["剧情"]),
             theme=clean_prose(resolved["主题"]),
-            wiki_links_line=wiki_links_line, provider=provider,
+            source_links_line=source_links_line, provider=provider,
             regenerate_action_url=regenerate_action_url,
         ))
         log(f"wrote: {resolved_synopsis_out}")
@@ -284,7 +287,7 @@ def render(title_en, title_zh, year, wiki_result, llm_result, output_dir=None,
             write_file(resolved_glossary_out, read_template(os.path.join(resolved_templates_dir, "GLOSSARY.md")).format(
                 title_zh=title_zh, year=year,
                 table_cast=table_cast, table_production=table_production,
-                wiki_links_line=wiki_links_line, provider=provider,
+                source_links_line=source_links_line, provider=provider,
                 regenerate_action_url=regenerate_action_url,
             ))
             log(f"wrote: {resolved_glossary_out}")
@@ -293,6 +296,7 @@ def render(title_en, title_zh, year, wiki_result, llm_result, output_dir=None,
             "success": True, "reason": None,
             "synopsis_path": resolved_synopsis_out,
             "glossary_path": resolved_glossary_out,
+            "overview": overview,
         }
     except RenderError as e:
         return {"success": False, "reason": e.reason, "detail": e.detail}
@@ -303,6 +307,8 @@ def main():
     parser.add_argument("--title-en", required=True)
     parser.add_argument("--title-zh", required=True)
     parser.add_argument("--year", required=True, type=int)
+    parser.add_argument("--tmdb-url", required=True,
+                         help="TMDB detail page URL, used as the source-links fallback when wiki is unavailable")
     parser.add_argument("--wiki-data", default=None,
                          help="JSON with overview_zh/wiki_links; reads merged stdin if omitted")
     parser.add_argument("--llm-data", default=None,
@@ -323,7 +329,7 @@ def main():
     synopsis_out, glossary_out = resolve_output_paths(args)
 
     result = render(
-        args.title_en, args.title_zh, args.year, wiki_result, llm_result,
+        args.title_en, args.title_zh, args.year, wiki_result, llm_result, args.tmdb_url,
         output_dir=args.output_dir, synopsis_out=synopsis_out, glossary_out=glossary_out,
         with_glossary=args.with_glossary, templates_dir=args.templates_dir,
         repository=args.repository,
