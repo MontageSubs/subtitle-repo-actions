@@ -56,6 +56,8 @@ def run(tmdb_result, output_dir, tmdb_token,
 
     messages = prompt_build.build_messages(wiki_result, original_language, plot_languages, language_limit)
     log(f"stage (llm): {len(messages)} messages assembled, dispatching to llm_core")
+    if debug:
+        prompt_build.debug_dump(messages, language_limit, plot_languages)
     llm_result = llm_core.complete(
         messages=messages,
         max_tokens=max_tokens or prompt_build.DEFAULT_MAX_TOKENS,
