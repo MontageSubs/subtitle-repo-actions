@@ -468,10 +468,11 @@ def main():
             if reason == "not_found" and args.force_init:
                 reset_workspace(workspace_dir)
                 apply_init_manifest(manifest_path, repo_root, workspace_dir, overwrite=True)
-                secret_provision.provision(
+                provision_result = secret_provision.provision(
                     args.github_repository, github_token,
                     {name: os.environ.get(name) for name in PROVISIONABLE_SECRETS},
                 )
+                log(f"secret provisioning: {provision_result}")
                 header_block = build_manual_header(args.repo_name, tmdb_result)
                 render_home_readme(args.repo_name, header_block, forced=True)
                 print(json.dumps({"stage": "manual", "success": True, "forced": True}, ensure_ascii=False))
@@ -523,18 +524,21 @@ def main():
     )
 
     update_github_repo_metadata(args.github_repository, github_token, tmdb_result)
-    secret_provision.provision(
+    provision_result = secret_provision.provision(
         args.github_repository, github_token,
         {name: os.environ.get(name) for name in PROVISIONABLE_SECRETS},
     )
+    log(f"secret provisioning: {provision_result}")
     header_block = build_verified_header(args.repo_name, tmdb_result, douban_result)
     render_home_readme(args.repo_name, header_block, forced=args.force_init)
 
+    debug = os.environ.get("DEBUG", "").strip().lower() in ("1", "true", "yes")
     synopsis_result = synopsis_pipeline.run(
         tmdb_result,
         output_dir=str(workspace_dir / "docs" / "synopsis"),
         tmdb_token=tmdb_token,
         with_glossary=True,
+        debug=debug,
     )
 
     print(json.dumps({
@@ -543,6 +547,7 @@ def main():
         "tmdb": tmdb_result,
         "douban": douban_result,
         "synopsis": synopsis_result,
+        "secret_provisioning": provision_result,
     }, ensure_ascii=False))
 
 
