@@ -57,7 +57,6 @@ sys.path.insert(0, os.path.join(REPO_ROOT, "utilities", "github", "env"))
 
 import tmdb_lookup
 import douban_id_lookup
-import synopsis_pipeline
 import secret_provision
 from github_api import call_api, is_debug, requires_org_admin_token
 from repo_vars import load_repo_vars
@@ -202,6 +201,14 @@ SCRIPT_NAME = "init_main"
 
 def log(message):
     print(f"{SCRIPT_NAME}: {message}", file=sys.stderr)
+
+
+def mark_rendered():
+    github_output = os.environ.get("GITHUB_OUTPUT")
+    if not github_output:
+        return
+    with open(github_output, "a", encoding="utf-8") as f:
+        f.write("rendered=true\n")
 
 
 def read_template(path):
@@ -546,29 +553,15 @@ def main():
     log_secret_provisioning(provision_result)
     header_block = build_verified_header(args.repo_name, tmdb_result, douban_result)
     render_home_readme(args.repo_name, header_block, forced=args.force_init)
+    mark_rendered()
 
-    synopsis_output_dir = workspace_dir / "docs" / "synopsis"
-    glossary_path = synopsis_output_dir / "GLOSSARY.md"
-    with_glossary = args.force_init or not glossary_path.exists()
-    if not with_glossary:
-        log("GLOSSARY.md already exists and --force-init not set, skipping its regeneration")
-
-    synopsis_result = synopsis_pipeline.run(
-        tmdb_result,
-        output_dir=str(synopsis_output_dir),
-        tmdb_token=tmdb_token,
-        with_glossary=with_glossary,
-        debug=is_debug(),
-    )
-
-    log(f"status: success (douban={douban_result.get('success')}, secrets={sum(provision_result.values())}/{len(provision_result)}, synopsis={synopsis_result.get('success')})")
+    log(f"status: success (douban={douban_result.get('success')}, secrets={sum(provision_result.values())}/{len(provision_result)})")
     if is_debug():
         print(json.dumps({
             "stage": "home",
             "success": True,
             "tmdb": tmdb_result,
             "douban": douban_result,
-            "synopsis": synopsis_result,
             "secret_provisioning": provision_result,
         }, ensure_ascii=False))
 
