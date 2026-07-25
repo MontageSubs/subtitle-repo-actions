@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: douban_id_lookup.py
-# Version: 1.2.0
+# Version: 1.3.0
 # Organization: MontageSubs (蒙太奇字幕组)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -85,6 +85,10 @@ SUBJECT_URL_PATTERN = re.compile(
     r"https?://(?:m\.douban\.com/movie/subject|movie\.douban\.com/subject)/(\d+)"
 )
 
+DOUBAN_TITLE_SUFFIX_PATTERN = re.compile(
+    r"\s*-\s*(?:电影|电视剧|剧集|综艺|纪录片)\s*-\s*豆瓣\s*$"
+)
+
 TAVILY_ENDPOINT = "https://api.tavily.com/search"
 SERPSTACK_ENDPOINT = "https://api.serpstack.com/search"
 
@@ -138,6 +142,10 @@ def clean_title(title):
 
 def normalize_for_match(text):
     return re.sub(r"\s+", "", (text or "").lower())
+
+
+def strip_douban_title_suffix(title):
+    return DOUBAN_TITLE_SUFFIX_PATTERN.sub("", title or "")
 
 
 def filter_by_title_hints(candidates, title_hints):
@@ -299,11 +307,20 @@ def summarize_candidates(candidates):
     )
 
 
-# Trusts a single high-scoring result outright; without a score, only trusts
-# the result if every candidate agrees on the same id.
-# 单个高分结果可直接信任；没有分数时，只有全部候选一致指向同一ID才可信任。
-def determine_confidence_status(ranked):
+# A lone candidate whose title exactly matches a title hint (typically the
+# TMDB Chinese title) is trusted regardless of score. Otherwise: a single
+# high-scoring result is trusted outright; without a score, only trusted if
+# every candidate agrees on the same id.
+# 唯一候选且标题与提示（通常为TMDB中文片名）完全一致时，无视分数直接采信。
+# 其余情况：单个高分结果可直接信任；没有分数时，只有全部候选一致指向同一ID才可信任。
+def determine_confidence_status(ranked, title_hints=None):
     top = ranked[0]
+    if len(ranked) == 1:
+        hints = {normalize_for_match(h) for h in (title_hints or []) if h}
+        candidate_title = normalize_for_match(strip_douban_title_suffix(top["title"]))
+        if candidate_title in hints:
+            return "success"
+
     if top["score"] is not None:
         if top["score"] < LOW_CONFIDENCE_SCORE_THRESHOLD:
             return "low_confidence"
@@ -373,7 +390,7 @@ def resolve(query_terms, tavily_api_key=None, serpstack_api_key=None, title_hint
         score_part = f" score={c['score']:.3f}" if c["score"] is not None else ""
         log(f"  - {c['url']} | {c['title']}{score_part}")
 
-    confidence = determine_confidence_status(ranked)
+    confidence = determine_confidence_status(ranked, title_hints)
     success = confidence == "success"
     log(f"status: {'success' if success else 'failed (low_confidence)'}")
 
