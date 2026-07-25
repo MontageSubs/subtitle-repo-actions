@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: douban_id_lookup.py
-# Version: 1.3.0
+# Version: 1.3.1
 # Organization: MontageSubs (蒙太奇字幕组)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -222,14 +222,16 @@ def call_tavily(query, api_key, domains):
     return candidates, None
 
 
-def call_serpstack(query, api_key):
+def call_serpstack(query, api_key, hl=None, gl=None):
     if not api_key:
         return [], {"provider": "serpstack", "type": ERROR_NO_TOKEN, "detail": "no api key provided"}
 
-    params = urllib.parse.urlencode({
-        "access_key": api_key,
-        "query": query,
-    })
+    query_params = {"access_key": api_key, "query": query}
+    if hl:
+        query_params["hl"] = hl
+    if gl:
+        query_params["gl"] = gl
+    params = urllib.parse.urlencode(query_params)
     url = f"{SERPSTACK_ENDPOINT}?{params}"
 
     try:
@@ -339,7 +341,12 @@ def determine_error_reason(errors):
     return "multiple_errors"
 
 
-def resolve(query_terms, tavily_api_key=None, serpstack_api_key=None, title_hints=None):
+def resolve(query_terms, tavily_api_key=None, serpstack_api_key=None, title_hints=None,
+            zh_title=None, serpstack_hl="zh-cn", serpstack_gl="cn"):
+    if zh_title and normalize_for_match(zh_title) not in normalize_for_match(query_terms):
+        query_terms = f"{query_terms} {zh_title}"
+        title_hints = list(title_hints or []) + [zh_title]
+
     if not tavily_api_key and not serpstack_api_key:
         log(f"status: failed ({ERROR_NO_TOKEN})")
         return {
@@ -365,7 +372,7 @@ def resolve(query_terms, tavily_api_key=None, serpstack_api_key=None, title_hint
     if not candidates and serpstack_api_key:
         serpstack_query = build_scoped_query(query_terms, DOUBAN_SITES)
         log(f"query (serpstack): {serpstack_query}")
-        candidates, error = call_serpstack(serpstack_query, serpstack_api_key)
+        candidates, error = call_serpstack(serpstack_query, serpstack_api_key, serpstack_hl, serpstack_gl)
         provider_used = "serpstack"
         if error:
             log(f"serpstack error: {error['type']} ({error['detail']})")
@@ -415,6 +422,9 @@ def resolve_api_key(cli_value, env_name):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("query")
+    parser.add_argument("--zh-title", default=None)
+    parser.add_argument("--serpstack-hl", default="zh-cn")
+    parser.add_argument("--serpstack-gl", default="cn")
     parser.add_argument("--tavily-api-key", default=None)
     parser.add_argument("--serpstack-api-key", default=None)
     args = parser.parse_args()
@@ -426,6 +436,9 @@ def main():
         query_terms=args.query,
         tavily_api_key=tavily_api_key,
         serpstack_api_key=serpstack_api_key,
+        zh_title=args.zh_title,
+        serpstack_hl=args.serpstack_hl,
+        serpstack_gl=args.serpstack_gl,
     )
 
     print(json.dumps(result, ensure_ascii=False))
