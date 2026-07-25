@@ -393,8 +393,9 @@ def rename_repository(github_repository, github_token, new_name):
 def update_github_repo_metadata(github_repository, github_token, tmdb_result):
     repo_url = GITHUB_API_ENDPOINT.format(full_name=github_repository)
 
+    title_zh = f"《{tmdb_result['title_zh']}》" if tmdb_result["title_zh"] else ""
     description = (
-        f"《{tmdb_result['title_zh']}》({tmdb_result['year']}) 中文字幕协作项目 | "
+        f"{title_zh}({tmdb_result['year']}) 中文字幕协作项目 | "
         f"Chinese fansub project for \"{tmdb_result['title_en']}\" ({tmdb_result['year']})"
     )
     ok, body = call_api(repo_url, github_token, "PATCH", {
