@@ -30,8 +30,8 @@
 #    - Cast extracted from the original-language page (completeness) and
 #      the Chinese page (naming/translation reference), with per-language
 #      actor/role separators (" as " / "饰演" / " als " / " como " / etc.).
-#    - Reception extracted from the original-language + English pages
-#      only (deduped when identical), scoped to the evaluative subsection
+#    - Reception extracted from the original-language + English + French
+#      pages (deduped when identical), scoped to the evaluative subsection
 #      alone (Critical response/Critics/等) when Reception is a bucket
 #      heading with Box office/Accolades siblings, so box-office figures
 #      and award tables never enter the payload.
@@ -54,7 +54,7 @@
 #    - 演员表提取原始语言版本（信息完整）与中文版本（译名/命名参考），
 #      按语言使用不同的演员/角色分隔符（" as " / "饰演" / " als " /
 #      " como " 等）。
-#    - 评价章节仅抓取原始语言+英文（相同则去重），若Reception为票房/
+#    - 评价章节抓取原始语言+英文+法语（相同则去重），若Reception为票房/
 #      评价/獎項共用的桶状标题，会进一步定位到"评价"子章节本身，避免
 #      票房数字与获奖表格混入。
 #    - 信息栏同时从原始语言页与中文页提取，按各语言的标签-字段映射表
@@ -186,7 +186,7 @@ SECTION_ALIASES = {
     "plot": {
         "en": ("Plot",),
         "zh": ("劇情", "剧情", "劇情簡介", "剧情简介", "劇情大綱", "故事大綱", "故事簡介", "故事简介", "情節", "情节"),
-        "fr": ("Synopsis",),
+        "fr": ("Synopsis", "Résumé", "Intrigue"),
         "de": ("Handlung",),
         "es": ("Argumento", "Trama"),
         "ja": ("あらすじ", "ストーリー", "概要"),
@@ -254,7 +254,7 @@ SECTION_ALIASES = {
     "reception": {
         "en": ("Reception",),
         "zh": ("反響", "反响", "迴響", "回响", "評價", "评价", "評論", "评论"),
-        "fr": ("Accueil", "Réception"),
+        "fr": ("Accueil", "Réception", "Accueil critique", "Critique", "Critiques"),
         "de": ("Rezeption",),
         "es": ("Recepción",),
         "ja": ("評価", "反響"),
@@ -291,7 +291,7 @@ FUZZY_KEYWORDS = {
     "plot": {
         "en": ("plot",),
         "zh": ("剧情", "劇情", "故事", "大綱", "大纲", "情節", "情节"),
-        "fr": ("synopsis", "intrigue"),
+        "fr": ("synopsis", "intrigue", "résumé"),
         "de": ("handlung",),
         "es": ("argumento", "trama"),
         "ja": ("あらすじ", "ストーリー"),
@@ -359,7 +359,7 @@ FUZZY_KEYWORDS = {
     "reception": {
         "en": ("reception",),
         "zh": ("反响", "反響", "回响", "迴響", "评价", "評價", "评论", "評論"),
-        "fr": ("accueil", "réception"),
+        "fr": ("accueil", "réception", "critique"),
         "de": ("rezeption",),
         "es": ("recepción",),
         "ja": ("評価", "反響"),
@@ -395,7 +395,7 @@ FUZZY_KEYWORDS = {
 CRITICAL_RESPONSE_KEYWORDS = {
     "en": ("critical response", "critical reception", "reviews", "critics"),
     "zh": ("影評", "影评", "劇評", "剧评", "評價", "评价", "評論", "评论", "批評", "批评"),
-    "fr": ("critique",),
+    "fr": ("critique", "critiques", "presse"),
     "de": ("kritik",),
     "es": ("crítica",),
     "ja": ("評価", "批評"),
@@ -624,6 +624,7 @@ ERROR_NETWORK = "network_error"
 ERROR_NOT_IMPLEMENTED = "not_implemented"
 
 CITATION_PATTERN = re.compile(r"\[\s*\d+\s*\]")
+NOTE_REFERENCE_PATTERN = re.compile(r"\[\s*(?:注|註)[^\[\]]*\]")
 WHITESPACE_PATTERN = re.compile(r"\s+")
 
 
@@ -635,8 +636,15 @@ def log(message):
 
 
 def clean_text(text):
-    text = CITATION_PATTERN.sub("", text or "")
+    text = NOTE_REFERENCE_PATTERN.sub("", text or "")
+    text = CITATION_PATTERN.sub("", text)
     return WHITESPACE_PATTERN.sub(" ", text).strip()
+
+
+def element_text(element):
+    for br in element.find_all("br"):
+        br.replace_with("\n")
+    return element.get_text()
 
 
 def classify_http_error(code):
@@ -735,7 +743,7 @@ def find_section(soup, section_type, lang):
 
 def extract_paragraphs(container):
     paragraphs = container.find_all("p", recursive=False)
-    return clean_text(" ".join(p.get_text(" ", strip=True) for p in paragraphs))
+    return clean_text(" ".join(element_text(p) for p in paragraphs))
 
 
 def extract_lead(soup):
@@ -757,7 +765,7 @@ def extract_cast_list(section, lang):
     entries = []
     for ul in section.find_all("ul", recursive=False):
         for li in ul.find_all("li", recursive=False):
-            text = clean_text(li.get_text(" ", strip=True))
+            text = clean_text(element_text(li))
             if not text:
                 continue
             actor, role = split_actor_role(text, lang)
@@ -766,7 +774,7 @@ def extract_cast_list(section, lang):
         return entries
     for table in section.find_all("table", recursive=False):
         for row in table.find_all("tr"):
-            cells = [clean_text(cell.get_text(" ", strip=True)) for cell in row.find_all(("td", "th"))]
+            cells = [clean_text(element_text(cell)) for cell in row.find_all(("td", "th"))]
             cells = [cell for cell in cells if cell]
             if len(cells) >= 2:
                 entries.append({"actor": cells[0], "role": cells[1]})
@@ -787,8 +795,8 @@ def extract_infobox(soup, lang):
         key = field_map.get(label)
         if not key:
             continue
-        values = [clean_text(li.get_text(" ", strip=True)) for li in cell.find_all("li")]
-        infobox[key] = values if values else clean_text(cell.get_text(" ", strip=True))
+        values = [clean_text(element_text(li)) for li in cell.find_all("li")]
+        infobox[key] = values if values else clean_text(element_text(cell))
     return infobox or None
 
 
@@ -887,7 +895,7 @@ def fetch(imdb_id, tmdb_id, media_type, original_language, tmdb_token, language_
     sitelinks = entity["sitelinks"]
     plot_languages = resolve_plot_languages(original_language, language_priority, language_limit)
     cast_languages = list(dict.fromkeys([original_language, *CAST_LANGUAGES]))
-    reception_languages = list(dict.fromkeys([original_language, "en"]))
+    reception_languages = list(dict.fromkeys([original_language, "en", "fr"]))
     infobox_languages = list(dict.fromkeys([original_language, "zh"]))
     all_languages = list(dict.fromkeys([*plot_languages, *cast_languages, *reception_languages, *infobox_languages]))
 
