@@ -547,11 +547,17 @@ def main():
     header_block = build_verified_header(args.repo_name, tmdb_result, douban_result)
     render_home_readme(args.repo_name, header_block, forced=args.force_init)
 
+    synopsis_output_dir = workspace_dir / "docs" / "synopsis"
+    glossary_path = synopsis_output_dir / "GLOSSARY.md"
+    with_glossary = args.force_init or not glossary_path.exists()
+    if not with_glossary:
+        log("GLOSSARY.md already exists and --force-init not set, skipping its regeneration")
+
     synopsis_result = synopsis_pipeline.run(
         tmdb_result,
-        output_dir=str(workspace_dir / "docs" / "synopsis"),
+        output_dir=str(synopsis_output_dir),
         tmdb_token=tmdb_token,
-        with_glossary=True,
+        with_glossary=with_glossary,
         debug=is_debug(),
     )
 
