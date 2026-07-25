@@ -53,7 +53,7 @@ sys.path.insert(0, os.path.join(REPO_ROOT, "utilities", "tmdb", "search"))
 sys.path.insert(0, os.path.join(REPO_ROOT, "utilities", "douban", "search"))
 sys.path.insert(0, os.path.join(REPO_ROOT, "utilities", "wiki"))
 sys.path.insert(0, os.path.join(REPO_ROOT, "utilities", "github"))
-sys.path.insert(0, os.path.join(REPO_ROOT, "utilities", "env"))
+sys.path.insert(0, os.path.join(REPO_ROOT, "utilities", "github", "env"))
 
 import tmdb_lookup
 import douban_id_lookup
