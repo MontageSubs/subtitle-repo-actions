@@ -160,7 +160,7 @@ CAST_LANGUAGES = ("zh",)
 
 WIKIPEDIA_PAGE_URL = "https://{lang}.wikipedia.org/wiki/{title}"
 
-LANGUAGE_VARIANTS = {"zh": "zh-Hans"}
+LANGUAGE_VARIANTS = {"zh": "zh-cn"}
 
 LANGUAGE_DISPLAY_NAMES = {
     "en": "English",
