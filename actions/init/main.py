@@ -83,16 +83,6 @@ PROVISIONABLE_SECRETS = (
 
 PROTECTED_RESET_ENTRIES = {".git", ".github", ".actions"}
 
-# 这些目录即便存在于工作区，也绝不能进入调用者仓库的提交历史——多为本仓库
-# 脚本自身被checkout到目标仓库工作区内运行时留下的临时目录。用git pathspec
-# 排除而非.gitignore/.git config，因为Action没有权限写后者，且这类排除只对
-# 「本次提交」生效，不应作为目标仓库的长期配置遗留下去。
-# These directories must never end up in the caller's repo history even
-# though they exist in the workspace — typically the temp checkout of this
-# very automation repo running alongside the target repo. Excluded via git
-# pathspec rather than .gitignore/.git config, since the Action has no
-# permission to write the latter, and the exclusion should only apply to
-# this commit, not linger as permanent config in the caller's repo.
 GIT_COMMIT_EXCLUDED_ENTRIES = {".actions"}
 GIT_COMMIT_EXCLUDE_PATHSPECS = tuple(f":!{entry}" for entry in GIT_COMMIT_EXCLUDED_ENTRIES)
 
