@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: wiki_tmdb_fetch.py
-# Version: 1.5.1
+# Version: 1.5.2
 # Organization: MontageSubs (蒙太奇字幕组)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -187,7 +187,7 @@ SECTION_ALIASES = {
         "en": ("Plot",),
         "zh": ("劇情", "剧情", "劇情簡介", "剧情简介", "劇情大綱", "故事大綱", "故事簡介", "故事简介", "情節", "情节"),
         "fr": ("Synopsis", "Résumé", "Intrigue"),
-        "de": ("Handlung",),
+        "de": ("Handlung", "Inhalt"),
         "es": ("Argumento", "Trama"),
         "ja": ("あらすじ", "ストーリー", "概要"),
         "ko": ("줄거리",),
