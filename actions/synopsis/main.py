@@ -28,11 +28,13 @@ from pathlib import Path
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(REPO_ROOT, "utilities", "tmdb", "search"))
 sys.path.insert(0, os.path.join(REPO_ROOT, "utilities", "wiki"))
+sys.path.insert(0, os.path.join(REPO_ROOT, "utilities", "github"))
 sys.path.insert(0, os.path.join(REPO_ROOT, "utilities", "github", "env"))
 
 import tmdb_lookup
 import synopsis_pipeline
 from repo_vars import load_repo_vars
+from github_api import is_debug
 
 README_TMDB_PATTERN = re.compile(r"themoviedb\.org/(movie|tv)/(\d+)")
 README_IMDB_PATTERN = re.compile(r"imdb\.com/title/(tt\d+)")
@@ -117,6 +119,7 @@ def main():
     result = synopsis_pipeline.run(
         tmdb_result, output_dir=args.output_dir,
         tmdb_token=tmdb_token, with_glossary=with_glossary,
+        debug=is_debug(),
     )
     print(json.dumps({"tmdb": tmdb_result, **result}, ensure_ascii=False))
     sys.exit(0 if result.get("success") else 1)
