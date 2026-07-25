@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: github_api.py
-# Version: 1.0.1
+# Version: 1.0.2
 # Organization: MontageSubs (蒙太奇字幕组)
 # License: MIT License
 # Source: https://github.com/MontageSubs/subtitle-repo-actions/utilities/github/
@@ -60,8 +60,6 @@ def is_debug():
 def call_api(url, github_token, method="GET", payload=None):
     if is_debug():
         log(f"query (github api): {method} {url}")
-    else:
-        log(f"query (github api): {method}")
     data = json.dumps(payload).encode("utf-8") if payload is not None else None
     request = urllib.request.Request(
         url, data=data, method=method,
