@@ -6,10 +6,9 @@
 # License: MIT License
 #
 # Description / 描述:
-#   剧情摘要工具的手动触发总控脚本。init 阶段已在同一进程内串联过
-#   wiki_tmdb_fetch/prompt_build/llm_core/synopsis_render（见 synopsis_
-#   pipeline.py），本脚本是其唯一的手动兜底入口：仅当 init 阶段未能正确
-#   生成 SYNOPSIS.md/GLOSSARY.md 时才需要运行。
+#   剧情摘要工具的手动触发总控脚本，串联 wiki_tmdb_fetch/prompt_build/
+#   llm_core/synopsis_render（见 synopsis_pipeline.py），生成 SYNOPSIS.md/
+#   GLOSSARY.md 后，还会用 AI 生成的简介回写 README.md 的"剧情"段落。
 #
 # Usage / 用法:
 #   python actions/synopsis/main.py --force --manual-id tt1234567
@@ -38,6 +37,12 @@ from github_api import is_debug
 
 README_TMDB_PATTERN = re.compile(r"themoviedb\.org/(movie|tv)/(\d+)")
 README_IMDB_PATTERN = re.compile(r"imdb\.com/title/(tt\d+)")
+README_PLOT_PATTERN = re.compile(
+    r'(<h2 id="plot">剧情</h2>\n\n'
+    r'<!-- 此"影视内容简介"段落为自动生成，若无错误，请勿手动编辑 -->\n\n)'
+    r'.*?(?=<h2 id="notes">)',
+    re.DOTALL,
+)
 
 
 SCRIPT_NAME = "synopsis_main"
@@ -73,6 +78,13 @@ def resolve_from_tmdb_id(media_type, tmdb_id, imdb_id_hint, tmdb_token):
         "overview_zh": detail.get("overview"), "poster_path": detail.get("poster_path"),
         "original_language": detail.get("original_language"),
     }
+
+
+def update_readme_overview(readme_text, overview):
+    if not README_PLOT_PATTERN.search(readme_text):
+        return readme_text, False
+    updated = README_PLOT_PATTERN.sub(lambda m: f"{m.group(1)}{overview}\n\n\n", readme_text, count=1)
+    return updated, True
 
 
 def resolve_tmdb_result(manual_id, tmdb_token, readme_path):
@@ -123,6 +135,17 @@ def main():
         debug=is_debug(),
     )
     log(f"status: {'success' if result.get('success') else 'failed'}")
+
+    if result.get("success") and result.get("overview"):
+        readme_file = Path(args.readme_path)
+        if readme_file.exists():
+            updated_text, patched = update_readme_overview(readme_file.read_text(encoding="utf-8"), result["overview"])
+            if patched:
+                readme_file.write_text(updated_text, encoding="utf-8")
+                log(f"updated: {args.readme_path} (plot section)")
+            else:
+                log(f"skip: {args.readme_path} has no recognizable plot section marker")
+
     if is_debug():
         print(json.dumps({"tmdb": tmdb_result, **result}, ensure_ascii=False))
     sys.exit(0 if result.get("success") else 1)
