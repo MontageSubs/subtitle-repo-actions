@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: douban_id_lookup.py
-# Version: 1.5.0
+# Version: 1.6.0
 # Organization: MontageSubs (蒙太奇字幕组)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -33,6 +33,14 @@
 #    Chinese character processing and may return incorrect or no results.
 #    注意：为获得最佳结果，请使用英文片名加上映年代。不建议使用中文标题，
 #    因为某些搜索API对中文字符处理的支持有限，可能返回错误或无结果。
+#
+#    --zh-title merely supplies a match hint unless --use-zh-title is also
+#    passed, in which case it is additionally merged into the search query.
+#    Off by default: Tavily explicitly rejects Chinese-language queries, and
+#    SerpStack's Chinese support is unverified.
+#    --zh-title默认仅作为匹配提示；只有同时传入--use-zh-title，才会将其并入
+#    搜索查询词。默认关闭：Tavily明确不支持中文查询，SerpStack的中文支持
+#    尚未验证。
 #
 # Output / 输出:
 #    Diagnostic logs (stderr) / 诊断日志（标准错误）:
@@ -309,10 +317,6 @@ def call_serpstack(query, api_key, hl=None, gl=None):
             deduped[c["id"]] = c
     return list(deduped.values()), None
 
-
-# Ranks by score first (unscored SerpStack results sort last), then by how
-# many providers agreed on the same id.
-# 先按分数排序（SerpStack结果无分数，排在最后），再按被多少提供者同时命中排序。
 def summarize_candidates(candidates):
     counts = collections.Counter(c["id"] for c in candidates)
     return sorted(
@@ -374,9 +378,10 @@ def evaluate_candidates(raw_candidates, title_hints):
 
 
 def resolve(query_terms, tavily_api_key=None, serpstack_api_key=None, title_hints=None,
-            zh_title=None, serpstack_hl="zh-cn", serpstack_gl="cn"):
-    if zh_title and normalize_for_match(zh_title) not in normalize_for_match(query_terms):
+            zh_title=None, serpstack_hl="zh-cn", serpstack_gl="cn", use_zh_title=False):
+    if use_zh_title and zh_title and normalize_for_match(zh_title) not in normalize_for_match(query_terms):
         query_terms = f"{query_terms} {zh_title}"
+    if zh_title:
         title_hints = list(title_hints or []) + [zh_title]
 
     if not tavily_api_key and not serpstack_api_key:
@@ -446,6 +451,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("query")
     parser.add_argument("--zh-title", default=None)
+    parser.add_argument("--use-zh-title", action="store_true", default=False,
+                         help="将中文标题并入查询词发起搜索（默认关闭，见文件头说明）/ "
+                              "merge zh_title into the search query (off by default, see header notes)")
     parser.add_argument("--serpstack-hl", default="zh-cn")
     parser.add_argument("--serpstack-gl", default="cn")
     parser.add_argument("--tavily-api-key", default=None)
@@ -462,6 +470,7 @@ def main():
         zh_title=args.zh_title,
         serpstack_hl=args.serpstack_hl,
         serpstack_gl=args.serpstack_gl,
+        use_zh_title=args.use_zh_title,
     )
 
     print(json.dumps(result, ensure_ascii=False))
