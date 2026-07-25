@@ -52,10 +52,13 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fi
 sys.path.insert(0, os.path.join(REPO_ROOT, "utilities", "tmdb", "search"))
 sys.path.insert(0, os.path.join(REPO_ROOT, "utilities", "douban", "search"))
 sys.path.insert(0, os.path.join(REPO_ROOT, "utilities", "wiki"))
+sys.path.insert(0, os.path.join(REPO_ROOT, "utilities", "github"))
 
 import tmdb_lookup
 import douban_id_lookup
 import synopsis_pipeline
+import secret_provision
+from github_api import call_api, requires_org_admin_token
 
 TEMPLATES_DIR = os.path.join(REPO_ROOT, "default-docs", "templates", "readme")
 ERROR_TEMPLATE = os.path.join(TEMPLATES_DIR, "error", "error.md")
@@ -70,6 +73,11 @@ INIT_MARKER = "<!-- montagesubs:initialized -->"
 NAMING_ERROR_REASONS = {"invalid_repo_name", "not_found", "title_mismatch", "year_mismatch"}
 
 GITHUB_API_ENDPOINT = "https://api.github.com/repos/{full_name}"
+
+PROVISIONABLE_SECRETS = (
+    "TMDB_READ_ACCESS_TOKEN", "TAVILY_API_KEY", "SERPSTACK_API_KEY",
+    "GOOGLE_LLM_TOKEN", "HUGGINGFACE_LLM_TOKEN",
+)
 
 PROTECTED_RESET_ENTRIES = {".git", ".github", ".actions"}
 
@@ -321,29 +329,6 @@ def render_home_readme(repo_name, header_block, forced, github_repository=""):
     log(f"README rendered from home.md (forced={forced})")
 
 
-def call_github_api(url, github_token, method, payload_dict):
-    log(f"query (github api): {method} {url}")
-    payload = json.dumps(payload_dict).encode("utf-8")
-    request = urllib.request.Request(
-        url,
-        data=payload,
-        method=method,
-        headers={
-            "Authorization": f"Bearer {github_token}",
-            "Accept": "application/vnd.github+json",
-            "Content-Type": "application/json",
-        },
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=20) as response:
-            body = json.loads(response.read().decode("utf-8"))
-        return True, body
-    except urllib.error.HTTPError as e:
-        return False, {"http_status": e.code, "body": e.read().decode("utf-8", "ignore")}
-    except Exception as e:
-        return False, {"http_status": None, "body": str(e)}
-
-
 def enable_discussions(node_id, github_token):
     query = """
     mutation($id: ID!) {
@@ -376,12 +361,10 @@ def enable_discussions(node_id, github_token):
 AUTO_RENAME_REASONS = {"title_mismatch", "year_mismatch"}
 
 
+@requires_org_admin_token("仓库重命名", default=(False, None))
 def rename_repository(github_repository, github_token, new_name):
-    if not github_token:
-        log("no ORG_ADMIN_TOKEN provided, cannot auto-rename")
-        return False, None
     repo_url = GITHUB_API_ENDPOINT.format(full_name=github_repository)
-    ok, body = call_github_api(repo_url, github_token, "PATCH", {"name": new_name})
+    ok, body = call_api(repo_url, github_token, "PATCH", {"name": new_name})
     if not ok:
         log(f"auto-rename failed: {body}")
         return False, None
@@ -390,18 +373,15 @@ def rename_repository(github_repository, github_token, new_name):
     return True, new_full_name
 
 
+@requires_org_admin_token("仓库元数据更新", default=None)
 def update_github_repo_metadata(github_repository, github_token, tmdb_result):
-    if not github_token:
-        log("no ORG_ADMIN_TOKEN provided (or not accessible to this private repo), skipping repo metadata update")
-        return
-
     repo_url = GITHUB_API_ENDPOINT.format(full_name=github_repository)
 
     description = (
         f"《{tmdb_result['title_zh']}》({tmdb_result['year']}) 中文字幕协作项目 | "
         f"Chinese fansub project for \"{tmdb_result['title_en']}\" ({tmdb_result['year']})"
     )
-    ok, body = call_github_api(repo_url, github_token, "PATCH", {
+    ok, body = call_api(repo_url, github_token, "PATCH", {
         "description": description,
         "homepage": "",
         "has_wiki": False,
@@ -421,7 +401,7 @@ def update_github_repo_metadata(github_repository, github_token, tmdb_result):
     else:
         log("no node_id available (metadata PATCH failed), skipping discussions enable")
 
-    topics_ok, topics_err = call_github_api(repo_url + "/topics", github_token, "PUT", {
+    topics_ok, topics_err = call_api(repo_url + "/topics", github_token, "PUT", {
         "names": build_topics(tmdb_result),
     })
     if topics_ok:
@@ -484,6 +464,10 @@ def main():
             if reason == "not_found" and args.force_init:
                 reset_workspace(workspace_dir)
                 apply_init_manifest(manifest_path, repo_root, workspace_dir, overwrite=True)
+                secret_provision.provision(
+                    args.github_repository, github_token,
+                    {name: os.environ.get(name) for name in PROVISIONABLE_SECRETS},
+                )
                 header_block = build_manual_header(args.repo_name, tmdb_result)
                 render_home_readme(args.repo_name, header_block, forced=True)
                 print(json.dumps({"stage": "manual", "success": True, "forced": True}, ensure_ascii=False))
@@ -535,6 +519,10 @@ def main():
     )
 
     update_github_repo_metadata(args.github_repository, github_token, tmdb_result)
+    secret_provision.provision(
+        args.github_repository, github_token,
+        {name: os.environ.get(name) for name in PROVISIONABLE_SECRETS},
+    )
     header_block = build_verified_header(args.repo_name, tmdb_result, douban_result)
     render_home_readme(args.repo_name, header_block, forced=args.force_init)
 
