@@ -28,9 +28,11 @@ from pathlib import Path
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(REPO_ROOT, "utilities", "tmdb", "search"))
 sys.path.insert(0, os.path.join(REPO_ROOT, "utilities", "wiki"))
+sys.path.insert(0, os.path.join(REPO_ROOT, "utilities", "github", "env"))
 
 import tmdb_lookup
 import synopsis_pipeline
+from repo_vars import load_repo_vars
 
 README_TMDB_PATTERN = re.compile(r"themoviedb\.org/(movie|tv)/(\d+)")
 README_IMDB_PATTERN = re.compile(r"imdb\.com/title/(tt\d+)")
@@ -87,6 +89,8 @@ def resolve_tmdb_result(manual_id, tmdb_token, readme_path):
 
 
 def main():
+    load_repo_vars()
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--manual-id", default=None,
                          help="手动指定 TMDB/IMDb ID 或其页面 URL；留空则从 README.md 现有信息提取")
