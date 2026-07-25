@@ -192,6 +192,14 @@ def split_glossary_tables(tables_block):
     return tables[0].strip(), tables[1].strip()
 
 
+CJK_PATTERN = re.compile(r"[\u4e00-\u9fff\u3400-\u4dbf]")
+
+
+def resolve_display_title(title_zh, title_en):
+    resolved = title_zh or title_en
+    return f"《{resolved}》" if resolved and CJK_PATTERN.search(resolved) else resolved
+
+
 def render_source_links_line(title_en, year, wiki_links, tmdb_url):
     heading = f"**{title_en} ({year})**"
     if wiki_links:
@@ -266,12 +274,13 @@ def render(title_en, title_zh, year, wiki_result, llm_result, tmdb_url, output_d
 
         resolved_templates_dir = resolve_templates_dir(templates_dir)
         provider = provider_display(llm_result.get("provider"))
+        display_title = resolve_display_title(title_zh, title_en)
         overview = clean_prose(resolved["简介"])
         source_links_line = render_source_links_line(title_en, year, wiki_result.get("wiki_links") or [], tmdb_url)
         regenerate_action_url = render_regenerate_url(resolve_repository(repository))
 
         write_file(resolved_synopsis_out, read_template(os.path.join(resolved_templates_dir, "SYNOPSIS.md")).format(
-            title_zh=title_zh, year=year,
+            title_zh=display_title, year=year,
             overview=overview,
             table_cast=table_cast, table_production=table_production,
             plot_outline=clean_prose(resolved["情节线"]),
@@ -285,7 +294,7 @@ def render(title_en, title_zh, year, wiki_result, llm_result, tmdb_url, output_d
 
         if resolved_glossary_out:
             write_file(resolved_glossary_out, read_template(os.path.join(resolved_templates_dir, "GLOSSARY.md")).format(
-                title_zh=title_zh, year=year,
+                title_zh=display_title, year=year,
                 table_cast=table_cast, table_production=table_production,
                 source_links_line=source_links_line, provider=provider,
                 regenerate_action_url=regenerate_action_url,
