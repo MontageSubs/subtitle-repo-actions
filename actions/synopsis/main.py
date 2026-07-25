@@ -108,7 +108,8 @@ def main():
 
     if not tmdb_result["success"]:
         log(f"tmdb resolution failed ({tmdb_result['reason']})")
-        print(json.dumps({"stage": "tmdb", "success": False, "reason": tmdb_result["reason"]}, ensure_ascii=False))
+        if is_debug():
+            print(json.dumps({"stage": "tmdb", "success": False, "reason": tmdb_result["reason"]}, ensure_ascii=False))
         sys.exit(1)
 
     glossary_path = Path(args.output_dir) / "GLOSSARY.md"
@@ -121,7 +122,9 @@ def main():
         tmdb_token=tmdb_token, with_glossary=with_glossary,
         debug=is_debug(),
     )
-    print(json.dumps({"tmdb": tmdb_result, **result}, ensure_ascii=False))
+    log(f"status: {'success' if result.get('success') else 'failed'}")
+    if is_debug():
+        print(json.dumps({"tmdb": tmdb_result, **result}, ensure_ascii=False))
     sys.exit(0 if result.get("success") else 1)
 
 
