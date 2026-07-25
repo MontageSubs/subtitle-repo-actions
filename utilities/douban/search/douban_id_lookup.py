@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: douban_id_lookup.py
-# Version: 1.4.1
+# Version: 1.5.0
 # Organization: MontageSubs (蒙太奇字幕组)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -89,6 +89,8 @@ DOUBAN_TITLE_SUFFIX_PATTERN = re.compile(
     r"\s*-\s*(?:电影|电视剧|剧集|综艺|纪录片)\s*(?:-\s*豆瓣\s*)?$"
 )
 
+TRAILING_DIGITS_PATTERN = re.compile(r"^(.*\D)(\d+)$")
+
 TAVILY_ENDPOINT = "https://api.tavily.com/search"
 SERPSTACK_ENDPOINT = "https://api.serpstack.com/search"
 LOW_CONFIDENCE_SCORE_THRESHOLD = 0.4
@@ -140,14 +142,35 @@ def strip_douban_title_suffix(title):
     return DOUBAN_TITLE_SUFFIX_PATTERN.sub("", title or "")
 
 
-def find_exact_title_matches(candidates, title_hints):
-    hints = {normalize_for_match(h) for h in (title_hints or []) if h}
-    if not hints:
-        return []
-    return [
-        c for c in candidates
-        if normalize_for_match(strip_douban_title_suffix(c["title"])) in hints
-    ]
+def split_into_groups(title):
+    groups = [g for g in re.split(r"\W+", title) if g]
+    if groups:
+        match = TRAILING_DIGITS_PATTERN.match(groups[-1])
+        if match:
+            groups[-1:] = [match.group(1), match.group(2)]
+    return [normalize_for_match(g) for g in groups]
+
+
+def classify_group_match(hint_groups, cand_groups):
+    if hint_groups == cand_groups:
+        return "exact"
+    prefix_len = min(len(hint_groups), len(cand_groups)) - 1
+    if prefix_len > 0 and hint_groups[:prefix_len] == cand_groups[:prefix_len]:
+        return "partial"
+    return "none"
+
+
+def match_candidates_by_title(candidates, title_hints):
+    hint_group_sets = [split_into_groups(h) for h in (title_hints or []) if h]
+    exact, partial = [], []
+    for c in candidates:
+        cand_groups = split_into_groups(strip_douban_title_suffix(c["title"]))
+        classifications = {classify_group_match(h, cand_groups) for h in hint_group_sets}
+        if "exact" in classifications:
+            exact.append(c)
+        elif "partial" in classifications:
+            partial.append(c)
+    return exact, partial
 
 
 def call_tavily(query, api_key, domains):
@@ -336,12 +359,17 @@ def evaluate_candidates(raw_candidates, title_hints):
     if ranked and determine_confidence_status(ranked) == "success":
         return "success", ranked[:1]
 
-    exact = summarize_candidates(find_exact_title_matches(raw_candidates, title_hints))
-    deduped = list({c["id"]: c for c in exact}.values())
-    if len(deduped) == 1:
-        return "success", deduped
-    if len(deduped) > 1:
-        return "ambiguous", deduped
+    exact, partial = match_candidates_by_title(raw_candidates, title_hints)
+    exact = list({c["id"]: c for c in summarize_candidates(exact)}.values())
+    if len(exact) == 1:
+        return "success", exact
+    if len(exact) > 1:
+        return "ambiguous", exact
+
+    partial = list({c["id"]: c for c in summarize_candidates(partial)}.values())
+    if partial:
+        return "ambiguous", partial
+
     return "none", []
 
 
