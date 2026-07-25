@@ -160,6 +160,8 @@ CAST_LANGUAGES = ("zh",)
 
 WIKIPEDIA_PAGE_URL = "https://{lang}.wikipedia.org/wiki/{title}"
 
+LANGUAGE_VARIANTS = {"zh": "zh-Hans"}
+
 LANGUAGE_DISPLAY_NAMES = {
     "en": "English",
     "zh": "中文",
@@ -706,7 +708,8 @@ def resolve_wikidata_entity(imdb_id):
 def fetch_wiki_page(lang, title):
     url = WIKIPEDIA_REST_HTML.format(lang=lang, title=urllib.parse.quote(title, safe=""))
     log(f"fetch (wikipedia): {lang}.wikipedia.org/{title}")
-    body_text, error = http_get(url)
+    headers = {"Accept-Language": LANGUAGE_VARIANTS[lang]} if lang in LANGUAGE_VARIANTS else None
+    body_text, error = http_get(url, headers=headers)
     if error:
         log(f"  skipped: {error['type']} ({error['detail']})")
         return None
