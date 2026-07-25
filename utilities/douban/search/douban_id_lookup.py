@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: douban_id_lookup.py
-# Version: 1.3.1
+# Version: 1.4
 # Organization: MontageSubs (蒙太奇字幕组)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -92,9 +92,10 @@ DOUBAN_TITLE_SUFFIX_PATTERN = re.compile(
 TAVILY_ENDPOINT = "https://api.tavily.com/search"
 SERPSTACK_ENDPOINT = "https://api.serpstack.com/search"
 
-# Tavily relevance score (0-1) below which a result is treated as unreliable.
-# Tavily相关性分数（0-1）低于此值时视为不可靠。
-LOW_CONFIDENCE_SCORE_THRESHOLD = 0.3
+# Tavily relevance score (0-1) below which a result must be confirmed via
+# exact title matching rather than trusted outright.
+# Tavily相关性分数（0-1）低于此值时必须经精确标题匹配确认，不可直接采信。
+LOW_CONFIDENCE_SCORE_THRESHOLD = 0.5
 
 # reason values surfaced to the caller when success is false:
 # no_token, not_found, low_confidence, auth_error, bad_request,
@@ -148,18 +149,14 @@ def strip_douban_title_suffix(title):
     return DOUBAN_TITLE_SUFFIX_PATTERN.sub("", title or "")
 
 
-def filter_by_title_hints(candidates, title_hints):
-    hints = [normalize_for_match(h) for h in title_hints if h]
+def find_exact_title_matches(candidates, title_hints):
+    hints = {normalize_for_match(h) for h in (title_hints or []) if h}
     if not hints:
-        return candidates
-    matched = [
+        return []
+    return [
         c for c in candidates
-        if any(h in normalize_for_match(c["title"]) for h in hints)
+        if normalize_for_match(strip_douban_title_suffix(c["title"])) in hints
     ]
-    for c in candidates:
-        if c not in matched:
-            log(f"  [filtered out] {c['url']} | {c['title']} (title mismatch)")
-    return matched or candidates
 
 
 def call_tavily(query, api_key, domains):
@@ -218,6 +215,7 @@ def call_tavily(query, api_key, domains):
             "url": url,
             "title": title,
             "score": score,
+            "provider": "tavily",
         })
     return candidates, None
 
@@ -288,6 +286,7 @@ def call_serpstack(query, api_key, hl=None, gl=None):
             "url": url,
             "title": title,
             "score": None,
+            "provider": "serpstack",
         })
 
     deduped = {}
@@ -309,29 +308,16 @@ def summarize_candidates(candidates):
     )
 
 
-# A lone candidate whose title exactly matches a title hint (typically the
-# TMDB Chinese title) is trusted regardless of score. Otherwise: a single
-# high-scoring result is trusted outright; without a score, only trusted if
-# every candidate agrees on the same id.
-# 唯一候选且标题与提示（通常为TMDB中文片名）完全一致时，无视分数直接采信。
-# 其余情况：单个高分结果可直接信任；没有分数时，只有全部候选一致指向同一ID才可信任。
-def determine_confidence_status(ranked, title_hints=None):
+# A single high-scoring result is trusted outright. Without a score
+# (SerpStack-only), only trusted if every candidate agrees on the same id.
+# 单个高分结果可直接信任。没有分数时（仅SerpStack），只有全部候选一致
+# 指向同一ID才可信任。
+def determine_confidence_status(ranked):
     top = ranked[0]
-    if len(ranked) == 1:
-        hints = {normalize_for_match(h) for h in (title_hints or []) if h}
-        candidate_title = normalize_for_match(strip_douban_title_suffix(top["title"]))
-        if candidate_title in hints:
-            return "success"
-
     if top["score"] is not None:
-        if top["score"] < LOW_CONFIDENCE_SCORE_THRESHOLD:
-            return "low_confidence"
-        return "success"
-
+        return "success" if top["score"] >= LOW_CONFIDENCE_SCORE_THRESHOLD else "low_confidence"
     unique_ids = {c["id"] for c in ranked}
-    if len(unique_ids) > 1:
-        return "low_confidence"
-    return "success"
+    return "success" if len(unique_ids) == 1 else "low_confidence"
 
 
 def determine_error_reason(errors):
@@ -339,6 +325,37 @@ def determine_error_reason(errors):
     if len(types) == 1:
         return next(iter(types))
     return "multiple_errors"
+
+
+def query_tavily(query_terms, api_key):
+    log(f"query (tavily): {query_terms} [domains: {', '.join(DOUBAN_SITES)}]")
+    candidates, error = call_tavily(query_terms, api_key, DOUBAN_SITES)
+    if error:
+        log(f"tavily error: {error['type']} ({error['detail']})")
+    return candidates, error
+
+
+def query_serpstack(query_terms, api_key, hl, gl):
+    serpstack_query = build_scoped_query(query_terms, DOUBAN_SITES)
+    log(f"query (serpstack): {serpstack_query}")
+    candidates, error = call_serpstack(serpstack_query, api_key, hl, gl)
+    if error:
+        log(f"serpstack error: {error['type']} ({error['detail']})")
+    return candidates, error
+
+
+def evaluate_candidates(raw_candidates, title_hints):
+    ranked = summarize_candidates(raw_candidates)
+    if ranked and determine_confidence_status(ranked) == "success":
+        return "success", ranked[:1]
+
+    exact = summarize_candidates(find_exact_title_matches(raw_candidates, title_hints))
+    deduped = list({c["id"]: c for c in exact}.values())
+    if len(deduped) == 1:
+        return "success", deduped
+    if len(deduped) > 1:
+        return "ambiguous", deduped
+    return "none", []
 
 
 def resolve(query_terms, tavily_api_key=None, serpstack_api_key=None, title_hints=None,
@@ -357,29 +374,24 @@ def resolve(query_terms, tavily_api_key=None, serpstack_api_key=None, title_hint
             "candidates": [],
         }
 
+    raw_candidates = []
     errors = []
-    candidates = []
-    provider_used = None
+    status, result = "none", []
 
-    if tavily_api_key:
-        log(f"query (tavily): {query_terms} [domains: {', '.join(DOUBAN_SITES)}]")
-        candidates, error = call_tavily(query_terms, tavily_api_key, DOUBAN_SITES)
-        provider_used = "tavily"
+    for name, api_key, query in (
+        ("tavily", tavily_api_key, lambda: query_tavily(query_terms, tavily_api_key)),
+        ("serpstack", serpstack_api_key, lambda: query_serpstack(query_terms, serpstack_api_key, serpstack_hl, serpstack_gl)),
+    ):
+        if status != "none" or not api_key:
+            continue
+        candidates, error = query()
+        raw_candidates += candidates
         if error:
-            log(f"tavily error: {error['type']} ({error['detail']})")
             errors.append(error)
+        status, result = evaluate_candidates(raw_candidates, title_hints)
 
-    if not candidates and serpstack_api_key:
-        serpstack_query = build_scoped_query(query_terms, DOUBAN_SITES)
-        log(f"query (serpstack): {serpstack_query}")
-        candidates, error = call_serpstack(serpstack_query, serpstack_api_key, serpstack_hl, serpstack_gl)
-        provider_used = "serpstack"
-        if error:
-            log(f"serpstack error: {error['type']} ({error['detail']})")
-            errors.append(error)
-
-    if not candidates:
-        reason = determine_error_reason(errors) if errors else "not_found"
+    if status == "none":
+        reason = determine_error_reason(errors) if errors and not raw_candidates else "not_found"
         log(f"status: failed ({reason})")
         return {
             "success": False,
@@ -389,26 +401,22 @@ def resolve(query_terms, tavily_api_key=None, serpstack_api_key=None, title_hint
             "candidates": [],
         }
 
-    candidates = filter_by_title_hints(candidates, title_hints or [])
-    ranked = summarize_candidates(candidates)
-
-    log(f"result: {len(ranked)} candidate(s) found via {provider_used}")
-    for c in ranked:
+    log(f"result: {len(result)} candidate(s), status={status}")
+    for c in result:
         score_part = f" score={c['score']:.3f}" if c["score"] is not None else ""
-        log(f"  - {c['url']} | {c['title']}{score_part}")
+        log(f"  - [{c['provider']}] {c['url']} | {c['title']}{score_part}")
 
-    confidence = determine_confidence_status(ranked, title_hints)
-    success = confidence == "success"
+    success = status == "success"
     log(f"status: {'success' if success else 'failed (low_confidence)'}")
 
     return {
         "success": success,
-        "douban_id": ranked[0]["id"] if success else None,
-        "provider": provider_used if success else None,
+        "douban_id": result[0]["id"] if success else None,
+        "provider": result[0]["provider"] if success else None,
         "reason": None if success else "low_confidence",
         "candidates": [] if success else [
-            {"id": c["id"], "url": c["url"], "title": c["title"], "score": c["score"]}
-            for c in ranked
+            {"id": c["id"], "url": c["url"], "title": c["title"], "score": c["score"], "provider": c["provider"]}
+            for c in result
         ],
     }
 
