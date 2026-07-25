@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: prompt_build.py
-# Version: 1.4.0
+# Version: 1.4.1
 # Organization: MontageSubs (蒙太奇字幕组)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -32,7 +32,10 @@
 import argparse
 import json
 import os
+import re
 import sys
+
+WHITESPACE_COLLAPSE_PATTERN = re.compile(r"\s+")
 
 DEFAULT_MAX_TOKENS = 8192
 DEFAULT_TEMPERATURE = 0.7
@@ -114,17 +117,49 @@ def resolve_languages(original_language, language_priority, language_limit):
     return order[:language_limit] if language_limit else order
 
 
+def normalize_name(name):
+    return WHITESPACE_COLLAPSE_PATTERN.sub(" ", (name or "").strip()).casefold()
+
+
+def collect_known_names(cast, infobox):
+    names = set()
+    for entries in (cast or {}).values():
+        for entry in entries:
+            if entry.get("actor"):
+                names.add(normalize_name(entry["actor"]))
+    for fields in (infobox or {}).values():
+        for value in fields.values():
+            for item in (value if isinstance(value, list) else [value]):
+                names.add(normalize_name(item))
+    return names
+
+
+def dedupe_tmdb_credits(tmdb_credits, cast, infobox):
+    if not tmdb_credits:
+        return tmdb_credits
+    known_names = collect_known_names(cast, infobox)
+    crew = {
+        role: [name for name in names if normalize_name(name) not in known_names]
+        for role, names in (tmdb_credits.get("crew") or {}).items()
+    }
+    crew = {role: names for role, names in crew.items() if names}
+    people = [name for name in (tmdb_credits.get("cast") or []) if normalize_name(name) not in known_names]
+    return {"crew": crew, "cast": people}
+
+
 def build_user_payload(fetch_result, original_language, language_priority, language_limit):
     languages = resolve_languages(original_language, language_priority, language_limit)
     plot = fetch_result.get("plot") or {}
+    cast = fetch_result.get("cast")
+    infobox = fetch_result.get("infobox")
     return {
         "original_language": original_language,
         "lead": fetch_result.get("lead"),
-        "infobox": fetch_result.get("infobox"),
+        "infobox": infobox,
         "plot": {lang: plot[lang] for lang in languages if lang in plot},
-        "cast": fetch_result.get("cast"),
+        "cast": cast,
         "reception": fetch_result.get("reception"),
-        "tmdb_credits": fetch_result.get("tmdb_credits"),
+        "tmdb_credits": dedupe_tmdb_credits(fetch_result.get("tmdb_credits"), cast, infobox),
         "tmdb_detail": fetch_result.get("tmdb_detail"),
     }
 
