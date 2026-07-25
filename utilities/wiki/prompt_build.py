@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: prompt_build.py
-# Version: 1.4.2
+# Version: 1.6.0
 # Organization: MontageSubs (蒙太奇字幕组)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -40,6 +40,15 @@ WHITESPACE_COLLAPSE_PATTERN = re.compile(r"\s+")
 DEFAULT_MAX_TOKENS = 8192
 DEFAULT_TEMPERATURE = 0.7
 DEBUG_ENV = "DEBUG"
+
+TOKEN_BUDGET_TARGET = 10000
+TOKEN_BUDGET_HARD_LIMIT = 14000
+CHARS_PER_TOKEN_LATIN = 4
+ZH_LANGUAGE_CODE = "zh"
+ALWAYS_PROTECTED_LANGUAGES = ("en",)
+REDUCIBLE_PLOT_LANGUAGES_ORDER = ("es", "de", "fr")
+
+CJK_RANGES = ((0x4E00, 0x9FFF), (0x3400, 0x4DBF), (0x3040, 0x30FF), (0xAC00, 0xD7A3), (0xF900, 0xFAFF))
 
 SYSTEM_PROMPT = """
 You compile subtitle-team background notes from structured Wikipedia/TMDB JSON, covering film/series/documentary alike.
@@ -164,8 +173,43 @@ def build_user_payload(fetch_result, original_language, language_priority, langu
     }
 
 
+def is_cjk_char(ch):
+    code = ord(ch)
+    return any(low <= code <= high for low, high in CJK_RANGES)
+
+
+def estimate_tokens(text):
+    if not text:
+        return 0
+    cjk_chars = sum(1 for ch in text if is_cjk_char(ch))
+    return cjk_chars + (len(text) - cjk_chars) / CHARS_PER_TOKEN_LATIN
+
+
+def estimate_payload_tokens(payload):
+    return estimate_tokens(SYSTEM_PROMPT) + estimate_tokens(json.dumps(payload, ensure_ascii=False))
+
+
+def enforce_token_budget(payload, original_language):
+    protected = {original_language, *ALWAYS_PROTECTED_LANGUAGES}
+    reducible = [lang for lang in REDUCIBLE_PLOT_LANGUAGES_ORDER if lang in payload["plot"] and lang not in protected]
+
+    while reducible and estimate_payload_tokens(payload) > TOKEN_BUDGET_TARGET:
+        lang = reducible.pop(0)
+        del payload["plot"][lang]
+        log(f"token budget: dropped plot[{lang}], estimated={estimate_payload_tokens(payload):.0f}")
+
+    if ZH_LANGUAGE_CODE not in protected and ZH_LANGUAGE_CODE in payload["plot"]:
+        tokens = estimate_payload_tokens(payload)
+        if tokens > TOKEN_BUDGET_HARD_LIMIT:
+            del payload["plot"][ZH_LANGUAGE_CODE]
+            log(f"token budget: dropped plot[zh] as last resort, estimated={tokens:.0f} exceeded hard limit {TOKEN_BUDGET_HARD_LIMIT}")
+
+    return payload
+
+
 def build_messages(fetch_result, original_language, language_priority, language_limit):
     payload = build_user_payload(fetch_result, original_language, language_priority, language_limit)
+    payload = enforce_token_budget(payload, original_language)
     return [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
@@ -220,7 +264,8 @@ def main():
     language_priority = parse_language_priority(args.language_priority)
     messages = build_messages(fetch_result, args.original_language, language_priority, args.language_limit)
     total_chars = sum(len(m["content"]) for m in messages)
-    log(f"assembled: {len(messages)} messages, {total_chars} chars, max_tokens={args.max_tokens}")
+    estimated_tokens = sum(estimate_tokens(m["content"]) for m in messages)
+    log(f"assembled: {len(messages)} messages, {total_chars} chars, ~{estimated_tokens:.0f} tokens (sent), max_tokens={args.max_tokens}")
 
     if is_debug(args.debug):
         languages_used = resolve_languages(args.original_language, language_priority, args.language_limit)
