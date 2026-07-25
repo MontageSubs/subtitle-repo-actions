@@ -20,11 +20,11 @@
 
 ## 参考资料与致谢
 
-本页内容最初基于以下 Wikipedia 页面整理生成：
+本页内容参考以下页面整理生成：
 
-{wiki_links_line}
+{source_links_line}
 
-感谢 **Wikipedia** 及其社区与贡献者、**TMDB** 及其社区与贡献者、**{provider}** 提供数据与生成支持。
+感谢 **TMDB** 及其社区与贡献者、**{provider}** 提供数据与生成支持。
 
 ---
 

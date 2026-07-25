@@ -2,7 +2,7 @@
 
 # 《{title_zh}》({year}) 剧情摘要
 
-> 简介来自 TMDB，剧情、背景故事、主题部分基于 Wikipedia 词条整理生成，仅供字幕制作与创作参考。
+> 本页内容由 **{provider}** 基于 TMDB 及公开资料整理生成，仅供字幕制作与创作参考。
 
 <div align="right">
 
@@ -12,7 +12,7 @@
 
 ## 简介
 
-{overview_zh}
+{overview}
 
 > [!WARNING]
 > 以下内容包含完整剧透，请酌情阅读。
@@ -41,11 +41,11 @@
 
 ## 参考资料与致谢
 
-本页内容最初基于以下 Wikipedia 页面整理生成：
+本页内容参考以下页面整理生成：
 
-{wiki_links_line}
+{source_links_line}
 
-简介来自 **TMDB**，其余内容由 **{provider}** 基于 Wikipedia 页面整理生成。感谢 **Wikipedia** 及其社区与贡献者、**TMDB** 及其社区与贡献者、**{provider}** 提供数据与生成支持。
+全文由 **{provider}** 基于 TMDB 数据及以上页面整理生成。感谢 **TMDB** 及其社区与贡献者、**{provider}** 提供数据与生成支持。
 
 本页包含 AI 生成内容，可能存在疏漏或误差，请酌情参考。
 
