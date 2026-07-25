@@ -59,7 +59,7 @@ import tmdb_lookup
 import douban_id_lookup
 import synopsis_pipeline
 import secret_provision
-from github_api import call_api, requires_org_admin_token
+from github_api import call_api, is_debug, requires_org_admin_token
 from repo_vars import load_repo_vars
 
 TEMPLATES_DIR = os.path.join(REPO_ROOT, "default-docs", "templates", "readme")
@@ -82,6 +82,23 @@ PROVISIONABLE_SECRETS = (
 )
 
 PROTECTED_RESET_ENTRIES = {".git", ".github", ".actions"}
+
+# 这些目录即便存在于工作区，也绝不能进入调用者仓库的提交历史——多为本仓库
+# 脚本自身被checkout到目标仓库工作区内运行时留下的临时目录。用git pathspec
+# 排除而非.gitignore/.git config，因为Action没有权限写后者，且这类排除只对
+# 「本次提交」生效，不应作为目标仓库的长期配置遗留下去。
+# These directories must never end up in the caller's repo history even
+# though they exist in the workspace — typically the temp checkout of this
+# very automation repo running alongside the target repo. Excluded via git
+# pathspec rather than .gitignore/.git config, since the Action has no
+# permission to write the latter, and the exclusion should only apply to
+# this commit, not linger as permanent config in the caller's repo.
+GIT_COMMIT_EXCLUDED_ENTRIES = {".actions"}
+GIT_COMMIT_EXCLUDE_PATHSPECS = tuple(f":!{entry}" for entry in GIT_COMMIT_EXCLUDED_ENTRIES)
+
+
+def git_add_all():
+    subprocess.run(["git", "add", "-A", "--", ".", *GIT_COMMIT_EXCLUDE_PATHSPECS], check=True)
 
 TOPIC_MAP = {
     "movie": [
@@ -135,7 +152,7 @@ def reset_workspace(workspace_dir):
         else:
             entry.unlink()
         log(f"force_init: removed {entry.relative_to(workspace_dir)}")
-    subprocess.run(["git", "add", "-A"], check=True)
+    git_add_all()
     subprocess.run(
         'git diff --staged --quiet || git commit -m "reset: force re-initialization"',
         shell=True, check=True,
@@ -412,6 +429,14 @@ def update_github_repo_metadata(github_repository, github_token, tmdb_result):
         log(f"failed to update repo topics: {topics_err}")
 
 
+def log_secret_provisioning(provision_result):
+    if is_debug():
+        log(f"secret provisioning: {provision_result}")
+        return
+    succeeded = sum(1 for ok in provision_result.values() if ok)
+    log(f"secret provisioning: {succeeded}/{len(provision_result)} token(s) written")
+
+
 def main():
     load_repo_vars()
 
@@ -472,7 +497,7 @@ def main():
                     args.github_repository, github_token,
                     {name: os.environ.get(name) for name in PROVISIONABLE_SECRETS},
                 )
-                log(f"secret provisioning: {provision_result}")
+                log_secret_provisioning(provision_result)
                 header_block = build_manual_header(args.repo_name, tmdb_result)
                 render_home_readme(args.repo_name, header_block, forced=True)
                 print(json.dumps({"stage": "manual", "success": True, "forced": True}, ensure_ascii=False))
@@ -528,17 +553,16 @@ def main():
         args.github_repository, github_token,
         {name: os.environ.get(name) for name in PROVISIONABLE_SECRETS},
     )
-    log(f"secret provisioning: {provision_result}")
+    log_secret_provisioning(provision_result)
     header_block = build_verified_header(args.repo_name, tmdb_result, douban_result)
     render_home_readme(args.repo_name, header_block, forced=args.force_init)
 
-    debug = os.environ.get("DEBUG", "").strip().lower() in ("1", "true", "yes")
     synopsis_result = synopsis_pipeline.run(
         tmdb_result,
         output_dir=str(workspace_dir / "docs" / "synopsis"),
         tmdb_token=tmdb_token,
         with_glossary=True,
-        debug=debug,
+        debug=is_debug(),
     )
 
     print(json.dumps({

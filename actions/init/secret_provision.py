@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: secret_provision.py
-# Version: 1.0.0
+# Version: 1.0.1
 # Organization: MontageSubs (蒙太奇字幕组)
 # License: MIT License
 # Source: https://github.com/MontageSubs/subtitle-repo-actions/actions/init/
@@ -42,7 +42,7 @@ import subprocess
 import sys
 from base64 import b64encode
 
-from github_api import call_api, requires_org_admin_token
+from github_api import call_api, is_debug, requires_org_admin_token
 
 try:
     from nacl import encoding, public
@@ -98,5 +98,8 @@ def provision(github_repository, github_token, secrets):
             "key_id": key_body["key_id"],
         })
         results[name] = ok
-        log(f"{'provisioned' if ok else 'failed'}: {name}" + ("" if ok else f" ({body})"))
+        if is_debug():
+            log(f"{'provisioned' if ok else 'failed'}: {name}" + ("" if ok else f" ({body})"))
+    succeeded = sum(1 for ok in results.values() if ok)
+    log(f"provisioned {succeeded}/{len(results)} secret token(s)")
     return results
