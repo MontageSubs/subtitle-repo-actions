@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: douban_id_lookup.py
-# Version: 1.4
+# Version: 1.4.1
 # Organization: MontageSubs (蒙太奇字幕组)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -91,16 +91,7 @@ DOUBAN_TITLE_SUFFIX_PATTERN = re.compile(
 
 TAVILY_ENDPOINT = "https://api.tavily.com/search"
 SERPSTACK_ENDPOINT = "https://api.serpstack.com/search"
-
-# Tavily relevance score (0-1) below which a result must be confirmed via
-# exact title matching rather than trusted outright.
-# Tavily相关性分数（0-1）低于此值时必须经精确标题匹配确认，不可直接采信。
-LOW_CONFIDENCE_SCORE_THRESHOLD = 0.5
-
-# reason values surfaced to the caller when success is false:
-# no_token, not_found, low_confidence, auth_error, bad_request,
-# rate_limit, quota_exceeded, server_error, network_error, multiple_errors
-# success为false时呈现给调用方的reason取值如上
+LOW_CONFIDENCE_SCORE_THRESHOLD = 0.4
 ERROR_NO_TOKEN = "no_token"
 ERROR_AUTH = "auth_error"
 ERROR_BAD_REQUEST = "bad_request"
@@ -308,10 +299,6 @@ def summarize_candidates(candidates):
     )
 
 
-# A single high-scoring result is trusted outright. Without a score
-# (SerpStack-only), only trusted if every candidate agrees on the same id.
-# 单个高分结果可直接信任。没有分数时（仅SerpStack），只有全部候选一致
-# 指向同一ID才可信任。
 def determine_confidence_status(ranked):
     top = ranked[0]
     if top["score"] is not None:
