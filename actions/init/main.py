@@ -53,12 +53,14 @@ sys.path.insert(0, os.path.join(REPO_ROOT, "utilities", "tmdb", "search"))
 sys.path.insert(0, os.path.join(REPO_ROOT, "utilities", "douban", "search"))
 sys.path.insert(0, os.path.join(REPO_ROOT, "utilities", "wiki"))
 sys.path.insert(0, os.path.join(REPO_ROOT, "utilities", "github"))
+sys.path.insert(0, os.path.join(REPO_ROOT, "utilities", "env"))
 
 import tmdb_lookup
 import douban_id_lookup
 import synopsis_pipeline
 import secret_provision
 from github_api import call_api, requires_org_admin_token
+from repo_vars import load_repo_vars
 
 TEMPLATES_DIR = os.path.join(REPO_ROOT, "default-docs", "templates", "readme")
 ERROR_TEMPLATE = os.path.join(TEMPLATES_DIR, "error", "error.md")
@@ -411,6 +413,8 @@ def update_github_repo_metadata(github_repository, github_token, tmdb_result):
 
 
 def main():
+    load_repo_vars()
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo-name", required=True, help="e.g. Cosmos_Laundromat_2015")
     parser.add_argument("--github-repository", required=True, help="e.g. MontageSubs/Cosmos_Laundromat_2015")
