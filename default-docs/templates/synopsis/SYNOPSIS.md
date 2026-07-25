@@ -6,7 +6,7 @@
 
 <div align="right">
 
-**[前往 Actions 重新生成]({regenerate_action_url})**
+**[重新生成]({regenerate_action_url})**
 
 </div><br/>
 
