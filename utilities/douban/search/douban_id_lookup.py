@@ -86,7 +86,7 @@ SUBJECT_URL_PATTERN = re.compile(
 )
 
 DOUBAN_TITLE_SUFFIX_PATTERN = re.compile(
-    r"\s*-\s*(?:电影|电视剧|剧集|综艺|纪录片)\s*-\s*豆瓣\s*$"
+    r"\s*-\s*(?:电影|电视剧|剧集|综艺|纪录片)\s*(?:-\s*豆瓣\s*)?$"
 )
 
 TAVILY_ENDPOINT = "https://api.tavily.com/search"
