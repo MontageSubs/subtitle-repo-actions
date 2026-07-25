@@ -86,7 +86,7 @@ GOOGLE_DEFAULT_THINKING_BUDGET = None
 
 HF_TOKEN_ENV = "HUGGINGFACE_LLM_TOKEN"
 HF_MODEL_ENV = "HUGGINGFACE_LLM_MODEL"
-HF_DEFAULT_MODEL = "google/gemma-4-31B-it:deepinfra"
+HF_DEFAULT_MODEL = "google/gemma-4-31B-it"
 HF_ENDPOINT = "https://router.huggingface.co/v1/chat/completions"
 
 DEBUG_ENV = "DEBUG"
