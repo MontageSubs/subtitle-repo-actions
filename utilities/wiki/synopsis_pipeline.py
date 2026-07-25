@@ -55,6 +55,10 @@ def run(tmdb_result, output_dir, tmdb_token,
         return {"stage": "wiki", **wiki_result}
 
     messages = prompt_build.build_messages(wiki_result, original_language, plot_languages, language_limit)
+    sent_plot_languages = [lang for lang in prompt_build.resolve_languages(original_language, plot_languages, language_limit)
+                           if lang in (wiki_result.get("plot") or {})]
+    log(f"llm input languages: plot={sent_plot_languages} reception={list(wiki_result.get('reception') or {})} "
+        f"cast={list(wiki_result.get('cast') or {})} infobox={list(wiki_result.get('infobox') or {})}")
     log(f"stage (llm): {len(messages)} messages assembled, dispatching to llm_core")
     if debug:
         prompt_build.debug_dump(messages, language_limit, plot_languages)
