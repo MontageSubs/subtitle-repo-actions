@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: wiki_tmdb_fetch.py
-# Version: 1.5.0
+# Version: 1.5.1
 # Organization: MontageSubs (蒙太奇字幕组)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -742,7 +742,7 @@ def find_section(soup, section_type, lang):
 
 
 def extract_paragraphs(container):
-    paragraphs = container.find_all("p", recursive=False)
+    paragraphs = container.find_all("p")
     return clean_text(" ".join(element_text(p) for p in paragraphs))
 
 
@@ -800,8 +800,14 @@ def extract_infobox(soup, lang):
     return infobox or None
 
 
-def find_nested_subsection(container, keywords):
-    for heading in container.find_all(("h3", "h4")):
+def find_nested_subsection(container, own_level, keywords):
+    children = [h for h in container.find_all(("h2", "h3", "h4", "h5", "h6")) if int(h.name[1]) > own_level]
+    if not children:
+        return None
+    next_level = min(int(h.name[1]) for h in children)
+    for heading in children:
+        if int(heading.name[1]) != next_level:
+            continue
         title_lower = clean_text(heading.get_text()).lower()
         if any(keyword.lower() in title_lower for keyword in keywords):
             return heading.find_parent("section") or heading.parent
@@ -812,13 +818,10 @@ def extract_reception(soup, lang):
     container = find_section(soup, "reception", lang)
     if container is None:
         return None
-    text = extract_paragraphs(container)
-    if text:
-        return text
-    subsection = find_nested_subsection(container, CRITICAL_RESPONSE_KEYWORDS.get(lang, ()))
-    if subsection is None:
-        return None
-    return extract_paragraphs(subsection) or None
+    heading = container.find(("h2", "h3", "h4", "h5", "h6"))
+    own_level = int(heading.name[1]) if heading else 2
+    subsection = find_nested_subsection(container, own_level, CRITICAL_RESPONSE_KEYWORDS.get(lang, ()))
+    return extract_paragraphs(subsection or container) or None
 
 
 def fetch_tmdb_credits(tmdb_id, media_type, token):
