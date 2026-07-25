@@ -561,14 +561,16 @@ def main():
         debug=is_debug(),
     )
 
-    print(json.dumps({
-        "stage": "home",
-        "success": True,
-        "tmdb": tmdb_result,
-        "douban": douban_result,
-        "synopsis": synopsis_result,
-        "secret_provisioning": provision_result,
-    }, ensure_ascii=False))
+    log(f"status: success (douban={douban_result.get('success')}, secrets={sum(provision_result.values())}/{len(provision_result)}, synopsis={synopsis_result.get('success')})")
+    if is_debug():
+        print(json.dumps({
+            "stage": "home",
+            "success": True,
+            "tmdb": tmdb_result,
+            "douban": douban_result,
+            "synopsis": synopsis_result,
+            "secret_provisioning": provision_result,
+        }, ensure_ascii=False))
 
 
 if __name__ == "__main__":
