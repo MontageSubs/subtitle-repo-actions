@@ -14,9 +14,9 @@ sys.path.insert(0, os.path.join(REPO_ROOT, "utilities", "github"))
 
 from github_api import is_debug
 
-TEMPLATES_ROOT = Path(REPO_ROOT) / "default-docs" / "templates" / "release"
+TEMPLATES_ROOT = Path(REPO_ROOT) / "default-docs" / "templates" / "edition"
 
-SCRIPT_NAME = "release_main"
+SCRIPT_NAME = "edition_main"
 
 SLUG_INVALID_CHARS_PATTERN = re.compile(r"[^a-z0-9]+")
 
@@ -29,9 +29,9 @@ def slugify(text):
     return SLUG_INVALID_CHARS_PATTERN.sub("-", text.lower()).strip("-")
 
 
-def resolve_release_name(is_web, is_bluray, label):
+def resolve_edition_name(is_web, is_bluray, label):
     if is_web and is_bluray:
-        raise ValueError("来源冲突：WEB 与 BluRay 不可同时勾选，请二选一或都不选改用自定义标识")
+        raise ValueError("来源冲突：WEB 与 BluRay 不可同时勾选，请三选一")
     slug = slugify(label) if label else ""
     if is_web:
         return ("web-" + slug if slug else "web"), "WEB", "web"
@@ -53,7 +53,7 @@ def build_display_name(is_web, is_bluray, label):
     return " ".join(parts)
 
 
-def copy_release_templates(source_root, dest_root, context):
+def copy_edition_templates(source_root, dest_root, context):
     for path in sorted(source_root.rglob("*")):
         if path.is_dir():
             continue
@@ -72,9 +72,9 @@ def setup_git_identity():
         subprocess.run(f'git config user.email "{actor_id}+{actor}@users.noreply.github.com"', shell=True, check=True)
 
 
-def commit_release(dest_root, release_name):
+def commit_edition(dest_root, edition_name):
     subprocess.run(["git", "add", "-A", "--", str(dest_root)], check=True)
-    subprocess.run(f'git diff --staged --quiet || git commit -m "add: release {release_name}"', shell=True, check=True)
+    subprocess.run(f'git diff --staged --quiet || git commit -m "add: edition {edition_name}"', shell=True, check=True)
 
 
 def mark_output(key, value):
@@ -95,42 +95,42 @@ def main():
     log(f"start: web={args.web} bluray={args.bluray} label={args.label!r}")
 
     try:
-        release_name, source_type_label, source_type_raw = resolve_release_name(args.web, args.bluray, args.label)
+        edition_name, source_type_label, source_type_raw = resolve_edition_name(args.web, args.bluray, args.label)
     except ValueError as e:
         log(str(e))
         print(json.dumps({"stage": "resolve", "success": False, "reason": str(e)}, ensure_ascii=False))
         sys.exit(1)
 
     workspace_dir = Path(os.environ.get("GITHUB_WORKSPACE", "."))
-    dest_root = workspace_dir / "subtitles" / release_name
+    dest_root = workspace_dir / "subtitles" / edition_name
 
     if dest_root.exists():
-        log(f"skip: subtitles/{release_name} already exists, leaving it untouched")
-        mark_output("release_dir", release_name)
-        mark_output("release_created", "false")
-        print(json.dumps({"stage": "release", "success": True, "skipped": True, "release_name": release_name}, ensure_ascii=False))
+        log(f"skip: subtitles/{edition_name} already exists, leaving it untouched")
+        mark_output("edition_dir", edition_name)
+        mark_output("edition_created", "false")
+        print(json.dumps({"stage": "edition", "success": True, "skipped": True, "edition_name": edition_name}, ensure_ascii=False))
         sys.exit(0)
 
     setup_git_identity()
 
     context = {
-        "release_name": release_name,
+        "edition_name": edition_name,
         "source_type_label": source_type_label,
         "source_type_raw": source_type_raw,
         "label_raw": args.label,
         "label_display": args.label or "无",
-        "display_name": build_display_name(args.web, args.bluray, args.label) or release_name,
+        "display_name": build_display_name(args.web, args.bluray, args.label) or edition_name,
         "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
     }
 
-    copy_release_templates(TEMPLATES_ROOT, dest_root, context)
-    commit_release(dest_root, release_name)
+    copy_edition_templates(TEMPLATES_ROOT, dest_root, context)
+    commit_edition(dest_root, edition_name)
 
-    mark_output("release_dir", release_name)
-    mark_output("release_created", "true")
-    log(f"status: success (release={release_name})")
+    mark_output("edition_dir", edition_name)
+    mark_output("edition_created", "true")
+    log(f"status: success (edition={edition_name})")
     if is_debug():
-        print(json.dumps({"stage": "release", "success": True, "release_name": release_name, **context}, ensure_ascii=False))
+        print(json.dumps({"stage": "edition", "success": True, "edition_name": edition_name, **context}, ensure_ascii=False))
 
 
 if __name__ == "__main__":
