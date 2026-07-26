@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: wiki_tmdb_fetch.py
-# Version: 1.5.2
+# Version: 1.5.4
 # Organization: MontageSubs (蒙太奇字幕组)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -157,6 +157,8 @@ REQUEST_TIMEOUT = 20
 
 DEFAULT_LANGUAGE_PRIORITY = ("en", "zh", "fr", "de", "es")
 CAST_LANGUAGES = ("zh",)
+RECEPTION_FALLBACK_LANGUAGES = ("zh", "de", "es")
+RECEPTION_TARGET_COUNT = 2
 
 WIKIPEDIA_PAGE_URL = "https://{lang}.wikipedia.org/wiki/{title}"
 
@@ -184,11 +186,11 @@ def resolve_plot_languages(original_language, language_priority, language_limit)
 
 SECTION_ALIASES = {
     "plot": {
-        "en": ("Plot",),
-        "zh": ("劇情", "剧情", "劇情簡介", "剧情简介", "劇情大綱", "故事大綱", "故事簡介", "故事简介", "情節", "情节"),
+        "en": ("Plot", "Synopsis"),
+        "zh": ("劇情", "剧情", "劇情簡介", "剧情简介", "劇情大綱", "故事大綱", "故事簡介", "故事简介", "情節", "情节", "內容概要", "内容概要"),
         "fr": ("Synopsis", "Résumé", "Intrigue"),
         "de": ("Handlung", "Inhalt"),
-        "es": ("Argumento", "Trama"),
+        "es": ("Argumento", "Trama", "Antecedentes"),
         "ja": ("あらすじ", "ストーリー", "概要"),
         "ko": ("줄거리",),
         "it": ("Trama",),
@@ -196,7 +198,7 @@ SECTION_ALIASES = {
         "ru": ("Сюжет",),
         "tr": ("Konu", "Konusu"),
         "fa": ("خلاصه داستان", "داستان"),
-        "ar": ("الحبكة", "القصة"),
+        "ar": ("الحبكة", "القصة", "نبذة"),
         "th": ("เนื้อเรื่อง", "เรื่องย่อ"),
         "hi": ("कथानक", "कहानी"),
         "vi": ("Nội dung", "Cốt truyện"),
@@ -289,11 +291,11 @@ SECTION_ALIASES = {
 
 FUZZY_KEYWORDS = {
     "plot": {
-        "en": ("plot",),
-        "zh": ("剧情", "劇情", "故事", "大綱", "大纲", "情節", "情节"),
+        "en": ("plot", "synopsis"),
+        "zh": ("剧情", "劇情", "故事", "大綱", "大纲", "情節", "情节", "概要"),
         "fr": ("synopsis", "intrigue", "résumé"),
         "de": ("handlung",),
-        "es": ("argumento", "trama"),
+        "es": ("argumento", "trama", "antecedentes"),
         "ja": ("あらすじ", "ストーリー"),
         "ko": ("줄거리",),
         "it": ("trama",),
@@ -301,7 +303,7 @@ FUZZY_KEYWORDS = {
         "ru": ("сюжет",),
         "tr": ("konu",),
         "fa": ("داستان",),
-        "ar": ("حبكة", "قصة"),
+        "ar": ("حبكة", "قصة", "نبذة"),
         "th": ("เนื้อเรื่อง", "เรื่องย่อ"),
         "hi": ("कथानक", "कहानी"),
         "vi": ("nội dung", "cốt truyện"),
@@ -715,7 +717,7 @@ def resolve_wikidata_entity(imdb_id):
 
 def fetch_wiki_page(lang, title):
     url = WIKIPEDIA_REST_HTML.format(lang=lang, title=urllib.parse.quote(title, safe=""))
-    log(f"fetch (wikipedia): {lang}.wikipedia.org/{title}")
+    log(f"fetch (wikipedia): {url}")
     headers = {"Accept-Language": LANGUAGE_VARIANTS[lang]} if lang in LANGUAGE_VARIANTS else None
     body_text, error = http_get(url, headers=headers)
     if error:
@@ -928,7 +930,7 @@ def fetch(imdb_id, tmdb_id, media_type, original_language, tmdb_token, language_
     sitelinks = entity["sitelinks"] if entity else {}
     plot_languages = resolve_plot_languages(original_language, language_priority, language_limit)
     cast_languages = list(dict.fromkeys([original_language, *CAST_LANGUAGES]))
-    reception_languages = list(dict.fromkeys([original_language, "en", "fr"]))
+    reception_languages = list(dict.fromkeys([original_language, "en", "fr", *RECEPTION_FALLBACK_LANGUAGES]))
     infobox_languages = list(dict.fromkeys([original_language, "zh"]))
     all_languages = list(dict.fromkeys([*plot_languages, *cast_languages, *reception_languages, *infobox_languages]))
 
@@ -970,6 +972,8 @@ def fetch(imdb_id, tmdb_id, media_type, original_language, tmdb_token, language_
 
     reception = {}
     for lang in reception_languages:
+        if len(reception) >= RECEPTION_TARGET_COUNT:
+            break
         soup = get_page(lang)
         if soup is None:
             continue
