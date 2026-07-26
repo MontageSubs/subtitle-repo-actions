@@ -1,0 +1,5 @@
+scene_name: {release_name}
+display_name: {display_name}
+source_type: {source_type_raw}
+label: {label_raw}
+created_at: {created_at}
