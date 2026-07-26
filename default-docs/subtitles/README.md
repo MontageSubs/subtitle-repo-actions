@@ -1,18 +1,18 @@
-# 字幕版本总览 / Subtitle Releases
+# 字幕版本总览 / Subtitle Versions
 
-本仓库可能包含同一影视作品的多个 **release**（发布版本）。每个 release 对应一份独立的时间轴——剪辑版本、片源或区域任一不同，即视为不同 release，各自建立独立目录，互不影响。
+本仓库可能包含同一影视作品的多个版本。片源、剪辑版本或区域任一不同，即视为不同版本，各自建立独立目录，互不影响。
 
-## 当前 release
+## 下方会有哪些子目录
 
-请在本目录下查看各 release 子目录，每个目录内的 `README.md` 说明该版本的具体来源与版本信息。
+子目录名由片源与剪辑类型组合而成，常见的如 `web`、`bluray`、`web-uk`、`bluray-extended`，具体命名规则见 [版本命名指南](../docs/RELEASE_GUIDE.md)。每新增一个版本即新增一个这样的子目录，目录内的 `README.md` 说明该版本的具体来源信息。
 
-## 新增 release
+## 新增版本
 
-维护者可通过 Actions 中的 **新增 Release (Add Release)** workflow 手动触发创建，命名规则与来源类型说明见 [Release 命名指南](../docs/RELEASE_GUIDE.md)。
+维护者可通过 Actions 中的 **新增 Release (Add Release)** workflow 手动触发创建。
 
 ## 我想贡献字幕翻译
 
-请进入目标 release 目录下的 `work/authored/`，具体操作参见 [贡献指南](../docs/CONTRIBUTING.md)。
+请进入目标版本子目录下的 `work/authored/`，具体操作参见 [贡献指南](../docs/CONTRIBUTING.md)。
 
 ---
 
