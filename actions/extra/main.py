@@ -13,8 +13,8 @@ sys.path.insert(0, os.path.join(REPO_ROOT, "utilities", "github"))
 
 from github_api import is_debug
 
-ITEM_TEMPLATES_ROOT = Path(REPO_ROOT) / "default-docs" / "templates" / "extra"
-OVERVIEW_TEMPLATE = Path(REPO_ROOT) / "default-docs" / "templates" / "extras_overview.md"
+ITEM_TEMPLATES_ROOT = Path(REPO_ROOT) / "default-docs" / "templates" / "extras" / "item"
+OVERVIEW_TEMPLATE = Path(REPO_ROOT) / "default-docs" / "templates" / "extras" / "overview.md"
 
 SCRIPT_NAME = "extra_main"
 
