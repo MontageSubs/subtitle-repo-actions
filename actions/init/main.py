@@ -106,6 +106,8 @@ SLUG_INVALID_CHARS_PATTERN = re.compile(r"[^a-z0-9]+")
 
 BLOCK_EXTRACT_PATTERN = re.compile(r"<!--\s*block:(\w+)\s*-->(.*?)<!--\s*/block:\1\s*-->", re.DOTALL)
 
+CJK_PATTERN = re.compile(r"[\u4e00-\u9fff\u3400-\u4dbf]")
+
 def slugify_title(title_en):
     slug = SLUG_INVALID_CHARS_PATTERN.sub("-", title_en.lower()).strip("-")
     return slug
@@ -393,7 +395,8 @@ def rename_repository(github_repository, github_token, new_name):
 def update_github_repo_metadata(github_repository, github_token, tmdb_result):
     repo_url = GITHUB_API_ENDPOINT.format(full_name=github_repository)
 
-    title_zh = f"《{tmdb_result['title_zh']}》" if tmdb_result["title_zh"] else ""
+    title_zh_raw = tmdb_result["title_zh"]
+    title_zh = f"《{title_zh_raw}》" if title_zh_raw and CJK_PATTERN.search(title_zh_raw) else ""
     description = (
         f"{title_zh}({tmdb_result['year']}) 中文字幕协作项目 | "
         f"Chinese fansub project for \"{tmdb_result['title_en']}\" ({tmdb_result['year']})"
