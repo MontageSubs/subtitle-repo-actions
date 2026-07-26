@@ -1,22 +1,17 @@
-# Release: {release_name}
+# 制作工作区 / Work
 
-本目录对应一份独立时间轴，来源 / 版本信息如下：
+本目录是当前 release 全部字幕文件的存放位置，按处理阶段分为三个子目录，脚本按固定顺序解析：
 
-| 项目 | 值 |
-| :--- | :--- |
-| 来源类型 | {source_type_label} |
-| 附加标签 | {label_display} |
-| 目录标识 | `{release_name}` |
+1. 若 [`authored/`](./authored/) 中存在对应语言的人工稿，优先采用
+2. 否则若该语言是 [`authored/main.ass`](./authored/main.ass) 的主语言，从中提取
+3. 否则采用 [`source/`](./source/) 中的官方原始底本
+4. 否则按既定转换关系（如简繁转换）自动生成，结果落入 [`generated/`](./generated/)
 
-命名规则与来源类型说明参见 [Release 命名指南](../../docs/RELEASE_GUIDE.md)。
+## 我要做什么
 
-## 目录说明
-
-字幕文件与工作流程均位于 [`work/`](./work/) 目录，进入查看原始底本、人工维护稿与自动化生成产物的详细说明。
-
-## 打包元数据
-
-[`release.yml`](./release.yml) 记录打包 / 发布用的机器可读元数据，如需调整发布展示名称请直接编辑该文件。
+- **下载 / 查看原始字幕** → [`source/`](./source/)
+- **翻译、校对、制作特效** → [`authored/`](./authored/)
+- **查看自动化生成的最终结果** → [`generated/`](./generated/)，请勿在此目录直接编辑，修改会在下次自动化运行时被覆盖
 
 ---
 
