@@ -396,9 +396,13 @@ def update_github_repo_metadata(github_repository, github_token, tmdb_result):
     repo_url = GITHUB_API_ENDPOINT.format(full_name=github_repository)
 
     title_zh_raw = tmdb_result["title_zh"]
-    title_zh = f"《{title_zh_raw}》" if title_zh_raw and CJK_PATTERN.search(title_zh_raw) else ""
+    title_display = (
+        f"《{title_zh_raw}》({tmdb_result['year']})"
+        if title_zh_raw and CJK_PATTERN.search(title_zh_raw)
+        else f"{tmdb_result['title_en']} ({tmdb_result['year']})"
+    )
     description = (
-        f"{title_zh}({tmdb_result['year']}) 中文字幕协作项目 | "
+        f"{title_display} 中文字幕协作项目 | "
         f"Chinese fansub project for \"{tmdb_result['title_en']}\" ({tmdb_result['year']})"
     )
     ok, body = call_api(repo_url, github_token, "PATCH", {
