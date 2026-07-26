@@ -18,3 +18,5 @@
 | copy | default-docs/docs/TRANSLATION_GUIDE.md | docs/TRANSLATION_GUIDE.md | add: docs | 翻译与风格指南 |
 | copy | default-docs/licenses/cc/by-nc-sa/4.0/LICENSE | LICENSE | CC BY-NC-SA 4.0 | 许可协议（英文） |
 | copy | default-docs/licenses/cc/by-nc-sa/4.0/LICENSE.zh-Hans | LICENSE.zh-Hans | CC BY-NC-SA 4.0 | 许可协议（中文） |
+| copy | default-docs/docs/RELEASE_GUIDE.md | docs/RELEASE_GUIDE.md | add: docs | Release 命名指南 |
+| copy | default-docs/subtitles/README.md | subtitles/README.md | add: subtitles skeleton | 字幕版本总览 |
