@@ -7,14 +7,17 @@
 #
 # Description / 描述:
 #   仓库初始化总控脚本。串联 tmdb_lookup.py 与 douban_id_lookup.py 的结果，
-#   按 reason 选择对应 README 模板渲染，并通过 GitHub API 回写仓库的
-#   description / topics / Discussions 开关。不涉及仓库可见性（private/
-#   public），该项由模板仓库初始 README 中的手动前置步骤处理。
+#   按 reason 选择对应 README 模板渲染。仓库改名、description/topics/
+#   Discussions 开关、仓库级 secret 下沉均不再由本脚本直接调用 GitHub API
+#   完成，而是打包为 admin_request，通过 dispatch_client 转发给
+#   montagesubs-secure/org-admin-bridge 异步执行（发出即返回，不等待结果）；
+#   ORG_ADMIN_TOKEN 从此只存在于该桥接仓库内，不进入任何字幕仓库。不涉及
+#   仓库可见性（private/public），该项由模板仓库初始 README 中的手动前置
+#   步骤处理。
 #
 # Usage / 用法:
 #   python actions/init/main.py --repo-name Cosmos_Laundromat_2015 \
 #       --github-repository MontageSubs/Cosmos_Laundromat_2015 \
-#       --github-token $ORG_ADMIN_TOKEN \
 #       --tmdb-read-access-token $TMDB_READ_ACCESS_TOKEN \
 #       --tavily-api-key $TAVILY_API_KEY
 #
@@ -42,8 +45,6 @@ import json
 import os
 import re
 import sys
-import urllib.error
-import urllib.request
 import shutil
 import subprocess
 from pathlib import Path
@@ -57,9 +58,9 @@ sys.path.insert(0, os.path.join(REPO_ROOT, "utilities", "github", "env"))
 
 import tmdb_lookup
 import douban_id_lookup
-import secret_provision
-from github_api import call_api, is_debug, requires_org_admin_token
+from github_api import is_debug
 from repo_vars import load_repo_vars
+import dispatch_client
 
 TEMPLATES_DIR = os.path.join(REPO_ROOT, "default-docs", "templates", "readme")
 ERROR_TEMPLATE = os.path.join(TEMPLATES_DIR, "error", "error.md")
@@ -72,8 +73,6 @@ HEADER_MANUAL_FRAGMENT = os.path.join(FRAGMENTS_DIR, "header_manual.md")
 INIT_MARKER = "<!-- montagesubs:initialized -->"
 
 NAMING_ERROR_REASONS = {"invalid_repo_name", "not_found", "title_mismatch", "year_mismatch"}
-
-GITHUB_API_ENDPOINT = "https://api.github.com/repos/{full_name}"
 
 PROVISIONABLE_SECRETS = (
     "TMDB_READ_ACCESS_TOKEN", "TAVILY_API_KEY", "SERPSTACK_API_KEY",
@@ -348,99 +347,43 @@ def render_home_readme(repo_name, header_block, forced, github_repository=""):
     log(f"README rendered from home.md (forced={forced})")
 
 
-def enable_discussions(node_id, github_token):
-    query = """
-    mutation($id: ID!) {
-      updateRepository(input: {repositoryId: $id, hasDiscussionsEnabled: true}) {
-        repository { hasDiscussionsEnabled }
-      }
-    }
-    """
-    payload = json.dumps({"query": query, "variables": {"id": node_id}}).encode("utf-8")
-    request = urllib.request.Request(
-        "https://api.github.com/graphql",
-        data=payload,
-        headers={
-            "Authorization": f"Bearer {github_token}",
-            "Content-Type": "application/json",
-        },
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=20) as response:
-            body = json.loads(response.read().decode("utf-8"))
-        if body.get("errors"):
-            return False, body["errors"]
-        return True, None
-    except urllib.error.HTTPError as e:
-        return False, {"http_status": e.code, "body": e.read().decode("utf-8", "ignore")}
-    except Exception as e:
-        return False, {"http_status": None, "body": str(e)}
-
-
 AUTO_RENAME_REASONS = {"title_mismatch", "year_mismatch"}
 
 
-@requires_org_admin_token("仓库重命名", default=(False, None))
-def rename_repository(github_repository, github_token, new_name):
-    repo_url = GITHUB_API_ENDPOINT.format(full_name=github_repository)
-    ok, body = call_api(repo_url, github_token, "PATCH", {"name": new_name})
-    if not ok:
-        log(f"auto-rename failed: {body}")
-        return False, None
-    new_full_name = body.get("full_name")
-    log(f"auto-renamed repository: {github_repository} -> {new_full_name}")
-    return True, new_full_name
-
-
-@requires_org_admin_token("仓库元数据更新", default=None)
-def update_github_repo_metadata(github_repository, github_token, tmdb_result):
-    repo_url = GITHUB_API_ENDPOINT.format(full_name=github_repository)
-
+def build_repo_description(tmdb_result):
     title_zh_raw = tmdb_result["title_zh"]
     title_display = (
         f"《{title_zh_raw}》({tmdb_result['year']})"
         if title_zh_raw and CJK_PATTERN.search(title_zh_raw)
         else f"{tmdb_result['title_en']} ({tmdb_result['year']})"
     )
-    description = (
+    return (
         f"{title_display} 中文字幕协作项目 | "
         f"Chinese fansub project for \"{tmdb_result['title_en']}\" ({tmdb_result['year']})"
     )
-    ok, body = call_api(repo_url, github_token, "PATCH", {
-        "description": description,
-        "homepage": "",
-        "has_wiki": False,
-    })
-    if ok:
-        log("github repo metadata updated (description/has_wiki)")
-    else:
-        log(f"failed to update repo metadata: {body}")
-
-    node_id = body.get("node_id") if ok else None
-    if node_id:
-        discussions_ok, discussions_err = enable_discussions(node_id, github_token)
-        if discussions_ok:
-            log("discussions enabled (via GraphQL)")
-        else:
-            log(f"failed to enable discussions: {discussions_err}")
-    else:
-        log("no node_id available (metadata PATCH failed), skipping discussions enable")
-
-    topics_ok, topics_err = call_api(repo_url + "/topics", github_token, "PUT", {
-        "names": build_topics(tmdb_result),
-    })
-    if topics_ok:
-        log("github repo topics updated")
-    else:
-        log(f"failed to update repo topics: {topics_err}")
 
 
-def log_secret_provisioning(provision_result):
-    if is_debug():
-        log(f"secret provisioning: {provision_result}")
+def write_github_output(name, value):
+    github_output = os.environ.get("GITHUB_OUTPUT")
+    if not github_output:
         return
-    succeeded = sum(1 for ok in provision_result.values() if ok)
-    log(f"secret provisioning: {succeeded}/{len(provision_result)} token(s) written")
+    with open(github_output, "a", encoding="utf-8") as f:
+        f.write(f"{name}={value}\n")
+
+
+def dispatch_admin_request(github_repository, rename_to=None, tmdb_result=None, provision_secrets=None):
+    request = {
+        "repository": github_repository,
+        "correlation_id": dispatch_client.new_correlation_id(),
+        "provision_secrets": {k: v for k, v in (provision_secrets or {}).items() if v},
+    }
+    if rename_to:
+        request["rename_to"] = rename_to
+    if tmdb_result:
+        request["description"] = build_repo_description(tmdb_result)
+        request["topics"] = build_topics(tmdb_result)
+    write_github_output("admin_request", json.dumps(request, ensure_ascii=False))
+    return request
 
 
 def main():
@@ -449,7 +392,6 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo-name", required=True, help="e.g. Cosmos_Laundromat_2015")
     parser.add_argument("--github-repository", required=True, help="e.g. MontageSubs/Cosmos_Laundromat_2015")
-    parser.add_argument("--github-token", default=None, help="PAT with repo admin scope, used for description/topics update")
     parser.add_argument("--tmdb-read-access-token", default=None)
     parser.add_argument("--tavily-api-key", default=None)
     parser.add_argument("--serpstack-api-key", default=None)
@@ -468,7 +410,6 @@ def main():
     args = parser.parse_args()
 
     tmdb_token = args.tmdb_read_access_token or os.environ.get("TMDB_READ_ACCESS_TOKEN")
-    github_token = args.github_token or os.environ.get("ORG_ADMIN_TOKEN")
     tavily_key = args.tavily_api_key or os.environ.get("TAVILY_API_KEY")
     serpstack_key = args.serpstack_api_key or os.environ.get("SERPSTACK_API_KEY")
 
@@ -484,6 +425,7 @@ def main():
     workspace_dir = Path(os.environ.get("GITHUB_WORKSPACE", "."))
     manifest_path = Path(__file__).parent / "manifest.md"
 
+    pending_rename_to = None
     if args.manual_id:
         tmdb_result = tmdb_lookup.resolve_manual(args.manual_id, tmdb_token)
         if not tmdb_result["success"]:
@@ -499,11 +441,10 @@ def main():
             if reason == "not_found" and args.force_init:
                 reset_workspace(workspace_dir)
                 apply_init_manifest(manifest_path, repo_root, workspace_dir, overwrite=True)
-                provision_result = secret_provision.provision(
-                    args.github_repository, github_token,
-                    {name: os.environ.get(name) for name in PROVISIONABLE_SECRETS},
+                dispatch_admin_request(
+                    args.github_repository,
+                    provision_secrets={name: os.environ.get(name) for name in PROVISIONABLE_SECRETS},
                 )
-                log_secret_provisioning(provision_result)
                 header_block = build_manual_header(args.repo_name, tmdb_result)
                 render_home_readme(args.repo_name, header_block, forced=True)
                 print(json.dumps({"stage": "manual", "success": True, "forced": True}, ensure_ascii=False))
@@ -516,12 +457,12 @@ def main():
                 corrected_name = tmdb_lookup.to_repo_name(
                     tmdb_result["expected_title"], tmdb_result["expected_year"],
                 )
-                renamed, new_full_name = rename_repository(args.github_repository, github_token, corrected_name)
-                if renamed:
-                    log(f"naming mismatch auto-corrected: {args.repo_name} -> {corrected_name}, resuming")
-                    args.repo_name = corrected_name
-                    args.github_repository = new_full_name
-                    tmdb_result = tmdb_lookup.resolve(args.repo_name, tmdb_token)
+                owner = args.github_repository.split("/")[0]
+                log(f"naming mismatch auto-corrected: {args.repo_name} -> {corrected_name}, resuming (rename dispatched to org-admin-bridge, not yet applied)")
+                pending_rename_to = corrected_name
+                args.repo_name = corrected_name
+                args.github_repository = f"{owner}/{corrected_name}"
+                tmdb_result = tmdb_lookup.resolve(args.repo_name, tmdb_token)
             if not tmdb_result["success"]:
                 reason = tmdb_result["reason"]
                 if reason in NAMING_ERROR_REASONS:
@@ -534,13 +475,11 @@ def main():
 
         if tmdb_result.get("needs_rename"):
             canonical_name = tmdb_result["canonical_repo_name"]
-            renamed, new_full_name = rename_repository(args.github_repository, github_token, canonical_name)
-            if renamed:
-                log(f"format normalized: {args.repo_name} -> {canonical_name}")
-                args.repo_name = canonical_name
-                args.github_repository = new_full_name
-            else:
-                log("format-normalization rename unavailable, proceeding with original repo name")
+            owner = args.github_repository.split("/")[0]
+            log(f"format normalized: {args.repo_name} -> {canonical_name} (rename dispatched to org-admin-bridge, not yet applied)")
+            pending_rename_to = canonical_name
+            args.repo_name = canonical_name
+            args.github_repository = f"{owner}/{canonical_name}"
 
     if args.force_init:
         reset_workspace(workspace_dir)
@@ -554,24 +493,24 @@ def main():
         title_hints=[tmdb_result["title_zh"], tmdb_result["title_en"]],
     )
 
-    update_github_repo_metadata(args.github_repository, github_token, tmdb_result)
-    provision_result = secret_provision.provision(
-        args.github_repository, github_token,
-        {name: os.environ.get(name) for name in PROVISIONABLE_SECRETS},
+    admin_request = dispatch_admin_request(
+        args.github_repository,
+        rename_to=pending_rename_to,
+        tmdb_result=tmdb_result,
+        provision_secrets={name: os.environ.get(name) for name in PROVISIONABLE_SECRETS},
     )
-    log_secret_provisioning(provision_result)
     header_block = build_verified_header(args.repo_name, tmdb_result, douban_result)
     render_home_readme(args.repo_name, header_block, forced=args.force_init)
     mark_rendered(args.github_repository)
 
-    log(f"status: success (douban={douban_result.get('success')}, secrets={sum(provision_result.values())}/{len(provision_result)})")
+    log(f"status: success (douban={douban_result.get('success')}, admin_request={admin_request['correlation_id']})")
     if is_debug():
         print(json.dumps({
             "stage": "home",
             "success": True,
             "tmdb": tmdb_result,
             "douban": douban_result,
-            "secret_provisioning": provision_result,
+            "admin_request": admin_request,
         }, ensure_ascii=False))
 
 

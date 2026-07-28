@@ -6,10 +6,12 @@
 # License: MIT License
 #
 # Description / 描述:
-#   官方字幕获取工具的总控脚本。解析目标 IMDb ID 与目标语言（手动 > README
-#   > 仓库名/TMDB），按版次目录调用 opensubtitles_fetch.py 下载候选，
-#   落地为 work/source/<lang>.srt（次优候选落地为 <lang>.candidate-N.srt），
-#   逐文件提交，commit message 不含原始命名，仅含上传者与字幕页面链接。
+#   官方字幕获取的请求构建脚本。解析目标 IMDb ID 与目标语言（手动 > README
+#   > 仓库名/TMDB），按版次目录整理出待抓取的任务清单（opensubtitles_request）。
+#   实际登录 OpenSubtitles、下载、落盘、提交均不在本仓库内发生，而是由
+#   init.yml/fetch-source.yml 的下一步骤通过 dispatch_client 转发给
+#   montagesubs-secure/opensubtitles-bridge 异步执行；三项 OpenSubtitles
+#   凭证从此只存在于该桥接仓库内，不进入任何字幕仓库。
 #
 # Usage / 用法:
 #   python actions/source/main.py --edition web --lang fr
@@ -19,10 +21,7 @@ import argparse
 import json
 import os
 import re
-import shutil
-import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -33,11 +32,8 @@ sys.path.insert(0, os.path.join(REPO_ROOT, "utilities", "github", "env"))
 
 from tmdb_lookup import resolve_entity
 from language_codes import to_opensubtitles_code
-from git_ops import setup_git_identity, commit_if_changed
 from repo_vars import load_repo_vars
-from github_api import is_debug
 
-OPENSUBTITLES_FETCH_SCRIPT = os.path.join(REPO_ROOT, "utilities", "opensubtitles", "opensubtitles_fetch.py")
 KEYWORD_SPLIT_PATTERN = re.compile(r"[-_]+")
 IMDB_PREFIX_PATTERN = re.compile(r"^tt", re.IGNORECASE)
 MIN_CANDIDATE_COUNT = 1
@@ -67,66 +63,31 @@ def discover_editions(workspace_dir):
     return sorted(p.name for p in subtitles_root.iterdir() if p.is_dir())
 
 
-def run_fetch(imdb_numeric, lang_code, keywords, candidate_count, output_dir):
-    command = [
-        sys.executable, OPENSUBTITLES_FETCH_SCRIPT,
-        "--imdb-id", imdb_numeric,
-        "--lang", lang_code,
-        "--release-keyword", keywords,
-        "--download",
-        "--download-count", str(candidate_count),
-        "--output-dir", str(output_dir),
-    ]
-    completed = subprocess.run(command, capture_output=True, text=True)
-    for line in completed.stderr.splitlines():
-        log(f"[opensubtitles_fetch] {line}")
-    try:
-        return json.loads(completed.stdout.strip().splitlines()[-1])
-    except (json.JSONDecodeError, IndexError):
-        return {"success": False, "reason": "fetch_script_no_output"}
+def write_github_output(name, value):
+    github_output = os.environ.get("GITHUB_OUTPUT")
+    if not github_output:
+        return
+    with open(github_output, "a", encoding="utf-8") as f:
+        f.write(f"{name}={value}\n")
 
 
-def place_candidate(local_path, dest_root, lang_tag, rank):
-    dest_name = f"{lang_tag}.srt" if rank == 1 else f"{lang_tag}.candidate-{rank}.srt"
-    dest_path = dest_root / dest_name
-    dest_path.parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(local_path), str(dest_path))
-    return dest_path
-
-
-def commit_subtitle(workspace_dir, dest_path, uploader, page_link):
-    relative = str(dest_path.relative_to(workspace_dir))
-    messages = [f"fetch: official subtitle (uploader: {uploader or 'anonymous'})"]
-    if page_link:
-        messages.append(f"Source: {page_link}")
-    if commit_if_changed([relative], messages, cwd=workspace_dir):
-        log(f"committed: {relative}")
-    else:
-        log(f"skip commit: {relative} unchanged")
-
-
-def fetch_for_edition(workspace_dir, edition_name, imdb_numeric, lang_tags, candidate_count):
-    dest_root = workspace_dir / "subtitles" / edition_name / "work" / "source"
-    keywords = release_keywords(edition_name)
-    committed_any = False
-    for lang_tag in lang_tags:
-        lang_code = to_opensubtitles_code(lang_tag)
-        if not lang_code:
-            log(f"skip: {edition_name}/{lang_tag} (unsupported language code)")
+def build_jobs(editions, lang_tags):
+    jobs = []
+    for edition_name in editions:
+        supported, skipped = [], []
+        for tag in lang_tags:
+            code = to_opensubtitles_code(tag)
+            (supported if code else skipped).append((tag, code) if code else tag)
+        for tag in skipped:
+            log(f"skip: {edition_name}/{tag} (unsupported language code)")
+        if not supported:
             continue
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            result = run_fetch(imdb_numeric, lang_code, keywords, candidate_count, tmp_dir)
-            if not result.get("success"):
-                log(f"skip: {edition_name}/{lang_tag} ({result.get('reason')})")
-                continue
-            for rank, item in enumerate(result["downloaded"], start=1):
-                if not item["verified"]:
-                    log(f"skip commit: {item['local_path']} (unverified download)")
-                    continue
-                dest_path = place_candidate(item["local_path"], dest_root, lang_tag, rank)
-                commit_subtitle(workspace_dir, dest_path, item["uploader"], item["subtitles_page_link"])
-                committed_any = True
-    return committed_any
+        jobs.append({
+            "edition": edition_name,
+            "keywords": release_keywords(edition_name),
+            "languages": [{"tag": tag, "code": code} for tag, code in supported],
+        })
+    return jobs
 
 
 def main():
@@ -144,6 +105,7 @@ def main():
 
     def fail(reason):
         log(f"status: failed ({reason})")
+        write_github_output("opensubtitles_request", "{}")
         sys.exit(0 if args.best_effort else 1)
 
     workspace_dir = Path(os.environ.get("GITHUB_WORKSPACE", "."))
@@ -173,16 +135,21 @@ def main():
         fail("no_editions_found")
         return
 
-    setup_git_identity()
+    jobs = build_jobs(editions, lang_tags)
+    if not jobs:
+        fail("no_supported_languages")
+        return
 
-    committed_any = False
-    for edition_name in editions:
-        if fetch_for_edition(workspace_dir, edition_name, imdb_numeric, lang_tags, candidate_count):
-            committed_any = True
-
-    log(f"status: {'success' if committed_any else 'no_subtitles_committed'}")
-    if is_debug():
-        print(json.dumps({"success": committed_any, "imdb_id": imdb_numeric, "lang": lang_tags}, ensure_ascii=False))
+    request = {
+        "repository": os.environ.get("GITHUB_REPOSITORY", ""),
+        "imdb_id": imdb_numeric,
+        "candidate_count": candidate_count,
+        "jobs": jobs,
+        "actor": os.environ.get("GITHUB_ACTOR", ""),
+        "actor_id": os.environ.get("GITHUB_ACTOR_ID", ""),
+    }
+    write_github_output("opensubtitles_request", json.dumps(request, ensure_ascii=False))
+    log(f"status: request_built (jobs={len(jobs)})")
     sys.exit(0)
 
 
@@ -192,3 +159,4 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         log("interrupted")
         sys.exit(130)
+
