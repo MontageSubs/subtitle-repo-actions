@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: synopsis_pipeline.py
-# Organization: MontageSubs (蒙太奇字幕组)
+# Organization: MontageSubs (蒙太奇字幕社区)
 # License: MIT License
 # Source: https://github.com/MontageSubs/subtitle-repo-actions/utilities/wiki/
 #

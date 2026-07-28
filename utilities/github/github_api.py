@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: github_api.py
-# Version: 1.0.2
-# Organization: MontageSubs (蒙太奇字幕组)
+# Version: 1.0.3
+# Organization: MontageSubs (蒙太奇字幕社区)
 # License: MIT License
 # Source: https://github.com/MontageSubs/subtitle-repo-actions/utilities/github/
 #

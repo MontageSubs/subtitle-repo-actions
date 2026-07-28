@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: main.py
-# Organization: MontageSubs (蒙太奇字幕组)
+# Organization: MontageSubs (蒙太奇字幕社区)
 # License: MIT License
 #
 # Description / 描述:
@@ -35,8 +35,6 @@ import synopsis_pipeline
 from repo_vars import load_repo_vars
 from github_api import is_debug
 
-README_TMDB_PATTERN = re.compile(r"themoviedb\.org/(movie|tv)/(\d+)")
-README_IMDB_PATTERN = re.compile(r"imdb\.com/title/(tt\d+)")
 README_PLOT_PATTERN = re.compile(
     r'(<h2 id="plot">剧情</h2>\n\n'
     r'<!-- 此"影视内容简介"段落为自动生成，若无错误，请勿手动编辑 -->\n\n)'
@@ -52,54 +50,11 @@ def log(message):
     print(f"{SCRIPT_NAME}: {message}", file=sys.stderr)
 
 
-def extract_ids_from_readme(readme_text):
-    tmdb_match = README_TMDB_PATTERN.search(readme_text)
-    imdb_match = README_IMDB_PATTERN.search(readme_text)
-    return {
-        "media_type": tmdb_match.group(1) if tmdb_match else None,
-        "tmdb_id": tmdb_match.group(2) if tmdb_match else None,
-        "imdb_id": imdb_match.group(1) if imdb_match else None,
-    }
-
-
-def resolve_from_tmdb_id(media_type, tmdb_id, imdb_id_hint, tmdb_token):
-    detail, error = tmdb_lookup.get_detail(media_type, tmdb_id, tmdb_token)
-    if error:
-        return tmdb_lookup.empty_result(error["type"])
-    title_zh = detail.get("title") if media_type == "movie" else detail.get("name")
-    title_en = detail.get("original_title") if media_type == "movie" else detail.get("original_name")
-    release_date = detail.get("release_date") if media_type == "movie" else detail.get("first_air_date")
-    return {
-        "success": True, "reason": None,
-        "media_type": media_type, "tmdb_id": tmdb_id,
-        "imdb_id": detail.get("external_ids", {}).get("imdb_id") or imdb_id_hint,
-        "title_en": title_en, "title_zh": title_zh,
-        "year": int((release_date or "0000")[:4] or 0),
-        "overview_zh": detail.get("overview"), "poster_path": detail.get("poster_path"),
-        "original_language": detail.get("original_language"),
-    }
-
-
 def update_readme_overview(readme_text, overview):
     if not README_PLOT_PATTERN.search(readme_text):
         return readme_text, False
     updated = README_PLOT_PATTERN.sub(lambda m: f"{m.group(1)}{overview}\n\n\n", readme_text, count=1)
     return updated, True
-
-
-def resolve_tmdb_result(manual_id, tmdb_token, readme_path):
-    if manual_id:
-        return tmdb_lookup.resolve_manual(manual_id, tmdb_token)
-
-    if not readme_path.exists():
-        return tmdb_lookup.empty_result("readme_not_found")
-
-    ids = extract_ids_from_readme(readme_path.read_text(encoding="utf-8"))
-    if ids["tmdb_id"] and ids["media_type"]:
-        return resolve_from_tmdb_id(ids["media_type"], int(ids["tmdb_id"]), ids["imdb_id"], tmdb_token)
-    if ids["imdb_id"]:
-        return tmdb_lookup.resolve_manual(ids["imdb_id"], tmdb_token)
-    return tmdb_lookup.empty_result("not_found")
 
 
 def main():
@@ -116,7 +71,7 @@ def main():
 
     tmdb_token = os.environ.get("TMDB_READ_ACCESS_TOKEN")
     log(f"start: manual_id={args.manual_id!r} readme_path={args.readme_path} force={args.force}")
-    tmdb_result = resolve_tmdb_result(args.manual_id, tmdb_token, Path(args.readme_path))
+    tmdb_result = tmdb_lookup.resolve_entity(args.manual_id, tmdb_token, Path(args.readme_path))
 
     if not tmdb_result["success"]:
         log(f"tmdb resolution failed ({tmdb_result['reason']})")

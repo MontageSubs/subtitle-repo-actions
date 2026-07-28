@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: main.py
-# Organization: MontageSubs (蒙太奇字幕组)
+# Organization: MontageSubs (蒙太奇字幕社区)
 # License: MIT License
 #
 # Description / 描述:
@@ -205,12 +205,13 @@ def log(message):
     print(f"{SCRIPT_NAME}: {message}", file=sys.stderr)
 
 
-def mark_rendered():
+def mark_rendered(github_repository):
     github_output = os.environ.get("GITHUB_OUTPUT")
     if not github_output:
         return
     with open(github_output, "a", encoding="utf-8") as f:
         f.write("rendered=true\n")
+        f.write(f"github_repository={github_repository}\n")
 
 
 def read_template(path):
@@ -561,7 +562,7 @@ def main():
     log_secret_provisioning(provision_result)
     header_block = build_verified_header(args.repo_name, tmdb_result, douban_result)
     render_home_readme(args.repo_name, header_block, forced=args.force_init)
-    mark_rendered()
+    mark_rendered(args.github_repository)
 
     log(f"status: success (douban={douban_result.get('success')}, secrets={sum(provision_result.values())}/{len(provision_result)})")
     if is_debug():

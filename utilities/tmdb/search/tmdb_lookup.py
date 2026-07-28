@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: tmdb_lookup.py
-# Version: 1.4.0
-# Organization: MontageSubs (蒙太奇字幕组)
+# Version: 1.4.1
+# Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p)
 # License: MIT License
 # Source: https://github.com/MontageSubs/subtitle-repo-actions/utilities/tmdb/search/
@@ -75,6 +75,7 @@ import argparse
 import difflib
 import json
 import os
+import platform
 import re
 import sys
 import unicodedata
@@ -82,20 +83,38 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-def read_own_version():
+def read_own_metadata(field):
     try:
         with open(__file__, "r", encoding="utf-8") as f:
             for line in f:
-                if line.startswith("# Version:"):
+                if line.startswith(f"# {field}:"):
                     return line.split(":", 1)[1].strip()
     except OSError:
         pass
-    return "DEV"
+    return None
 
 
-VERSION = read_own_version()
-REPOSITORY = "https://github.com/MontageSubs/subtitle-repo-actions"
-USER_AGENT = f"tmdb_lookup/{VERSION} (+{REPOSITORY}; GitHub Actions)"
+def local_environment_label():
+    try:
+        info = platform.freedesktop_os_release()
+        name = info.get("NAME", "").replace(" ", "-")
+        version = info.get("VERSION_ID", "")
+        if name and version:
+            return f"{name}-{version}"
+    except (OSError, AttributeError):
+        pass
+    return f"{platform.system()}-{platform.release()}"
+
+
+def build_user_agent(head, version, source_url=None):
+    env = "GitHub Actions" if os.environ.get("GITHUB_ACTIONS") == "true" else local_environment_label()
+    context = f"{env}; +{source_url}" if source_url else env
+    return f"{head}/{version} ({context})"
+
+
+VERSION = read_own_metadata("Version") or "unknown"
+REPOSITORY = read_own_metadata("Source")
+USER_AGENT = build_user_agent("tmdb_lookup", VERSION, REPOSITORY)
 
 TMDB_READ_ACCESS_TOKEN_ENV = "TMDB_READ_ACCESS_TOKEN"
 TMDB_SEARCH_ENDPOINT = "https://api.themoviedb.org/3/search/multi"
@@ -450,6 +469,61 @@ def resolve_manual(raw, tmdb_read_access_token=None):
         "poster_path": detail.get("poster_path"),
         "original_language": detail.get("original_language"),
     }
+
+
+README_TMDB_PATTERN = re.compile(r"themoviedb\.org/(movie|tv)/(\d+)")
+README_IMDB_PATTERN = re.compile(r"imdb\.com/title/(tt\d+)")
+
+
+def extract_ids_from_readme(readme_text):
+    tmdb_match = README_TMDB_PATTERN.search(readme_text)
+    imdb_match = README_IMDB_PATTERN.search(readme_text)
+    return {
+        "media_type": tmdb_match.group(1) if tmdb_match else None,
+        "tmdb_id": tmdb_match.group(2) if tmdb_match else None,
+        "imdb_id": imdb_match.group(1) if imdb_match else None,
+    }
+
+
+def resolve_from_tmdb_id(media_type, tmdb_id, imdb_id_hint, tmdb_read_access_token):
+    detail, error = get_detail(media_type, tmdb_id, tmdb_read_access_token)
+    if error:
+        return empty_result(error["type"])
+    title_zh = detail.get("title") if media_type == "movie" else detail.get("name")
+    title_en = detail.get("original_title") if media_type == "movie" else detail.get("original_name")
+    release_date = detail.get("release_date") if media_type == "movie" else detail.get("first_air_date")
+    return {
+        "success": True, "reason": None,
+        "media_type": media_type, "tmdb_id": tmdb_id,
+        "imdb_id": detail.get("external_ids", {}).get("imdb_id") or imdb_id_hint,
+        "title_en": title_en, "title_zh": title_zh,
+        "year": int((release_date or "0000")[:4] or 0),
+        "overview_zh": detail.get("overview"), "poster_path": detail.get("poster_path"),
+        "original_language": detail.get("original_language"),
+    }
+
+
+def resolve_repo_name_from_env():
+    github_repository = os.environ.get("GITHUB_REPOSITORY")
+    return github_repository.split("/")[-1] if github_repository else None
+
+
+def resolve_entity(manual_id, tmdb_read_access_token, readme_path):
+    if manual_id:
+        return resolve_manual(manual_id, tmdb_read_access_token)
+
+    if readme_path.exists():
+        ids = extract_ids_from_readme(readme_path.read_text(encoding="utf-8"))
+        if ids["tmdb_id"] and ids["media_type"]:
+            return resolve_from_tmdb_id(ids["media_type"], int(ids["tmdb_id"]), ids["imdb_id"], tmdb_read_access_token)
+        if ids["imdb_id"]:
+            return resolve_manual(ids["imdb_id"], tmdb_read_access_token)
+
+    repo_name = resolve_repo_name_from_env()
+    if not repo_name:
+        return empty_result("readme_not_found")
+    log(f"no usable id from readme, falling back to repo-name TMDB resolution: {repo_name}")
+    return resolve(repo_name, tmdb_read_access_token)
 
 
 def resolve_read_access_token(cli_value):

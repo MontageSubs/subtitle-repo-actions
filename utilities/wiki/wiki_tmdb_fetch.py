@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: wiki_tmdb_fetch.py
-# Version: 1.6.0
-# Organization: MontageSubs (蒙太奇字幕组)
+# Version: 1.7.1
+# Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p)
 # License: MIT License
 # Source: https://github.com/MontageSubs/subtitle-repo-actions/utilities/wiki/
@@ -107,12 +107,16 @@
 import argparse
 import json
 import os
+import platform
 import re
 import subprocess
 import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tmdb", "search"))
+import tmdb_lookup
 
 try:
     from bs4 import BeautifulSoup
@@ -133,26 +137,41 @@ except ImportError:
         }, ensure_ascii=False))
         sys.exit(0)
 
-def read_own_version():
+def read_own_metadata(field):
     try:
         with open(__file__, "r", encoding="utf-8") as f:
             for line in f:
-                if line.startswith("# Version:"):
+                if line.startswith(f"# {field}:"):
                     return line.split(":", 1)[1].strip()
     except OSError:
         pass
-    return "DEV"
+    return None
 
 
-VERSION = read_own_version()
-REPOSITORY = "https://github.com/MontageSubs/subtitle-repo-actions"
+def local_environment_label():
+    try:
+        info = platform.freedesktop_os_release()
+        name = info.get("NAME", "").replace(" ", "-")
+        version = info.get("VERSION_ID", "")
+        if name and version:
+            return f"{name}-{version}"
+    except (OSError, AttributeError):
+        pass
+    return f"{platform.system()}-{platform.release()}"
 
-TMDB_READ_ACCESS_TOKEN_ENV = "TMDB_READ_ACCESS_TOKEN"
-TMDB_API_BASE = "https://api.themoviedb.org/3"
+
+def build_user_agent(head, version, source_url=None):
+    env = "GitHub Actions" if os.environ.get("GITHUB_ACTIONS") == "true" else local_environment_label()
+    context = f"{env}; +{source_url}" if source_url else env
+    return f"{head}/{version} ({context})"
+
+
+VERSION = read_own_metadata("Version") or "unknown"
+REPOSITORY = read_own_metadata("Source")
+USER_AGENT = build_user_agent("wiki_tmdb_fetch", VERSION, REPOSITORY)
 WIKIDATA_API = "https://www.wikidata.org/w/api.php"
 WIKIPEDIA_REST_HTML = "https://{lang}.wikipedia.org/api/rest_v1/page/html/{title}"
 IMDB_PROPERTY = "P345"
-USER_AGENT = f"wiki_tmdb_fetch/{VERSION} (+{REPOSITORY}; GitHub Actions)"
 REQUEST_TIMEOUT = 20
 
 DEFAULT_LANGUAGE_PRIORITY = ("en", "zh", "fr", "de", "es")
@@ -171,6 +190,32 @@ LANGUAGE_DISPLAY_NAMES = {
     "de": "Deutsch",
     "es": "Español",
     "ja": "日本語",
+    "ko": "한국어",
+    "it": "Italiano",
+    "pt": "Português",
+    "ru": "Русский",
+    "tr": "Türkçe",
+    "fa": "فارسی",
+    "ar": "العربية",
+    "th": "ไทย",
+    "hi": "हिन्दी",
+    "vi": "Tiếng Việt",
+    "id": "Bahasa Indonesia",
+    "he": "עברית",
+    "el": "Ελληνικά",
+    "ro": "Română",
+    "pl": "Polski",
+    "cs": "Čeština",
+    "hu": "Magyar",
+    "uk": "Українська",
+    "sv": "Svenska",
+    "no": "Norsk",
+    "da": "Dansk",
+    "fi": "Suomi",
+    "nl": "Nederlands",
+    "ms": "Bahasa Melayu",
+    "bn": "বাংলা",
+    "ta": "தமிழ்",
 }
 
 
@@ -670,13 +715,11 @@ def http_get(url, headers=None):
         return None, {"type": ERROR_NETWORK, "detail": str(e)}
 
 
-def call_tmdb(path, token, params=None):
-    query = urllib.parse.urlencode(params or {})
-    url = f"{TMDB_API_BASE}{path}" + (f"?{query}" if query else "")
-    body_text, error = http_get(url, headers={"Authorization": f"Bearer {token}", "accept": "application/json"})
-    if error:
-        return None, error
-    return json.loads(body_text), None
+def call_tmdb(media_type, tmdb_id, token, suffix="", params=None):
+    url = tmdb_lookup.TMDB_DETAIL_ENDPOINT.format(media_type=media_type, id=tmdb_id) + suffix
+    if params:
+        url += f"?{urllib.parse.urlencode(params)}"
+    return tmdb_lookup.call_tmdb(url, token)
 
 
 def resolve_wikidata_entity(imdb_id):
@@ -828,7 +871,7 @@ def extract_reception(soup, lang):
 
 def fetch_tmdb_credits(tmdb_id, media_type, token):
     log(f"query (tmdb credits): {media_type}/{tmdb_id}/credits")
-    body, error = call_tmdb(f"/{media_type}/{tmdb_id}/credits", token)
+    body, error = call_tmdb(media_type, tmdb_id, token, suffix="/credits")
     if error:
         return None, error
     crew = {}
@@ -842,7 +885,7 @@ def fetch_tmdb_credits(tmdb_id, media_type, token):
 
 def fetch_tmdb_detail(tmdb_id, media_type, token):
     log(f"query (tmdb detail): {media_type}/{tmdb_id}")
-    body, error = call_tmdb(f"/{media_type}/{tmdb_id}", token)
+    body, error = call_tmdb(media_type, tmdb_id, token)
     if error:
         return None, error
     return {
@@ -855,7 +898,7 @@ def fetch_tmdb_detail(tmdb_id, media_type, token):
 
 def fetch_tmdb_overview(tmdb_id, media_type, token, language):
     log(f"query (tmdb overview {language}): {media_type}/{tmdb_id}")
-    body, error = call_tmdb(f"/{media_type}/{tmdb_id}", token, params={"language": language})
+    body, error = call_tmdb(media_type, tmdb_id, token, params={"language": language})
     if error:
         return None, error
     return body.get("overview"), None

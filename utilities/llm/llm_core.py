@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: llm_core.py
-# Version: 2.3.0
-# Organization: MontageSubs (蒙太奇字幕组)
+# Version: 2.3.1
+# Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p)
 # License: MIT License
 # Source: https://github.com/MontageSubs/subtitle-repo-actions/utilities/llm/
@@ -56,6 +56,7 @@
 import argparse
 import json
 import os
+import platform
 import socket
 import sys
 import threading
@@ -63,20 +64,38 @@ import time
 import urllib.error
 import urllib.request
 
-def read_own_version():
+def read_own_metadata(field):
     try:
         with open(__file__, "r", encoding="utf-8") as f:
             for line in f:
-                if line.startswith("# Version:"):
+                if line.startswith(f"# {field}:"):
                     return line.split(":", 1)[1].strip()
     except OSError:
         pass
-    return "DEV"
+    return None
 
 
-VERSION = read_own_version()
-REPOSITORY = "https://github.com/MontageSubs/subtitle-repo-actions"
-USER_AGENT = f"llm_core/{VERSION} (+{REPOSITORY}; GitHub Actions)"
+def local_environment_label():
+    try:
+        info = platform.freedesktop_os_release()
+        name = info.get("NAME", "").replace(" ", "-")
+        version = info.get("VERSION_ID", "")
+        if name and version:
+            return f"{name}-{version}"
+    except (OSError, AttributeError):
+        pass
+    return f"{platform.system()}-{platform.release()}"
+
+
+def build_user_agent(head, version, source_url=None):
+    env = "GitHub Actions" if os.environ.get("GITHUB_ACTIONS") == "true" else local_environment_label()
+    context = f"{env}; +{source_url}" if source_url else env
+    return f"{head}/{version} ({context})"
+
+
+VERSION = read_own_metadata("Version") or "unknown"
+REPOSITORY = read_own_metadata("Source")
+USER_AGENT = build_user_agent("llm_core", VERSION, REPOSITORY)
 
 GOOGLE_TOKEN_ENV = "GOOGLE_LLM_TOKEN"
 GOOGLE_MODEL_ENV = "GEMINI_LLM_MODEL"

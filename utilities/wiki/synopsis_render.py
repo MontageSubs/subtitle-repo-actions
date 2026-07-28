@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: synopsis_render.py
-# Version: 1.2.0
-# Organization: MontageSubs (蒙太奇字幕组)
+# Version: 1.2.1
+# Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p)
 # License: MIT License
 # Source: https://github.com/MontageSubs/subtitle-repo-actions/utilities/wiki/

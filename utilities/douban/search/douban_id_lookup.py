@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: douban_id_lookup.py
-# Version: 1.6.0
-# Organization: MontageSubs (蒙太奇字幕组)
+# Version: 1.7
+# Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p)
 # License: MIT License
 # Source: https://github.com/MontageSubs/subtitle-repo-actions/utilities/douban/search/
@@ -132,7 +132,14 @@ def extract_subject_id(url):
     return None
 
 
+def is_douban_url(url):
+    return "douban.com" in urllib.parse.urlparse(url).netloc
+
+
 def log_raw_result(provider, url, title, score, matched):
+    if not is_douban_url(url):
+        log(f"  [{provider}] <non-douban result omitted>")
+        return
     score_part = f" score={score:.3f}" if score is not None else ""
     marker = "" if matched else " (no douban id)"
     log(f"  [{provider}] {url} | {title}{score_part}{marker}")

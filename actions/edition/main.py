@@ -13,6 +13,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fi
 sys.path.insert(0, os.path.join(REPO_ROOT, "utilities", "github"))
 
 from github_api import is_debug
+from git_ops import setup_git_identity, commit_if_changed
 
 TEMPLATES_ROOT = Path(REPO_ROOT) / "default-docs" / "templates" / "edition"
 
@@ -64,17 +65,8 @@ def copy_edition_templates(source_root, dest_root, context):
         log(f"created {dest_path}")
 
 
-def setup_git_identity():
-    actor = os.environ.get("GITHUB_ACTOR")
-    actor_id = os.environ.get("GITHUB_ACTOR_ID")
-    if actor and actor_id:
-        subprocess.run(f'git config user.name "{actor}"', shell=True, check=True)
-        subprocess.run(f'git config user.email "{actor_id}+{actor}@users.noreply.github.com"', shell=True, check=True)
-
-
 def commit_edition(dest_root, edition_name):
-    subprocess.run(["git", "add", "-A", "--", str(dest_root)], check=True)
-    subprocess.run(f'git diff --staged --quiet || git commit -m "add: edition {edition_name}"', shell=True, check=True)
+    commit_if_changed([str(dest_root)], [f"add: edition {edition_name}"])
 
 
 def mark_output(key, value):

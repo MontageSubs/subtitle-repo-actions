@@ -71,11 +71,11 @@
 
 
 
-<h2 id="about-montagesubs">关于蒙太奇字幕组 (MontageSubs)</h2>
+<h2 id="about-montagesubs">关于蒙太奇字幕社区 (MontageSubs)</h2>
 
 <!-- 此段为固定段落，非必要请勿更改 -->
 
-**蒙太奇字幕组 (MontageSubs)** 是一个平等、开放的志愿者社区，成员因对影视与翻译的热爱而聚在一起，共同为优秀的作品制作高质量的中文字幕。这里没有固定的层级：任何人都可以发起一个字幕项目、担任协调员并邀请他人加入，也可以随时加入他人发起的项目、贡献自己擅长的部分。
+**蒙太奇字幕社区 (MontageSubs)** 是一个平等、开放的志愿者社区，成员因对影视与翻译的热爱而聚在一起，共同为优秀的作品制作高质量的中文字幕。这里没有固定的层级：任何人都可以发起一个字幕项目、担任协调员并邀请他人加入，也可以随时加入他人发起的项目、贡献自己擅长的部分。
 
 <h3 id="how-to-contribute">如何参与</h3>
 
@@ -148,10 +148,10 @@
 
 <table>
   <tr>
-    <th><div align="center">字幕组网站</div></th>
+    <th><div align="center">字幕社区网站</div></th>
   </tr>
   <tr>
-    <td><div align="center"><a href="https://montagesubs.github.io/"><img src="https://raw.githubusercontent.com/MontageSubs/brand-assets/main/logos/favicon/default/png/favicon-32.png" width="20" alt="Official site"/><br/>蒙太奇字幕组网站</a></div></td>
+    <td><div align="center"><a href="https://montagesubs.github.io/"><img src="https://raw.githubusercontent.com/MontageSubs/brand-assets/main/logos/favicon/default/png/favicon-32.png" width="20" alt="Official site"/><br/>蒙太奇字幕社区网站</a></div></td>
   </tr>
 </table>
 
