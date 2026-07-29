@@ -6,17 +6,17 @@
 
 - **action**：`copy` 从 source 复制内容到 destination；`touch` 在 destination 创建一个空文件（用于建立空目录，Git 不支持提交空目录）
 - **source**：相对 subtitle-repo-actions 仓库根目录的路径；`action` 为 `touch` 时填 `-`
-- **destination**：相对目标仓库根目录的完整路径（含文件名），支持在复制时改名，如 `docs/CONTRIBUTING.md → docs/Guide.md`
+- **destination**：相对目标仓库根目录的完整路径（含文件名），支持在复制时改名，如 `docs/project/CONTRIBUTING.md → docs/project/Guide.md`
 - **commit_message**：本行改动所属的 commit message；多行共用同一 commit_message 会被合并进同一次提交
 - **description**：给人看的说明，机器不解析此列
 
 | action | source | destination | commit_message | description |
 | :--- | :--- | :--- | :--- | :--- |
-| copy | default-docs/docs/CONTRIBUTING.md | docs/CONTRIBUTING.md | add: docs | 贡献指南 |
-| copy | default-docs/docs/COPYRIGHT.md | docs/COPYRIGHT.md | add: docs | 著作权声明 |
-| copy | default-docs/docs/GITHUB_USAGE_GUIDE.md | docs/GITHUB_USAGE_GUIDE.md | add: docs | GitHub 使用指南 |
-| copy | default-docs/docs/TRANSLATION_GUIDE.md | docs/TRANSLATION_GUIDE.md | add: docs | 翻译与风格指南 |
+| copy | default-docs/docs/project/CONTRIBUTING.md | docs/project/CONTRIBUTING.md | add: docs | 贡献指南 |
+| copy | default-docs/docs/project/COPYRIGHT.md | docs/project/COPYRIGHT.md | add: docs | 著作权声明 |
+| copy | default-docs/docs/project/GITHUB_USAGE_GUIDE.md | docs/project/GITHUB_USAGE_GUIDE.md | add: docs | GitHub 使用指南 |
+| copy | default-docs/docs/guides/TRANSLATION_GUIDE.md | docs/guides/TRANSLATION_GUIDE.md | add: docs | 翻译与风格指南 |
 | copy | default-docs/licenses/cc/by-nc-sa/4.0/LICENSE | LICENSE | CC BY-NC-SA 4.0 | 许可协议（英文） |
 | copy | default-docs/licenses/cc/by-nc-sa/4.0/LICENSE.zh-Hans | LICENSE.zh-Hans | CC BY-NC-SA 4.0 | 许可协议（中文） |
-| copy | default-docs/docs/EDITION_GUIDE.md | docs/EDITION_GUIDE.md | add: docs | 版次命名指南 |
+| copy | default-docs/docs/guides/EDITION_GUIDE.md | docs/guides/EDITION_GUIDE.md | add: docs | 版次命名指南 |
 | copy | default-docs/subtitles/README.md | subtitles/README.md | add: subtitles skeleton | 字幕版次总览 |
