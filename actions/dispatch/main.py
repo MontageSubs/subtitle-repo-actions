@@ -37,6 +37,7 @@ def main():
     parser.add_argument("--bridge-repo", required=True, choices=["org-admin-bridge", "opensubtitles-bridge"])
     parser.add_argument("--event-type", required=True)
     parser.add_argument("--payload", required=True, help="JSON string, empty object skips dispatch")
+    parser.add_argument("--repository-id", help="Immutable numeric repository ID, takes precedence over any name field")
     args = parser.parse_args()
 
     payload = json.loads(args.payload)
@@ -44,6 +45,8 @@ def main():
         log("empty payload, nothing to dispatch")
         sys.exit(0)
 
+    if args.repository_id:
+        payload["repository_id"] = int(args.repository_id)
     payload.setdefault("correlation_id", dispatch_client.new_correlation_id())
     token = os.environ.get("SECURE_DISPATCH_TOKEN")
     ok, error = dispatch_client.dispatch(args.bridge_repo, token, args.event_type, payload)
