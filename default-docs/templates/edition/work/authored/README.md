@@ -14,7 +14,7 @@
 
 ## 提交前
 
-请参考 [翻译与风格指南](../../../../docs/TRANSLATION_GUIDE.md) 与 [贡献指南](../../../../docs/CONTRIBUTING.md)。
+请参考 [翻译与风格指南](../../../../docs/guides/TRANSLATION_GUIDE.md) 与 [贡献指南](../../../../docs/project/CONTRIBUTING.md)。
 
 ---
 

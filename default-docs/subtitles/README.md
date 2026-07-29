@@ -4,7 +4,7 @@
 
 ## 下方会有哪些子目录
 
-子目录名由片源与剪辑类型组合而成，常见的如 `web`、`bluray`、`web-uk`、`bluray-extended`，具体命名规则见 [版次命名指南](../docs/EDITION_GUIDE.md)。每新增一个版次即新增一个这样的子目录，目录内的 `README.md` 说明该版次的具体来源信息。
+子目录名由片源与剪辑类型组合而成，常见的如 `web`、`bluray`、`web-uk`、`bluray-extended`，具体命名规则见 [版次命名指南](../docs/guides/EDITION_GUIDE.md)。每新增一个版次即新增一个这样的子目录，目录内的 `README.md` 说明该版次的具体来源信息。
 
 ## 新增版次
 
@@ -12,7 +12,7 @@
 
 ## 我想贡献字幕翻译
 
-请进入目标版次子目录下的 `work/authored/`，具体操作参见 [贡献指南](../docs/CONTRIBUTING.md)。
+请进入目标版次子目录下的 `work/authored/`，具体操作参见 [贡献指南](../docs/project/CONTRIBUTING.md)。
 
 ---
 

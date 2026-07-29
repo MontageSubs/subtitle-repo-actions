@@ -4,7 +4,7 @@
 
 ## 触发方式
 
-通过 [Actions](../../../actions/workflows/add-edition.yml) 中的 **新增 Edition (Add Edition)** workflow 手动触发（首次初始化时也会一并要求填写），需在表单中提供以下三项之一（**三选一，必选**）：
+通过 [Actions](../../../../actions/workflows/add-edition.yml) 中的 **新增 Edition (Add Edition)** workflow 手动触发（首次初始化时也会一并要求填写），需在表单中提供以下三项之一（**三选一，必选**）：
 
 - **WEB** —— 片源为网络流媒体版本
 - **BluRay** —— 片源为蓝光版本

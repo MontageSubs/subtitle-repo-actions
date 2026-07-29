@@ -83,7 +83,7 @@
 
 - **发起项目：** 看中了一部作品？直接创建仓库、组建团队，你就是这个项目的协调员
 - **加入项目：** 在 Discussions 或 Telegram 群组中，找到正在进行的项目，认领翻译、校对、时间轴、后期等任一环节
-- **了解协作方式：** 开始前建议先浏览 **[贡献指南](./docs/CONTRIBUTING.md)**、**[翻译与风格指南](./docs/TRANSLATION_GUIDE.md)**、**[GitHub 使用指南](./docs/GITHUB_USAGE_GUIDE.md)**
+- **了解协作方式：** 开始前建议先浏览 **[贡献指南](./docs/project/CONTRIBUTING.md)**、**[翻译与风格指南](./docs/guides/TRANSLATION_GUIDE.md)**、**[GitHub 使用指南](./docs/project/GITHUB_USAGE_GUIDE.md)**
 
 <h2 id="community">社群</h2>
 
@@ -165,7 +165,7 @@
 
 <h2 id="copyright">著作权声明</h2>
 
-我们不参与亦不支持任何形式的盗版制作、分发或传播。字幕的制作基于合理使用或其他法定著作权例外而进行，具体说明请详阅我们的 [著作权声明](./docs/COPYRIGHT.md)。
+我们不参与亦不支持任何形式的盗版制作、分发或传播。字幕的制作基于合理使用或其他法定著作权例外而进行，具体说明请详阅我们的 [著作权声明](./docs/project/COPYRIGHT.md)。
 
 ---
 

@@ -8,7 +8,7 @@
 | 附加标签 | {label_display} |
 | 目录标识 | `{edition_name}` |
 
-命名规则与来源类型说明参见 [版次命名指南](../../docs/EDITION_GUIDE.md)。
+命名规则与来源类型说明参见 [版次命名指南](../../docs/guides/EDITION_GUIDE.md)。
 
 ## 下方会有哪些子目录
 
