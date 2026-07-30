@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: srt_extract.py
-# Version: 1.0.0
+# Version: 1.0.1
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -215,10 +215,14 @@ def build_segments(cues, glossary):
     return segments
 
 
+QUOTE_PENDING_LIMIT = 10
+
+
 def group_segments(segments):
     groups = []
     current = []
     quote_pending = False
+    quote_span = 0
     for seg in segments:
         if seg["resolved"]:
             if current:
@@ -226,6 +230,7 @@ def group_segments(segments):
                 current = []
             groups.append([seg])
             quote_pending = False
+            quote_span = 0
             continue
         if current and (quote_pending or should_merge(current[-1], seg)):
             current.append(seg)
@@ -234,9 +239,11 @@ def group_segments(segments):
                 groups.append(current)
             current = [seg]
         if quote_pending:
-            quote_pending = not ends_with_quote(seg["text"])
+            quote_span += 1
+            quote_pending = not ends_with_quote(seg["text"]) and quote_span < QUOTE_PENDING_LIMIT
         else:
             quote_pending = starts_with_quote(seg["text"]) and not ends_with_quote(seg["text"])
+            quote_span = 1 if quote_pending else 0
     if current:
         groups.append(current)
     return groups
