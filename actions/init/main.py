@@ -372,7 +372,7 @@ def write_github_output(name, value):
         f.write(f"{name}={value}\n")
 
 
-def dispatch_admin_request(github_repository, rename_to=None, tmdb_result=None, provision_secrets=None):
+def dispatch_admin_request(github_repository, rename_to=None, tmdb_result=None, provision_secrets=None, private=False):
     request = {
         "repository": github_repository,
         "correlation_id": dispatch_client.new_correlation_id(),
@@ -383,6 +383,8 @@ def dispatch_admin_request(github_repository, rename_to=None, tmdb_result=None, 
     if tmdb_result:
         request["description"] = build_repo_description(tmdb_result)
         request["topics"] = build_topics(tmdb_result)
+    if private:
+        request["private"] = True
     write_github_output("admin_request", json.dumps(request, ensure_ascii=False))
     return request
 
@@ -407,6 +409,10 @@ def main():
             "后按 manifest 重新铺设默认文件并重新渲染 README；"
             "reason=not_found 时额外跳过命名校验，生成空白待填写模板"
         ),
+    )
+    parser.add_argument(
+        "--private-init", action="store_true",
+        help="可选：初始化完成后将仓库转为私有，用于测试/草稿阶段尚未准备好公开的场景",
     )
     args = parser.parse_args()
 
@@ -445,6 +451,7 @@ def main():
                 dispatch_admin_request(
                     args.github_repository,
                     provision_secrets={name: os.environ.get(name) for name in PROVISIONABLE_SECRETS},
+                    private=args.private_init,
                 )
                 header_block = build_manual_header(args.repo_name, tmdb_result)
                 render_home_readme(args.repo_name, header_block, forced=True)
@@ -499,6 +506,7 @@ def main():
         rename_to=pending_rename_to,
         tmdb_result=tmdb_result,
         provision_secrets={name: os.environ.get(name) for name in PROVISIONABLE_SECRETS},
+        private=args.private_init,
     )
     header_block = build_verified_header(args.repo_name, tmdb_result, douban_result)
     render_home_readme(args.repo_name, header_block, forced=args.force_init)
