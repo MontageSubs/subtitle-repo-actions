@@ -134,7 +134,7 @@ def main():
         if dest_relative:
             committed_paths.append(dest_relative)
 
-    if committed_paths and commit_if_changed(committed_paths, [f"translate: legacy MT draft ({len(committed_paths)} file(s))"]):
+    if committed_paths and commit_if_changed(committed_paths, ["translate: add legacy MT draft"]):
         log(f"status: committed ({len(committed_paths)} file(s))")
     else:
         log("status: nothing to commit")
