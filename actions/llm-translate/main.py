@@ -7,14 +7,15 @@
 # Source: https://github.com/MontageSubs/subtitle-repo-actions/tree/main/actions/llm-translate/
 #
 # Description / 描述:
-#   LLM翻译草稿的请求构建与转发入口。与legacy-translate不同，本action只由
+#   LLM翻译请求的发现与转发入口。与legacy-translate不同，本action只由
 #   llm-translate.yml的workflow_dispatch手动触发，不随work/source/变更
-#   自动跑——Gemini API调用为收费项，不适合无条件自动触发。对每个
-#   <edition>/work/source/<src_lang>.srt组装translate_request（原文+ 已有
-#   的SYNOPSIS/GLOSSARY作为翻译上下文），经relay_client用HMAC签名POST至
-#   llm-translate-relay Worker。收到202确认即视为成功，不等待实际翻译
-#   完成——译文由Worker自行用其持有的GitHub PAT直接提交回本仓库，本次
-#   workflow运行不产生任何commit，也无需git push步骤。默认已存在同名草稿
+#   自动跑——LLM调用消耗成员个人配额，不适合无条件自动触发。对每个
+#   <edition>/work/source/<src_lang>.srt，用DISPATCH_TOKEN向触发者
+#   （GITHUB_ACTOR）个人fork的montagesubs-translate-actions仓库发起
+#   workflow_dispatch，翻译在成员自己的Actions配额内运行，完成后由该
+#   fork侧的Action自行用其持有的GitHub PAT把译文提交回本仓库——本次
+#   workflow运行不产生任何commit，也无需git push步骤。DISPATCH_TOKEN
+#   未配置视为环境错误，直接报错退出而非静默跳过。默认已存在同名草稿
 #   即跳过，仅--force才重新请求覆盖。
 #
 # Usage / 用法:
@@ -25,19 +26,18 @@ import argparse
 import os
 import re
 import sys
+import urllib.request
+import urllib.error
+import json
 from pathlib import Path
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.insert(0, os.path.join(REPO_ROOT, "utilities", "llm"))
 sys.path.insert(0, os.path.join(REPO_ROOT, "utilities", "github", "env"))
 
-from relay_client import send_translate_request
 from repo_vars import load_repo_vars
 
 SCRIPT_NAME = "llm_translate_main"
 SOURCE_PATH_PATTERN = re.compile(r"^subtitles/(?P<edition>[^/]+)/work/source/(?P<lang>[A-Za-z0-9-]+)\.srt$")
-SYNOPSIS_PATH = Path("docs") / "synopsis" / "SYNOPSIS.md"
-GLOSSARY_PATH = Path("docs") / "synopsis" / "GLOSSARY.md"
 DEFAULT_TARGET_LANG = "zh-Hans"
 
 
@@ -60,8 +60,35 @@ def discover_targets(workspace_dir, edition_filter, lang_filter):
     return targets
 
 
-def read_optional(path):
-    return path.read_text(encoding="utf-8") if path.exists() else ""
+def dispatch_to_fork(actor, repo, edition, source_lang, target_lang, dispatch_token):
+    url = f"https://api.github.com/repos/{actor}/montagesubs-translate-actions/actions/workflows/translate.yml/dispatches"
+    payload = {
+        "ref": "main",
+        "inputs": {
+            "target_repository": repo,
+            "edition": edition,
+            "source_lang": source_lang,
+            "target_lang": target_lang,
+        }
+    }
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {dispatch_token}",
+            "Accept": "application/vnd.github.v3+json",
+            "Content-Type": "application/json",
+            "User-Agent": "MontageSubs-Action"
+        },
+        method="POST"
+    )
+    try:
+        with urllib.request.urlopen(req) as response:
+            return True, response.status
+    except urllib.error.HTTPError as e:
+        return False, f"HTTP {e.code}: {e.read().decode('utf-8')}"
+    except Exception as e:
+        return False, str(e)
 
 
 def main():
@@ -74,11 +101,15 @@ def main():
     parser.add_argument("--force", action="store_true", help="已存在的LLM草稿也重新请求覆盖")
     args = parser.parse_args()
 
-    relay_url = os.environ.get("LLM_RELAY_URL")
-    signing_secret = os.environ.get("RELAY_SIGNING_SECRET")
-    if not relay_url or not signing_secret:
-        log("skip: missing LLM_RELAY_URL or RELAY_SIGNING_SECRET, nothing to do")
-        sys.exit(0)
+    dispatch_token = os.environ.get("DISPATCH_TOKEN")
+    actor = os.environ.get("GITHUB_ACTOR")
+    if not dispatch_token:
+        log("error: DISPATCH_TOKEN not configured, cannot dispatch to member's fork "
+            "(configure it as an organization or repository secret)")
+        sys.exit(1)
+    if not actor:
+        log("error: GITHUB_ACTOR environment variable is unexpectedly empty")
+        sys.exit(1)
 
     workspace_dir = Path(os.environ.get("GITHUB_WORKSPACE", "."))
     targets = discover_targets(workspace_dir, args.edition, args.lang)
@@ -86,8 +117,6 @@ def main():
         log("skip: no matching source subtitle found")
         sys.exit(0)
 
-    synopsis_markdown = read_optional(workspace_dir / SYNOPSIS_PATH)
-    glossary_markdown = read_optional(workspace_dir / GLOSSARY_PATH)
     repository = os.environ.get("GITHUB_REPOSITORY", "")
 
     sent = 0
@@ -97,19 +126,9 @@ def main():
             log(f"skip: {dest_path} already exists (rerun with --force to overwrite)")
             continue
 
-        source_path = workspace_dir / "subtitles" / edition / "work" / "source" / f"{src_lang}.srt"
-        payload = {
-            "repository": repository,
-            "edition": edition,
-            "source_lang": src_lang,
-            "target_lang": args.target_lang,
-            "source_srt": source_path.read_text(encoding="utf-8-sig"),
-            "synopsis_markdown": synopsis_markdown,
-            "glossary_markdown": glossary_markdown,
-        }
-        ok, detail = send_translate_request(relay_url, signing_secret, payload)
+        ok, detail = dispatch_to_fork(actor, repository, edition, src_lang, args.target_lang, dispatch_token)
         if ok:
-            log(f"requested: {edition}/{src_lang} -> {args.target_lang} (correlation_id={detail})")
+            log(f"requested: {edition}/{src_lang} -> {args.target_lang} on {actor}'s fork")
             sent += 1
         else:
             log(f"request failed: {edition}/{src_lang} ({detail})")
@@ -124,3 +143,4 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         log("interrupted")
         sys.exit(130)
+
