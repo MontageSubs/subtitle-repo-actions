@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: relay_client.py
-# Version: 1.1
+# Version: 1.1.1
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -38,8 +38,7 @@ def send_translate_request(relay_url, signing_secret, payload):
 
     request = urllib.request.Request(
         relay_url, data=body, method="POST",
-        headers={"Content-Type": "application/json", SIGNATURE_HEADER: signature},
-        "User-Agent": "MontageSubs-Relay-Client/1.0",
+        headers={"Content-Type": "application/json", SIGNATURE_HEADER: signature, "User-Agent": "MontageSubs-Relay-Client/1.0"},
     )
     try:
         with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
