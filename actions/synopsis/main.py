@@ -34,6 +34,7 @@ import tmdb_lookup
 import synopsis_pipeline
 from repo_vars import load_repo_vars
 from github_api import is_debug
+from git_ops import setup_git_identity, commit_if_changed
 
 README_PLOT_PATTERN = re.compile(
     r'(<h2 id="plot">剧情</h2>\n\n'
@@ -100,6 +101,17 @@ def main():
                 log(f"updated: {args.readme_path} (plot section)")
             else:
                 log(f"skip: {args.readme_path} has no recognizable plot section marker")
+
+    if result.get("success"):
+        setup_git_identity()
+        if result.get("glossary_path") and commit_if_changed(
+            [result["glossary_path"]], ["chore: refresh glossary"], as_bot_committer=True,
+        ):
+            log(f"committed: {result['glossary_path']} (committer=bot)")
+        if commit_if_changed(
+            [p for p in (result.get("synopsis_path"), args.readme_path) if p], ["chore: refresh synopsis"],
+        ):
+            log("committed: synopsis/readme")
 
     if is_debug():
         print(json.dumps({"tmdb": tmdb_result, **result}, ensure_ascii=False))
