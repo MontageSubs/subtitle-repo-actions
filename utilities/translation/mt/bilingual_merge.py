@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: bilingual_merge.py
-# Version: 1.1.0
+# Version: 1.2.0
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -57,12 +57,15 @@
 
 import argparse
 import json
+import logging
+import os
 import re
 import subprocess
 import sys
 
 try:
     import jieba
+    jieba.setLogLevel(logging.ERROR)
 except ImportError:
     try:
         subprocess.check_call(
@@ -72,6 +75,7 @@ except ImportError:
             timeout=60
         )
         import jieba
+        jieba.setLogLevel(logging.ERROR)
     except Exception as e:
         print(json.dumps({
             "success": False,
@@ -81,6 +85,11 @@ except ImportError:
         sys.exit(0)
 
 SCRIPT_NAME = "bilingual_merge"
+
+LATIN_LANGS = {"en", "es", "fr", "de", "it", "pt", "nl", "pl", "sv", "da", "no", "fi", "ro", "cs", "hu", "tr", "id", "vi", "ms", "tl", "ca", "eu", "gl", "la"}
+NON_LATIN_LANGS = {"zh", "ja", "ko", "ru", "uk", "ar", "he", "hi", "th", "el", "bg", "fa"}
+LATIN_WORD_PATTERN = re.compile(r"[a-zA-Z]{2,}")
+NON_LATIN_CHAR_PATTERN = re.compile(r"[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af\u0400-\u04ff\u0600-\u06ff]")
 
 SEGMENT_MARKER_PATTERN = re.compile(r"\u27e6S(\d{2})\u27e7")
 GLOSSARY_PLACEHOLDER_PATTERN = re.compile(r"\s*(\u27e6G\d{4}\u27e7)\s*")
@@ -109,6 +118,51 @@ BOUNDARY_SEARCH_PATTERNS = {
 
 def log(message):
     print(f"{SCRIPT_NAME}: {message}", file=sys.stderr)
+
+
+def should_retranslate(text, source_lang, target_lang):
+    if not text or not source_lang or not target_lang:
+        return False
+    s = source_lang.split("-")[0].lower()
+    t = target_lang.split("-")[0].lower()
+    cleaned = strip_markers(text)
+    if s in LATIN_LANGS and t in NON_LATIN_LANGS:
+        return len(LATIN_WORD_PATTERN.findall(cleaned)) > 1
+    if s in NON_LATIN_LANGS and t in LATIN_LANGS:
+        return len(NON_LATIN_CHAR_PATTERN.findall(cleaned)) > 1
+    return False
+
+
+def retranslate_clean(text, source_lang, target_lang, api_key):
+    if not api_key or not text.strip():
+        return None
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    client_path = os.path.join(script_dir, "google_client.py")
+    payload = {
+        "units": [{"id": "0", "text": text, "segments": [{"cue_id": 0, "seg_idx": 0, "text": text}], "resolved": False}],
+        "source_lang": source_lang,
+        "target_lang": target_lang
+    }
+    try:
+        env = os.environ.copy()
+        env["GOOGLE_TRANSLATE_API_KEY"] = api_key
+        proc = subprocess.run(
+            [sys.executable, client_path],
+            input=json.dumps(payload),
+            text=True,
+            capture_output=True,
+            env=env,
+            timeout=30
+        )
+        if proc.returncode == 0:
+            data = json.loads(proc.stdout)
+            if data.get("success") and "0" in data.get("translations", {}):
+                return data["translations"]["0"]
+        else:
+            log(f"retranslate subprocess error: {proc.stderr.strip()}")
+    except Exception as e:
+        log(f"retranslate failed: {e}")
+    return None
 
 
 def restore_glossary(text, glossary_map):
@@ -220,17 +274,12 @@ MARKER_LENGTH_TOLERANCE = 0.4
 def resolve_cut(text, cursor, expected, boundary, max_cut):
     limit = len(text)
     ceiling = min(limit, max_cut)
-    expected_share = max(expected - cursor, 1)
     if boundary:
         candidates = [m.end() for m in BOUNDARY_SEARCH_PATTERNS[boundary].finditer(text, cursor) if cursor < m.end() < ceiling]
-        candidates = [c for c in candidates if abs(c - expected) <= 0.5 * expected_share]
         if candidates:
             return min(candidates, key=lambda pos: abs(pos - expected)), "original"
     inferred = [m.end() for m in GENERAL_PUNCT_SEARCH_PATTERN.finditer(text, cursor) if cursor < m.end() < ceiling]
     inferred += [m.start() for m in LEFT_CUT_PATTERN.finditer(text, cursor) if cursor < m.start() < ceiling]
-    inferred = [c for c in inferred
-                if abs(c - expected) <= INFERRED_PUNCT_TOLERANCE * expected_share
-                and (c - cursor) >= INFERRED_MIN_SHARE * expected_share]
     if inferred:
         return min(inferred, key=lambda pos: abs(pos - expected)), "inferred"
     boundaries = [b for b in (bd + cursor for bd in word_boundaries(text[cursor:])) if cursor < b < ceiling]
@@ -347,30 +396,50 @@ def strip_unsourced_brackets(original_text, translated_text):
     return stripped
 
 
-TRAILING_EXCLAIM_QUESTION_PATTERN = re.compile(r"[！？]+$")
 FULLWIDTH_TO_ASCII = {"！": "!", "？": "?"}
+EXCLAIM_QUESTION_RUN_PATTERN = re.compile(r"[！？!?]+")
 
 
-def convert_trailing_marks(text):
-    match = TRAILING_EXCLAIM_QUESTION_PATTERN.search(text)
-    if not match:
-        return text
-    return text[:match.start()] + "".join(FULLWIDTH_TO_ASCII[c] for c in match.group())
+def normalize_exclaim_question(text):
+    def substitute(match):
+        run = "".join(FULLWIDTH_TO_ASCII.get(c, c) for c in match.group())
+        if match.end() == len(text) or text[match.end()] == " ":
+            return run
+        return run + " "
+
+    return EXCLAIM_QUESTION_RUN_PATTERN.sub(substitute, text)
 
 
-def build_bilingual_cues(cues, units, translations, glossary_map):
+def build_bilingual_cues(cues, units, translations, glossary_map, source_lang=None, target_lang=None, api_key=None):
     cue_segments = {}
     approx_splits = []
     for unit in units:
         translated = translations.get(str(unit["id"]))
         segments = unit["segments"]
+        retranslated_flag = False
+
+        if translated and should_retranslate(translated, source_lang, target_lang):
+            clean_source = strip_markers(unit.get("text") or "".join(seg["text"] for seg in segments))
+            new_translated = retranslate_clean(clean_source, source_lang, target_lang, api_key)
+            if new_translated:
+                log(f"unit {unit['id']}: successfully re-translated without markers")
+                translated = new_translated
+                retranslated_flag = True
+
         if translated is None:
             for seg in segments:
                 cue_segments.setdefault(seg["cue_id"], {})[seg["seg_idx"]] = None
             continue
         translated = restore_glossary(translated, glossary_map)
         translated = strip_unsourced_brackets("".join(seg["text"] for seg in segments), translated)
-        parts, method = split_translation(translated, segments)
+
+        if retranslated_flag and len(segments) > 1:
+            parts, method = split_by_boundary(strip_markers(translated), segments)
+            parts = enforce_punctuation_placement(parts)
+            parts = repair_empty_parts(parts, segments)
+        else:
+            parts, method = split_translation(translated, segments)
+
         if method not in ("single", "marker", "original_boundary", "inferred_punctuation"):
             approx_splits.append({"unit_id": unit["id"], "method": method})
         for seg, part in zip(segments, parts):
@@ -387,7 +456,7 @@ def build_bilingual_cues(cues, units, translations, glossary_map):
         else:
             translation = parts[0]
         if translation:
-            translation = convert_trailing_marks(translation)
+            translation = normalize_exclaim_question(translation)
             if source_is_music(cue["text"]):
                 translation = POSITION_TOP_TAG + format_music_line(translation)
         results.append({**cue, "translation": translation})
@@ -407,13 +476,20 @@ def render_srt(cues):
     return "\n\n".join(blocks) + "\n"
 
 
-def merge(extract_data, translate_data):
-    if jieba is None:
-        log("warning: jieba unavailable, splitting falls back to punctuation/char boundaries")
+def merge(extract_data, translate_data, api_key=None):
+    if jieba is not None:
+        log(f"jieba: available (v{getattr(jieba, '__version__', 'unknown')})")
+    else:
+        log("jieba: unavailable, splitting falls back to punctuation/char boundaries")
     translations = translate_data.get("translations", {})
+    source_lang = translate_data.get("source_lang")
+    target_lang = translate_data.get("target_lang")
     glossary_map = extract_data.get("glossary_map", {})
     register_glossary_terms(glossary_map)
-    cues, approx_splits = build_bilingual_cues(extract_data["cues"], extract_data["units"], translations, glossary_map)
+    cues, approx_splits = build_bilingual_cues(
+        extract_data["cues"], extract_data["units"], translations, glossary_map,
+        source_lang, target_lang, api_key
+    )
     missing = sum(1 for cue in cues if cue.get("translation") is None)
     return {"success": True, "srt": render_srt(cues), "approx_splits": approx_splits, "missing_count": missing}
 
@@ -423,12 +499,14 @@ def main():
     parser.add_argument("--extract", required=True)
     parser.add_argument("--translations", required=True)
     parser.add_argument("--output", default=None)
+    parser.add_argument("--api-key", default=None)
     args = parser.parse_args()
 
     extract_data = json.load(open(args.extract, encoding="utf-8"))
     translate_data = json.load(open(args.translations, encoding="utf-8"))
+    api_key = args.api_key or os.environ.get("GOOGLE_TRANSLATE_API_KEY")
 
-    result = merge(extract_data, translate_data)
+    result = merge(extract_data, translate_data, api_key)
     log(f"status: ok (cues={len(extract_data['cues'])}, missing={result['missing_count']}, approx_splits={len(result['approx_splits'])})")
 
     if args.output:

@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: google_client.py
-# Version: 1.0.0
+# Version: 1.1.0
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -188,9 +188,9 @@ def main():
     api_key = args.api_key or os.environ.get(API_KEY_ENV)
 
     if not api_key:
-        result = {"success": False, "reason": "missing_api_key", "translations": {}, "skipped": []}
+        result = {"success": False, "reason": "missing_api_key", "translations": {}, "skipped": [], "source_lang": source_lang, "target_lang": target_lang}
     elif not units:
-        result = {"success": False, "reason": "no_units", "translations": {}, "skipped": []}
+        result = {"success": False, "reason": "no_units", "translations": {}, "skipped": [], "source_lang": source_lang, "target_lang": target_lang}
     else:
         resolved = {str(unit["id"]): unit["resolved"] for unit in units if unit.get("resolved")}
         translatable = [unit for unit in units if not unit.get("resolved")]
@@ -202,6 +202,8 @@ def main():
             "translations": translations,
             "skipped": skipped,
             "provider": "google",
+            "source_lang": source_lang,
+            "target_lang": target_lang,
         }
     log(f"status: {'ok' if result['success'] else 'failed'} (translated={len(result['translations'])}, skipped={len(result.get('skipped', []))})")
 
