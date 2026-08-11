@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: bilingual_merge.py
-# Version: 1.0.0
+# Version: 1.1.0
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -30,6 +30,10 @@
 #     - 利用长度限制、句尾标点或结巴分词（jieba）将翻译单元重新拆分为字幕段落。
 #     - 还原受保护的专有名词占位符（如 ⟦G0000⟧）。
 #     - 自动处理缺失的翻译，并记录近似拆分的单元。
+#     - 修复中文译文中音符（♪等）与相邻文字间丢失的空格。
+#     - 音乐行判定基于原文首字符（兼容 <i> 等前导标签）；命中时译文加 {\an7}
+#       置顶标签，缺失的开头音符自动补齐，句中多余音符统一清理为一个空格。
+#     - 分句开/关符号集合覆盖中日韩引号、法语/德语引号与西班牙语倒问叹号。
 #
 # Usage / 用法:
 #     python bilingual_merge.py --extract extract.json --translations translations.json --output bilingual.srt
@@ -86,8 +90,8 @@ CJK_TERMINATOR_PATTERN = re.compile(r"[。，、]")
 HALFWIDTH_TERMINATOR_PATTERN = re.compile(r"(?<![\d.])[.,](?![\d.])")
 WHITESPACE_COLLAPSE_PATTERN = re.compile(r"\s+")
 NON_WORD_PATTERN = re.compile(r"[^\w]", re.UNICODE)
-NO_LINE_END_CHARS = set("“「『（([{＜〈《【〔'\"‘")
-NO_LINE_START_CHARS = set("”」』）)]}＞〉》】〕、，,。.！!？?；;：:'\"’")
+NO_LINE_END_CHARS = set("“「『（([{＜〈《【〔„‚«‹¿¡'\"‘")
+NO_LINE_START_CHARS = set("”」』）)]}＞〉》】〕»›、，,。.！!？?；;：:'\"’")
 BOUNDARY_ORDER = ("trail_off", "comma", "period", "colon")
 BOUNDARY_CLASSIFY_PATTERNS = {
     "trail_off": re.compile(r"(\.{2,}|-{2,}|—+|…+)\s*$"),
@@ -136,11 +140,41 @@ def strip_terminator(match):
     return " " if WORD_CHAR_PATTERN.search(match.string, match.end()) else ""
 
 
+MUSIC_NOTE_CHARS = "\u2669\u266a\u266b\u266c"
+MUSIC_NOTE_PATTERN = re.compile(f"[{MUSIC_NOTE_CHARS}]")
+MUSIC_NOTE_LEADING_GAP_PATTERN = re.compile(f"(?<=\\S)([{MUSIC_NOTE_CHARS}])")
+MUSIC_NOTE_TRAILING_GAP_PATTERN = re.compile(f"([{MUSIC_NOTE_CHARS}])(?=\\S)")
+MUSIC_INTERIOR_NOTE_PATTERN = re.compile(f"(?<!^)[{MUSIC_NOTE_CHARS}](?!$)")
+SOURCE_LEADING_TAG_PATTERN = re.compile(r"^(?:<[^>]+>)*\s*")
+POSITION_TOP_TAG = "{\\an7}"
+
+
+def fix_music_spacing(text):
+    text = MUSIC_NOTE_LEADING_GAP_PATTERN.sub(r" \1", text)
+    return MUSIC_NOTE_TRAILING_GAP_PATTERN.sub(r"\1 ", text)
+
+
+def source_is_music(text):
+    stripped = SOURCE_LEADING_TAG_PATTERN.sub("", text)
+    return bool(stripped) and stripped[0] in MUSIC_NOTE_CHARS
+
+
+def format_music_line(text):
+    if len(text) > 1:
+        text = MUSIC_INTERIOR_NOTE_PATTERN.sub("", text)
+    text = fix_music_spacing(text)
+    text = WHITESPACE_COLLAPSE_PATTERN.sub(" ", text).strip()
+    if not MUSIC_NOTE_PATTERN.match(text):
+        text = fix_music_spacing(f"\u266a{text}").strip()
+    return text
+
+
 def normalize_chinese(text):
     text = ELLIPSIS_PATTERN.sub("...", text)
     text = DASH_ARTIFACT_PATTERN.sub("...", text)
     text = CJK_TERMINATOR_PATTERN.sub(strip_terminator, text)
     text = HALFWIDTH_TERMINATOR_PATTERN.sub(strip_terminator, text)
+    text = fix_music_spacing(text)
     text = WHITESPACE_COLLAPSE_PATTERN.sub(" ", text).strip()
     return enforce_line_edges(text)
 
@@ -174,10 +208,13 @@ def classify_boundary(text):
     return None
 
 
-GENERAL_PUNCT_SEARCH_PATTERN = re.compile(r"[，,、；;。.!?！？：:…]+['\"”’)\]]*")
+CLOSING_TAIL_CHARS = "'\"”’)\\]}》」』】〕＞〉»›"
+GENERAL_PUNCT_SEARCH_PATTERN = re.compile(r"[，,、；;。.!?！？：:…]+[" + CLOSING_TAIL_CHARS + r"]*")
+LEFT_CUT_PATTERN = re.compile(r"[“「『（([{＜〈《【〔„‚«‹¿¡]")
 ORIGINAL_PUNCT_TOLERANCE = 0.20
 INFERRED_PUNCT_TOLERANCE = 0.15
 INFERRED_MIN_SHARE = 0.5
+MARKER_LENGTH_TOLERANCE = 0.4
 
 
 def resolve_cut(text, cursor, expected, boundary, max_cut):
@@ -190,6 +227,7 @@ def resolve_cut(text, cursor, expected, boundary, max_cut):
         if candidates:
             return min(candidates, key=lambda pos: abs(pos - expected)), "original"
     inferred = [m.end() for m in GENERAL_PUNCT_SEARCH_PATTERN.finditer(text, cursor) if cursor < m.end() < ceiling]
+    inferred += [m.start() for m in LEFT_CUT_PATTERN.finditer(text, cursor) if cursor < m.start() < ceiling]
     inferred = [c for c in inferred
                 if abs(c - expected) <= INFERRED_PUNCT_TOLERANCE * expected_share
                 and (c - cursor) >= INFERRED_MIN_SHARE * expected_share]
@@ -270,11 +308,25 @@ def repair_empty_parts(parts, segments):
     return parts
 
 
+def validate_marker_lengths(parts, segments):
+    lengths = [effective_length(seg["text"]) for seg in segments]
+    total = sum(lengths) or 1
+    actual_total = sum(len(p) for p in parts) or 1
+    for length, part in zip(lengths[1:], parts[1:]):
+        expected_share = length / total
+        if expected_share <= 0:
+            continue
+        actual_share = len(part) / actual_total
+        if abs(actual_share - expected_share) / expected_share > MARKER_LENGTH_TOLERANCE:
+            return False
+    return True
+
+
 def split_translation(translated_text, segments):
     if len(segments) == 1:
         return [strip_markers(translated_text)], "single"
     marker_parts = split_by_markers(translated_text, len(segments))
-    if marker_parts:
+    if marker_parts and validate_marker_lengths(marker_parts, segments):
         parts, method = marker_parts, "marker"
     else:
         parts, method = split_by_boundary(strip_markers(translated_text), segments)
@@ -293,6 +345,17 @@ def strip_unsourced_brackets(original_text, translated_text):
     while BRACKET_CONTENT_PATTERN.search(stripped):
         stripped = BRACKET_CONTENT_PATTERN.sub("", stripped)
     return stripped
+
+
+TRAILING_EXCLAIM_QUESTION_PATTERN = re.compile(r"[！？]+$")
+FULLWIDTH_TO_ASCII = {"！": "!", "？": "?"}
+
+
+def convert_trailing_marks(text):
+    match = TRAILING_EXCLAIM_QUESTION_PATTERN.search(text)
+    if not match:
+        return text
+    return text[:match.start()] + "".join(FULLWIDTH_TO_ASCII[c] for c in match.group())
 
 
 def build_bilingual_cues(cues, units, translations, glossary_map):
@@ -323,6 +386,10 @@ def build_bilingual_cues(cues, units, translations, glossary_map):
             translation = " ".join(f"-{p}" for p in parts)
         else:
             translation = parts[0]
+        if translation:
+            translation = convert_trailing_marks(translation)
+            if source_is_music(cue["text"]):
+                translation = POSITION_TOP_TAG + format_music_line(translation)
         results.append({**cue, "translation": translation})
     return results, approx_splits
 

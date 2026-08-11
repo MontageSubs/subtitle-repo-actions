@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: srt_extract.py
-# Version: 1.0.1
+# Version: 1.1.0
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -29,6 +29,9 @@
 #     - 基于标点、时间间隔（GAP_THRESHOLD_MS）与跨行引号逻辑切分/合并翻译单元。
 #     - 解析 Markdown 格式词表，生成双向占位符映射（如 ⟦G0000⟧）保护专有名词。
 #     - 标准化输出 JSON 数据，包含原字幕 Cue、翻译 Unit 及词表映射信息。
+#     - 默认剥离 SDH（听障辅助）内容，纯 SDH 行整行丢弃，行内 SDH 仅剥离对应片段
+#       （--keep-sdh 可关闭）；含音符的行豁免于 SDH 剥离之外。
+#     - 音乐歌词行按大小写判断是否跨 cue 续接合并，合并组发送翻译前剥离首尾音符。
 #
 # Usage / 用法:
 #     python srt_extract.py --input en.srt --glossary GLOSSARY.md --output extract.json
@@ -68,6 +71,13 @@ PLACEHOLDER_TEMPLATE = "\u27e6G{:04d}\u27e7"
 SEGMENT_MARKER_TEMPLATE = "\u27e6S{:02d}\u27e7"
 GAP_THRESHOLD_MS = 200
 
+MUSIC_NOTE_CHARS = "\u2669\u266a\u266b\u266c"
+MUSIC_NOTE_PATTERN = re.compile(f"[{MUSIC_NOTE_CHARS}]")
+SDH_BRACKET_PATTERN = re.compile(r"[\[(\uff08][^\[\]()\uff08\uff09]*[\])\uff09]|[{\uff5b][^{}\uff5b\uff5d]*[}\uff5d]")
+LEADING_ELLIPSIS_PATTERN = re.compile(r"^(\.{2,}|\u2026)")
+LEADING_NON_LETTER_PATTERN = re.compile(r"^[^A-Za-z]*")
+EDGE_NOTE_PATTERN = re.compile(f"^[{MUSIC_NOTE_CHARS}\\s]+|[{MUSIC_NOTE_CHARS}\\s]+$")
+
 GLOSSARY_HEADING = "人物与专有名词"
 SECTION_END_PATTERN = re.compile(r"^##\s", re.MULTILINE)
 TABLE_ROW_PATTERN = re.compile(r"^\|(.+)\|\s*$")
@@ -97,9 +107,34 @@ def strip_letter_stutter(text):
     return STUTTER_PREFIX_PATTERN.sub("", text)
 
 
-def parse_srt(content):
+def strip_sdh(text):
+    if MUSIC_NOTE_PATTERN.search(text):
+        return text
+    return WHITESPACE_PATTERN.sub(" ", SDH_BRACKET_PATTERN.sub("", text)).strip()
+
+
+def is_music_segment(text):
+    return bool(MUSIC_NOTE_PATTERN.search(text))
+
+
+def music_continuation(text):
+    remainder = MUSIC_NOTE_PATTERN.sub("", text, count=1).strip()
+    if LEADING_ELLIPSIS_PATTERN.match(remainder):
+        return False
+    letter_start = LEADING_NON_LETTER_PATTERN.match(remainder).end()
+    if letter_start >= len(remainder):
+        return False
+    return remainder[letter_start].islower()
+
+
+def strip_edge_notes(text):
+    return EDGE_NOTE_PATTERN.sub("", text)
+
+
+def parse_srt(content, strip_sdh_enabled=True):
     content = content.replace("\r\n", "\n").replace("\r", "\n")
     cues = []
+    sdh_stats = {"dropped": 0, "stripped": 0}
     for block in re.split(r"\n\s*\n", content.strip()):
         lines = block.strip("\n").split("\n")
         if not lines:
@@ -114,9 +149,14 @@ def parse_srt(content):
         time_match = TIME_LINE_PATTERN.match(lines[time_line_idx].strip())
         cue_id = int(lines[0].strip()) if time_line_idx == 1 and lines[0].strip().isdigit() else len(cues) + 1
         text = fold_text("\n".join(lines[time_line_idx + 1:]))
+        if strip_sdh_enabled:
+            cleaned = strip_sdh(text)
+            if cleaned != text:
+                sdh_stats["dropped" if not cleaned else "stripped"] += 1
+            text = cleaned
         if text:
             cues.append({"id": cue_id, "start": time_match.group(1), "end": time_match.group(2), "text": text})
-    return cues
+    return cues, sdh_stats
 
 
 def split_dialogue(text):
@@ -157,6 +197,8 @@ def ends_with_quote(text):
 def should_merge(prev_seg, curr_seg):
     if prev_seg["cue_id"] == curr_seg["cue_id"]:
         return is_short_reply(curr_seg["text"])
+    if is_music_segment(prev_seg["text"]) and is_music_segment(curr_seg["text"]):
+        return music_continuation(curr_seg["text"])
     if has_terminal_punct(prev_seg["text"]):
         return False
     gap = time_to_ms(curr_seg["start"]) - time_to_ms(prev_seg["end"])
@@ -316,19 +358,23 @@ def build_units(cues, glossary):
         if len(group) == 1 and group[0]["resolved"]:
             units.append({"id": len(units), "segments": segments, "text": "", "resolved": group[0]["resolved"]})
             continue
-        marked_text = "".join(f"{SEGMENT_MARKER_TEMPLATE.format(i)}{seg['text']} " for i, seg in enumerate(group)).strip()
+        is_music_group = len(group) > 1 and any(is_music_segment(seg["text"]) for seg in group)
+        marked_text = "".join(
+            f"{SEGMENT_MARKER_TEMPLATE.format(i)}{strip_edge_notes(seg['text']) if is_music_group else seg['text']} "
+            for i, seg in enumerate(group)
+        ).strip()
         protected_text, mapping, counter = protect_terms(marked_text, glossary, counter)
         glossary_map.update(mapping)
         units.append({"id": len(units), "segments": segments, "text": protected_text, "resolved": None})
     return units, glossary_map
 
 
-def extract(content, glossary):
-    cues = parse_srt(content)
+def extract(content, glossary, strip_sdh_enabled=True):
+    cues, sdh_stats = parse_srt(content, strip_sdh_enabled)
     if not cues:
-        return {"success": False, "reason": "no_cues_parsed", "cues": [], "units": [], "glossary_map": {}}
+        return {"success": False, "reason": "no_cues_parsed", "cues": [], "units": [], "glossary_map": {}, "sdh_removed": sdh_stats}
     units, glossary_map = build_units(cues, glossary)
-    return {"success": True, "cues": cues, "units": units, "glossary_map": glossary_map}
+    return {"success": True, "cues": cues, "units": units, "glossary_map": glossary_map, "sdh_removed": sdh_stats}
 
 
 def main():
@@ -336,13 +382,18 @@ def main():
     parser.add_argument("--input", default=None)
     parser.add_argument("--glossary", default=None)
     parser.add_argument("--output", default=None)
+    parser.add_argument("--keep-sdh", action="store_true")
     args = parser.parse_args()
 
     raw = open(args.input, encoding="utf-8-sig").read() if args.input else sys.stdin.read()
     glossary = build_glossary_from_markdown(open(args.glossary, encoding="utf-8").read()) if args.glossary else {}
 
-    result = extract(raw, glossary)
-    log(f"status: {'ok' if result['success'] else 'failed'} (cues={len(result['cues'])}, units={len(result['units'])})")
+    result = extract(raw, glossary, strip_sdh_enabled=not args.keep_sdh)
+    sdh_note = ""
+    if not args.keep_sdh:
+        stats = result["sdh_removed"]
+        sdh_note = f", sdh_dropped={stats['dropped']}, sdh_stripped={stats['stripped']}"
+    log(f"status: {'ok' if result['success'] else 'failed'} (cues={len(result['cues'])}, units={len(result['units'])}{sdh_note})")
 
     output = json.dumps(result, ensure_ascii=False)
     if args.output:
