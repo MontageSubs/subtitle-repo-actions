@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: google_client.py
-# Version: 1.3.1
+# Version: 1.4
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -79,10 +79,18 @@ MAX_ATTEMPTS = 3
 RETRY_DELAY = 3
 PROGRESS_INTERVAL = 20
 
-ANCHOR_PATTERN = re.compile(r"<a i=(\d+)>(.*?)</a>", re.DOTALL)
+BLOCK_PATTERN = re.compile(r'<div[^>]*id=["\']?(\d+)["\']?[^>]*>(.*?)</div>', re.DOTALL | re.IGNORECASE)
 ITALIC_PATTERN = re.compile(r"<i>.*?</i>", re.DOTALL)
 USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+
+DEBUG_MODE = False
+DEBUG_RAW_IN_FILE = None
+DEBUG_RAW_OUT_FILE = None
+DEBUG_LOCK = threading.Lock()
+
+BLOCK_PATTERN = re.compile(r'<div[^>]*id=["\']?([a-zA-Z0-9]+)["\']?[^>]*>(.*?)</div>', re.DOTALL | re.IGNORECASE)
+ITALIC_PATTERN = re.compile(r"<i>.*?</i>", re.DOTALL)
 
 EMBED_RATIO_THRESHOLD = 0.30
 TERM_PLACEHOLDER_TEMPLATE = "\u27e6T{:02d}\u27e7"
@@ -124,28 +132,41 @@ def build_batches(units, batch_chars):
 
 
 def build_request_body(batch, source_lang, target_lang):
-    html = "\n".join(f"<a i={unit['id']}>{escape_html(unit['text'])}</a>" for unit in batch)
-    return json.dumps([[[f"<pre>{html}</pre>"], source_lang, target_lang], "te"]).encode("utf-8")
+    html = "\n".join(f'<div id="{unit["id"]}">{escape_html(unit["text"])}</div>' for unit in batch)
+    return json.dumps([[[html], source_lang, target_lang], "te"]).encode("utf-8")
 
 
 def parse_translated_html(html):
     result = {}
-    for match in ANCHOR_PATTERN.finditer(html):
-        idx = int(match.group(1))
-        text = unescape_html(ITALIC_PATTERN.sub("", match.group(2)))
+    for match in BLOCK_PATTERN.finditer(html):
+        raw_idx = match.group(1)
+        idx = int(raw_idx) if raw_idx.isdigit() else raw_idx
+        text = unescape_html(ITALIC_PATTERN.sub("", match.group(2))).strip()
         result[idx] = f"{result[idx]} {text}" if idx in result else text
+    if DEBUG_MODE and not result:
+        with DEBUG_LOCK:
+            log(f"debug: parse_translated_html found NO matching blocks in HTML. Head: {html[:200]}")
     return result
 
 
 def call_google(batch, source_lang, target_lang, api_key):
+    body = build_request_body(batch, source_lang, target_lang)
+    if DEBUG_RAW_IN_FILE:
+        with DEBUG_LOCK, open(DEBUG_RAW_IN_FILE, "ab") as f:
+            f.write(body + b"\n")
+    
     request = urllib.request.Request(
         ENDPOINT,
-        data=build_request_body(batch, source_lang, target_lang),
+        data=body,
         headers={"Content-Type": "application/json+protobuf", "X-goog-api-key": api_key, "User-Agent": USER_AGENT},
         method="POST",
     )
     with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT) as response:
-        payload = json.loads(response.read().decode("utf-8"))
+        raw_response = response.read()
+        if DEBUG_RAW_OUT_FILE:
+            with DEBUG_LOCK, open(DEBUG_RAW_OUT_FILE, "ab") as f:
+                f.write(raw_response + b"\n")
+        payload = json.loads(raw_response.decode("utf-8"))
     return parse_translated_html(payload[0][0])
 
 
@@ -161,7 +182,13 @@ def translate_batch(batch, source_lang, target_lang, api_key):
         missing = expected_ids - result.keys()
         if not missing:
             return result, []
+            
         log(f"attempt {attempt}: missing {len(missing)} of {len(batch)} units")
+        if DEBUG_MODE:
+            with DEBUG_LOCK:
+                log(f"debug: Expected IDs: {sorted(list(expected_ids), key=str)}")
+                log(f"debug: Received IDs: {sorted(list(result.keys()), key=str)}")
+                
         if attempt < MAX_ATTEMPTS:
             time.sleep(RETRY_DELAY)
     return result, sorted(missing, key=str)
@@ -293,6 +320,8 @@ def translate_units(units, source_lang, target_lang, api_key, batch_chars, concu
 
 
 def main():
+    global DEBUG_MODE, DEBUG_RAW_IN_FILE, DEBUG_RAW_OUT_FILE
+    
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", default=None)
     parser.add_argument("--output", default=None)
@@ -301,7 +330,14 @@ def main():
     parser.add_argument("--batch-chars", type=int, default=DEFAULT_BATCH_CHARS)
     parser.add_argument("--concurrency", type=int, default=DEFAULT_CONCURRENCY)
     parser.add_argument("--api-key", default=None)
+    parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--debug-raw-in", default=None)
+    parser.add_argument("--debug-raw-out", default=None)
     args = parser.parse_args()
+
+    DEBUG_MODE = args.debug or os.environ.get("DEBUG") == "1"
+    DEBUG_RAW_IN_FILE = args.debug_raw_in
+    DEBUG_RAW_OUT_FILE = args.debug_raw_out
 
     raw = open(args.input, encoding="utf-8").read() if args.input else sys.stdin.read()
     payload = json.loads(raw)

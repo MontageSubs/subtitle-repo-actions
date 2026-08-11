@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: srt_extract.py
-# Version: 1.4
+# Version: 1.5
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -83,7 +83,8 @@ GAP_THRESHOLD_MS = 200
 
 MUSIC_NOTE_CHARS = "\u2669\u266a\u266b\u266c"
 MUSIC_NOTE_PATTERN = re.compile(f"[{MUSIC_NOTE_CHARS}]")
-SDH_BRACKET_PATTERN = re.compile(r"[\[(\uff08][^\[\]()\uff08\uff09]*[\])\uff09]|[{\uff5b][^{}\uff5b\uff5d]*[}\uff5d]")
+INNER_B = r"\[\]\(\)\{\}\uff08\uff09\u3010\u3011"
+SDH_BRACKET_PATTERN = re.compile(r"\[[^" + INNER_B + r"]*\]|\([^" + INNER_B + r"]*\)|\{[^" + INNER_B + r"]*\}|\uff08[^" + INNER_B + r"]*\uff09|\u3010[^" + INNER_B + r"]*\u3011")
 LEADING_ELLIPSIS_PATTERN = re.compile(r"^(\.{2,}|\u2026)")
 LEADING_NON_LETTER_PATTERN = re.compile(r"^[^A-Za-z]*")
 EDGE_NOTE_PATTERN = re.compile(f"^[{MUSIC_NOTE_CHARS}\\s]+|[{MUSIC_NOTE_CHARS}\\s]+$")
@@ -187,9 +188,16 @@ def strip_speaker_tags(lines):
 
 
 def strip_sdh(text):
-    if MUSIC_NOTE_PATTERN.search(text):
-        return text
-    return WHITESPACE_PATTERN.sub(" ", SDH_BRACKET_PATTERN.sub("", text)).strip()
+    original = text
+    while True:
+        new_text = SDH_BRACKET_PATTERN.sub("", text)
+        if new_text == text:
+            break
+        text = new_text
+    cleaned = WHITESPACE_PATTERN.sub(" ", text).strip()
+    if not cleaned and MUSIC_NOTE_PATTERN.search(original):
+        return " ".join(MUSIC_NOTE_PATTERN.findall(original))
+    return cleaned
 
 
 def is_music_segment(text):
@@ -273,15 +281,15 @@ def is_short_reply(text):
     return len(SHORT_REPLY_LETTER_PATTERN.findall(text)) <= SHORT_REPLY_MAX_LETTERS
 
 
-QUOTE_CHARS = frozenset('"“”')
-
-
-def starts_with_quote(text):
-    return bool(text) and text[0] in QUOTE_CHARS
-
-
-def ends_with_quote(text):
-    return bool(text) and text[-1] in QUOTE_CHARS
+def update_quote_state(text, is_pending):
+    for char in text:
+        if char == '"':
+            is_pending = not is_pending
+        elif char == '“':
+            is_pending = True
+        elif char == '”':
+            is_pending = False
+    return is_pending
 
 
 def should_merge(prev_seg, curr_seg):
@@ -365,12 +373,15 @@ def group_segments(segments):
             if current:
                 groups.append(current)
             current = [seg]
+            quote_pending = False
+            quote_span = 0
+        quote_pending = update_quote_state(seg["text"], quote_pending)
         if quote_pending:
             quote_span += 1
-            quote_pending = not ends_with_quote(seg["text"]) and quote_span < QUOTE_PENDING_LIMIT
+            if quote_span >= QUOTE_PENDING_LIMIT:
+                quote_pending = False
         else:
-            quote_pending = starts_with_quote(seg["text"]) and not ends_with_quote(seg["text"])
-            quote_span = 1 if quote_pending else 0
+            quote_span = 0
     if current:
         groups.append(current)
     return groups

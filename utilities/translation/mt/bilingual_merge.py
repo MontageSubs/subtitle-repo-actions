@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: bilingual_merge.py
-# Version: 1.4
+# Version: 1.5
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -184,8 +184,16 @@ def normalize_chinese(text):
     return enforce_line_edges(text)
 
 
+LATIN_WORD_PATTERN = re.compile(r"[a-zA-Z]+(?:['’][a-zA-Z]+)*")
+DIGIT_PATTERN = re.compile(r"\d")
+OTHER_WORD_PATTERN = re.compile(r"[^\W_a-zA-Z0-9]", re.UNICODE)
+
+
 def effective_length(text):
-    return len(NON_WORD_PATTERN.sub("", text)) or len(text)
+    latin_words = len(LATIN_WORD_PATTERN.findall(text))
+    digits = len(DIGIT_PATTERN.findall(text))
+    others = len(OTHER_WORD_PATTERN.findall(text))
+    return (latin_words * 2.5) + (digits * 0.5) + others or len(text)
 
 
 FALLBACK_BOUNDARY_PATTERN = re.compile(r"[，,、；;。.!?…\s]+")
@@ -225,6 +233,7 @@ INFERRED_MIN_SHARE = 0.5
 
 def find_protected_spans(text, glossary_terms):
     spans = [(m.start(), m.end()) for m in BOOK_TITLE_PATTERN.finditer(text)]
+    spans.extend((m.start(), m.end()) for m in LATIN_WORD_PATTERN.finditer(text))
     for term in glossary_terms:
         if not term:
             continue
@@ -252,12 +261,13 @@ def escape_protected_span(pos, protected):
 def resolve_cut(text, cursor, expected, boundary, max_cut, protected=()):
     limit = len(text)
     ceiling = min(limit, max_cut)
+    chunk = max(expected - cursor, 0)
     if boundary:
         candidates = [m.end() for m in BOUNDARY_SEARCH_PATTERNS[boundary].finditer(text, cursor)
                       if cursor < m.end() < ceiling and not inside_protected_span(m.end(), protected)]
         if candidates:
             cut = min(candidates, key=lambda pos: abs(pos - expected))
-            if abs(cut - expected) <= ORIGINAL_PUNCT_TOLERANCE * limit:
+            if abs(cut - expected) <= max(ORIGINAL_PUNCT_TOLERANCE * chunk, 3):
                 return cut, "original"
     inferred = [m.end() for m in GENERAL_PUNCT_SEARCH_PATTERN.finditer(text, cursor)
                 if cursor < m.end() < ceiling and not inside_protected_span(m.end(), protected)]
@@ -265,7 +275,7 @@ def resolve_cut(text, cursor, expected, boundary, max_cut, protected=()):
                  if cursor < m.start() < ceiling and not inside_protected_span(m.start(), protected)]
     if inferred:
         cut = min(inferred, key=lambda pos: abs(pos - expected))
-        if abs(cut - expected) <= INFERRED_PUNCT_TOLERANCE * limit:
+        if abs(cut - expected) <= max(INFERRED_PUNCT_TOLERANCE * chunk, 2):
             return cut, "inferred"
     boundaries = [b for b in (bd + cursor for bd in word_boundaries(text[cursor:]))
                   if cursor < b < ceiling and not inside_protected_span(b, protected)]
@@ -290,17 +300,42 @@ def split_by_boundary(translated_text, spans, protected=()):
     boundary_types = [classify_boundary(span["text"]) for span in spans[:-1]]
     lengths = [effective_length(span["text"]) for span in spans]
     total = sum(lengths) or 1
-    total_len = len(translated_text)
+    
+    weights = [0.0] * len(translated_text)
+    for m in LATIN_WORD_PATTERN.finditer(translated_text):
+        w = 2.5 / (m.end() - m.start())
+        for i in range(m.start(), m.end()):
+            weights[i] = w
+    for m in DIGIT_PATTERN.finditer(translated_text):
+        weights[m.start()] = 0.5
+    for m in OTHER_WORD_PATTERN.finditer(translated_text):
+        weights[m.start()] = 1.0
+        
+    total_weight = sum(weights)
     span_count = len(spans)
     cursor, cumulative, parts, tags = 0, 0, [], []
+    
     for i, (length, boundary) in enumerate(zip(lengths[:-1], boundary_types)):
         cumulative += length
-        expected = total_len * cumulative / total
-        max_cut = total_len - (span_count - 1 - i)
+        target_ratio = cumulative / total
+        if total_weight > 0:
+            target_weight = total_weight * target_ratio
+            curr = 0
+            expected = len(translated_text)
+            for j, w in enumerate(weights):
+                curr += w
+                if curr >= target_weight:
+                    expected = j
+                    break
+        else:
+            expected = len(translated_text) * target_ratio
+            
+        max_cut = len(translated_text) - (span_count - 1 - i)
         cut, tag = resolve_cut(translated_text, cursor, expected, boundary, max_cut, protected)
         tags.append(tag)
         parts.append(translated_text[cursor:cut].strip())
         cursor = cut
+        
     parts.append(translated_text[cursor:].strip())
     if "original" in tags:
         method = "original_boundary"
@@ -360,10 +395,34 @@ def normalize_exclaim_question(text):
     return EXCLAIM_QUESTION_RUN_PATTERN.sub(substitute, text)
 
 
+def determine_dash_style(cues):
+    space_count = 0
+    nospace_count = 0
+    for cue in cues:
+        for line in cue["text"].split("\n"):
+            line = line.strip()
+            if line.startswith("-"):
+                if line.startswith("- "):
+                    space_count += 1
+                else:
+                    nospace_count += 1
+        if space_count + nospace_count >= 9:
+            break
+    total = space_count + nospace_count
+    if total > 0 and space_count / total >= 2/3:
+        return "- "
+    return "-"
+
+
+DASH_REPLACE_PATTERN = re.compile(r"(^|\s)-\s*")
+
+
 def build_bilingual_cues(cues, units, translations):
     cue_segments = {}
     approx_splits = []
     glossary_terms = collect_glossary_terms(units)
+    dash_style = determine_dash_style(cues)
+    
     for unit in units:
         spans = unit["spans"]
         translated = translations.get(str(unit["id"]))
@@ -385,10 +444,11 @@ def build_bilingual_cues(cues, units, translations):
         if not parts or any(p is None for p in parts):
             translation = None
         elif len(parts) > 1:
-            translation = " ".join(f"-{p}" for p in parts)
+            translation = " ".join(f"-{p.lstrip('- ')}" for p in parts)
         else:
             translation = parts[0]
         if translation:
+            translation = DASH_REPLACE_PATTERN.sub(rf"\1{dash_style}", translation)
             translation = normalize_exclaim_question(translation)
             if source_is_music(cue["text"]):
                 translation = POSITION_TOP_TAG + format_music_line(translation)
