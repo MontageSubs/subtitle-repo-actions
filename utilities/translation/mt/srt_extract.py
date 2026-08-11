@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: srt_extract.py
-# Version: 1.2.0
+# Version: 1.3.0
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -35,9 +35,15 @@
 #       原始片段及各自时间轴/原文）供下游拆分回填。
 #     - 标注词表命中的位置、原文与固定译名（`term_matches`）及嵌入比例
 #       （`embed_ratio`），是否嵌入原文或改用占位符由翻译脚本决定。
-#     - 默认剥离 SDH（听障辅助）内容：整行 SDH 括号内容丢弃、行内 SDH
-#       仅剥离对应片段，逐行识别"说话人标签+冒号"前缀（如 MAN:/两人：）
-#       并剥离（--keep-sdh 可关闭）；含音符的行豁免于 SDH 剥离之外。
+#     - 默认剥离 SDH（听障辅助）内容：整行 SDH 括号内容丢弃；说话人标签
+#       （如 "JOHN: text"）剥离逻辑严格取材于 Subtitle Edit 的
+#       RemoveTextForHI.cs（RemoveColon，OnlyUppercase=True 默认档位）：
+#       仅识别半角冒号，前缀必须整体全大写才剥离，并保留原版的括号内冒号
+#       豁免、数字间冒号豁免、叙述性前缀豁免（ShouldRemoveNarrator）、
+#       两行 cue 中首行未终止标点时的续行豁免。全角冒号（如中文"："）与
+#       非全大写前缀（如 "Both:"）按原版行为一律不剥离——这是源字幕格式
+#       不规范，不在本工具修复范围内。（--keep-sdh 可关闭整个 SDH 剥离；
+#       含音符的 cue 整体豁免于说话人标签剥离之外。）
 #     - 音乐歌词行按大小写判断是否跨 cue 续接合并，合并组发送翻译前剥离首尾音符。
 #
 # Usage / 用法:
@@ -83,15 +89,12 @@ LEADING_ELLIPSIS_PATTERN = re.compile(r"^(\.{2,}|\u2026)")
 LEADING_NON_LETTER_PATTERN = re.compile(r"^[^A-Za-z]*")
 EDGE_NOTE_PATTERN = re.compile(f"^[{MUSIC_NOTE_CHARS}\\s]+|[{MUSIC_NOTE_CHARS}\\s]+$")
 
-SPEAKER_TAG_MAX_CHARS = 24
-SPEAKER_TAG_PATTERN = re.compile(rf"^([^:\uff1a]{{1,{SPEAKER_TAG_MAX_CHARS}}})[:\uff1a]\s*(\S.*)$")
-UPPERCASE_LETTER_PATTERN = re.compile(r"[A-Z]")
-LOWERCASE_LETTER_PATTERN = re.compile(r"[a-z]")
-SPEAKER_TAG_LABELS = frozenset({
-    "both", "all", "man", "woman", "men", "women", "voice", "voiceover",
-    "crowd", "narrator", "group",
-    "两人", "众人", "全体", "男声", "女声", "众声", "画外音", "旁白", "二人", "三人", "齐声", "合",
-})
+COLON = ":"
+NARRATOR_BLOCK_PHRASES = (
+    "previously on", "improved by", " is ", " are ", " were ", " was ",
+    " think ", " guess ", " will ", " believe ", " say ", " said ",
+    " do ", " want ", "that's ",
+)
 
 GLOSSARY_HEADING = "人物与专有名词"
 SECTION_END_PATTERN = re.compile(r"^##\s", re.MULTILINE)
@@ -118,20 +121,70 @@ def strip_letter_stutter(text):
     return STUTTER_PREFIX_PATTERN.sub("", text)
 
 
-def is_speaker_tag(tag):
-    tag = tag.strip()
-    if not tag:
-        return False
-    if UPPERCASE_LETTER_PATTERN.search(tag) and not LOWERCASE_LETTER_PATTERN.search(tag):
+def is_all_uppercase(text):
+    return any(c.isalpha() for c in text) and text.upper() == text
+
+
+def is_inside_colon_brackets(line, index):
+    idx = line.rfind("(", 0, index)
+    if idx >= 0 and line.find(")", idx) > index:
         return True
-    return tag.lower() in SPEAKER_TAG_LABELS
+    idx = line.rfind("[", 0, index)
+    if idx >= 0 and line.find("]", idx) > index:
+        return True
+    return False
 
 
-def strip_speaker_tag(line):
-    match = SPEAKER_TAG_PATTERN.match(line)
-    if match and is_speaker_tag(match.group(1)):
-        return match.group(2)
-    return line
+def is_between_digits(line, index):
+    return 0 < index < len(line) - 1 and line[index - 1].isdigit() and line[index + 1].isdigit()
+
+
+def is_trailing_colon_only(line):
+    return COLON not in line.rstrip(COLON)
+
+
+def should_remove_narrator(pre):
+    lowered = pre.lower()
+    if len(pre) > 30 or "http" in lowered or ", " in pre:
+        return False
+    if len(pre) > 15 and any(phrase in lowered for phrase in NARRATOR_BLOCK_PHRASES):
+        return False
+    return True
+
+
+def strip_speaker_tag_line(line, lines, index):
+    if COLON not in line:
+        return line
+    index_of_colon = line.index(COLON)
+    is_last_line = index == len(lines) - 1
+    if index_of_colon <= 0 or is_inside_colon_brackets(line, index_of_colon):
+        return line
+    if is_last_line and is_trailing_colon_only(line) and line.count(" ") > 1:
+        return line
+    pre = line[:index_of_colon]
+    if not is_all_uppercase(pre):
+        return line
+    if is_between_digits(line, index_of_colon):
+        return line
+    if not should_remove_narrator(pre):
+        return line
+    if len(lines) == 2 and index == 1:
+        first_line = lines[0].rstrip('"')
+        if not first_line.endswith((".", "!", "?", "\u266a", "\u266b", "--", "\u2014")):
+            return line
+    content = line[index_of_colon + 1:].strip()
+    if not content:
+        return ""
+    if content[0].islower():
+        content = content[0].upper() + content[1:]
+    return content
+
+
+def strip_speaker_tags(lines):
+    joined = "\n".join(lines)
+    if len(joined) > 10 and joined.endswith(COLON) and not is_all_uppercase(joined):
+        return lines
+    return [strip_speaker_tag_line(line, lines, i) for i, line in enumerate(lines)]
 
 
 def strip_sdh(text):
@@ -159,14 +212,11 @@ def strip_edge_notes(text):
 
 
 def fold_text(raw, strip_sdh_enabled=False):
-    lines = []
-    for raw_line in raw.splitlines():
-        line = WHITESPACE_PATTERN.sub(" ", TAG_PATTERN.sub("", raw_line)).strip()
-        if strip_sdh_enabled and line and not MUSIC_NOTE_PATTERN.search(line):
-            line = strip_speaker_tag(line).strip()
-        if line:
-            lines.append(line)
-    return " ".join(lines)
+    lines = [WHITESPACE_PATTERN.sub(" ", TAG_PATTERN.sub("", raw_line)).strip() for raw_line in raw.splitlines()]
+    lines = [line for line in lines if line]
+    if strip_sdh_enabled and lines and not any(MUSIC_NOTE_PATTERN.search(line) for line in lines):
+        lines = strip_speaker_tags(lines)
+    return " ".join(line for line in lines if line)
 
 
 def parse_srt(content, strip_sdh_enabled=True):
