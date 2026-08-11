@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: bilingual_merge.py
-# Version: 1.3.0
+# Version: 1.4
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -94,7 +94,7 @@ SCRIPT_NAME = "bilingual_merge"
 ELLIPSIS_PATTERN = re.compile(r"\.{2,}|…+")
 DASH_ARTIFACT_PATTERN = re.compile(r"—+|-{2,}")
 CJK_TERMINATOR_PATTERN = re.compile(r"[。，、]")
-HALFWIDTH_TERMINATOR_PATTERN = re.compile(r"(?<![\d.])[.,](?![\d.])")
+HALFWIDTH_COMMA_PATTERN = re.compile(r"(?<!\d)[,](?!\d)")
 WHITESPACE_COLLAPSE_PATTERN = re.compile(r"\s+")
 NON_WORD_PATTERN = re.compile(r"[^\w]", re.UNICODE)
 NO_LINE_END_CHARS = set("“「『（([{＜〈《【〔„‚«‹¿¡'\"‘")
@@ -166,18 +166,19 @@ def source_is_music(text):
 def format_music_line(text):
     if len(text) > 1:
         text = MUSIC_INTERIOR_NOTE_PATTERN.sub("", text)
-    text = fix_music_spacing(text)
     text = WHITESPACE_COLLAPSE_PATTERN.sub(" ", text).strip()
     if not MUSIC_NOTE_PATTERN.match(text):
-        text = fix_music_spacing(f"\u266a{text}").strip()
-    return text
+        text = f"\u266a{text}" if text else MUSIC_NOTE_CHARS[0]
+    if text[-1] not in MUSIC_NOTE_CHARS:
+        text = f"{text}\u266a"
+    return WHITESPACE_COLLAPSE_PATTERN.sub(" ", fix_music_spacing(text)).strip()
 
 
 def normalize_chinese(text):
     text = ELLIPSIS_PATTERN.sub("...", text)
     text = DASH_ARTIFACT_PATTERN.sub("...", text)
     text = CJK_TERMINATOR_PATTERN.sub(strip_terminator, text)
-    text = HALFWIDTH_TERMINATOR_PATTERN.sub(strip_terminator, text)
+    text = HALFWIDTH_COMMA_PATTERN.sub(strip_terminator, text)
     text = fix_music_spacing(text)
     text = WHITESPACE_COLLAPSE_PATTERN.sub(" ", text).strip()
     return enforce_line_edges(text)
@@ -216,26 +217,61 @@ def classify_boundary(text):
 CLOSING_TAIL_CHARS = "'\"”’)\\]}》」』】〕＞〉»›"
 GENERAL_PUNCT_SEARCH_PATTERN = re.compile(r"[，,、；;。.!?！？：:…]+[" + CLOSING_TAIL_CHARS + r"]*")
 LEFT_CUT_PATTERN = re.compile(r"[“「『（([{＜〈《【〔„‚«‹¿¡]")
+BOOK_TITLE_PATTERN = re.compile(r"《[^《》]*》")
 ORIGINAL_PUNCT_TOLERANCE = 0.20
 INFERRED_PUNCT_TOLERANCE = 0.15
 INFERRED_MIN_SHARE = 0.5
 
 
-def resolve_cut(text, cursor, expected, boundary, max_cut):
+def find_protected_spans(text, glossary_terms):
+    spans = [(m.start(), m.end()) for m in BOOK_TITLE_PATTERN.finditer(text)]
+    for term in glossary_terms:
+        if not term:
+            continue
+        start = 0
+        while True:
+            idx = text.find(term, start)
+            if idx < 0:
+                break
+            spans.append((idx, idx + len(term)))
+            start = idx + len(term)
+    return spans
+
+
+def inside_protected_span(pos, protected):
+    return any(start < pos < end for start, end in protected)
+
+
+def escape_protected_span(pos, protected):
+    for start, end in protected:
+        if start < pos < end:
+            return start if pos - start <= end - pos else end
+    return pos
+
+
+def resolve_cut(text, cursor, expected, boundary, max_cut, protected=()):
     limit = len(text)
     ceiling = min(limit, max_cut)
     if boundary:
-        candidates = [m.end() for m in BOUNDARY_SEARCH_PATTERNS[boundary].finditer(text, cursor) if cursor < m.end() < ceiling]
+        candidates = [m.end() for m in BOUNDARY_SEARCH_PATTERNS[boundary].finditer(text, cursor)
+                      if cursor < m.end() < ceiling and not inside_protected_span(m.end(), protected)]
         if candidates:
-            return min(candidates, key=lambda pos: abs(pos - expected)), "original"
-    inferred = [m.end() for m in GENERAL_PUNCT_SEARCH_PATTERN.finditer(text, cursor) if cursor < m.end() < ceiling]
-    inferred += [m.start() for m in LEFT_CUT_PATTERN.finditer(text, cursor) if cursor < m.start() < ceiling]
+            cut = min(candidates, key=lambda pos: abs(pos - expected))
+            if abs(cut - expected) <= ORIGINAL_PUNCT_TOLERANCE * limit:
+                return cut, "original"
+    inferred = [m.end() for m in GENERAL_PUNCT_SEARCH_PATTERN.finditer(text, cursor)
+                if cursor < m.end() < ceiling and not inside_protected_span(m.end(), protected)]
+    inferred += [m.start() for m in LEFT_CUT_PATTERN.finditer(text, cursor)
+                 if cursor < m.start() < ceiling and not inside_protected_span(m.start(), protected)]
     if inferred:
-        return min(inferred, key=lambda pos: abs(pos - expected)), "inferred"
-    boundaries = [b for b in (bd + cursor for bd in word_boundaries(text[cursor:])) if cursor < b < ceiling]
+        cut = min(inferred, key=lambda pos: abs(pos - expected))
+        if abs(cut - expected) <= INFERRED_PUNCT_TOLERANCE * limit:
+            return cut, "inferred"
+    boundaries = [b for b in (bd + cursor for bd in word_boundaries(text[cursor:]))
+                  if cursor < b < ceiling and not inside_protected_span(b, protected)]
     if boundaries:
         return nearest_boundary(boundaries, expected), None
-    return max(cursor + 1, min(round(expected), ceiling - 1)), None
+    return escape_protected_span(max(cursor + 1, min(round(expected), ceiling - 1)), protected), None
 
 
 def enforce_punctuation_placement(parts):
@@ -250,7 +286,7 @@ def enforce_punctuation_placement(parts):
     return [p.strip() for p in parts]
 
 
-def split_by_boundary(translated_text, spans):
+def split_by_boundary(translated_text, spans, protected=()):
     boundary_types = [classify_boundary(span["text"]) for span in spans[:-1]]
     lengths = [effective_length(span["text"]) for span in spans]
     total = sum(lengths) or 1
@@ -261,7 +297,7 @@ def split_by_boundary(translated_text, spans):
         cumulative += length
         expected = total_len * cumulative / total
         max_cut = total_len - (span_count - 1 - i)
-        cut, tag = resolve_cut(translated_text, cursor, expected, boundary, max_cut)
+        cut, tag = resolve_cut(translated_text, cursor, expected, boundary, max_cut, protected)
         tags.append(tag)
         parts.append(translated_text[cursor:cut].strip())
         cursor = cut
@@ -275,7 +311,7 @@ def split_by_boundary(translated_text, spans):
     return parts, method
 
 
-def repair_empty_parts(parts, spans):
+def repair_empty_parts(parts, spans, protected=()):
     parts = list(parts)
     for i, part in enumerate(parts):
         if part:
@@ -284,17 +320,17 @@ def repair_empty_parts(parts, spans):
         if not (0 <= neighbor < len(parts)):
             continue
         lo, hi = sorted((i, neighbor))
-        fixed, _ = split_by_boundary(parts[neighbor], spans[lo:hi + 1])
+        fixed, _ = split_by_boundary(parts[neighbor], spans[lo:hi + 1], protected)
         parts[lo], parts[hi] = fixed
     return parts
 
 
-def split_translation(translated_text, spans):
+def split_translation(translated_text, spans, protected=()):
     if len(spans) == 1:
         return [translated_text.strip()], "single"
-    parts, method = split_by_boundary(translated_text, spans)
+    parts, method = split_by_boundary(translated_text, spans, protected)
     parts = enforce_punctuation_placement(parts)
-    return repair_empty_parts(parts, spans), method
+    return repair_empty_parts(parts, spans, protected), method
 
 
 BRACKET_CHAR_PATTERN = re.compile(r"[()（）\[\]【】{}]")
@@ -327,6 +363,7 @@ def normalize_exclaim_question(text):
 def build_bilingual_cues(cues, units, translations):
     cue_segments = {}
     approx_splits = []
+    glossary_terms = collect_glossary_terms(units)
     for unit in units:
         spans = unit["spans"]
         translated = translations.get(str(unit["id"]))
@@ -335,7 +372,8 @@ def build_bilingual_cues(cues, units, translations):
                 cue_segments.setdefault(span["id"], []).append(None)
             continue
         translated = strip_unsourced_brackets("".join(span["text"] for span in spans), translated)
-        parts, method = split_translation(translated, spans)
+        protected = find_protected_spans(translated, glossary_terms)
+        parts, method = split_translation(translated, spans, protected)
         if method not in ("single", "original_boundary", "inferred_punctuation"):
             approx_splits.append({"unit_id": unit["id"], "method": method})
         for span, part in zip(spans, parts):

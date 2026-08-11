@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: google_client.py
-# Version: 1.2.0
+# Version: 1.3
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -231,11 +231,13 @@ def build_variants(unit):
 
 
 def flatten_units(units):
-    items = []
+    items, index_map = [], {}
     for unit in units:
         for variant, (text, _mapping) in build_variants(unit).items():
-            items.append({"id": f"{unit['id']}:{variant}", "text": text})
-    return items
+            idx = len(items)
+            items.append({"id": idx, "text": text})
+            index_map[idx] = f"{unit['id']}:{variant}"
+    return items, index_map
 
 
 def restore_placeholders(text, mapping):
@@ -269,8 +271,9 @@ def retry_single(text, source_lang, target_lang, api_key):
 def translate_units(units, source_lang, target_lang, api_key, batch_chars, concurrency):
     resolved = {unit["id"]: unit["resolved"] for unit in units if unit.get("resolved") is not None}
     pending = [unit for unit in units if unit.get("resolved") is None]
-    items = flatten_units(pending)
-    translations_raw, _skipped = translate(items, source_lang, target_lang, api_key, batch_chars, concurrency) if items else ({}, [])
+    items, index_map = flatten_units(pending)
+    indexed_raw, _skipped = translate(items, source_lang, target_lang, api_key, batch_chars, concurrency) if items else ({}, [])
+    translations_raw = {index_map[idx]: text for idx, text in indexed_raw.items()}
 
     results = dict(resolved)
     for unit in pending:

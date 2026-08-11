@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: srt_extract.py
-# Version: 1.3.0
+# Version: 1.4
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -72,7 +72,6 @@ TAG_PATTERN = re.compile(r"<[^>]+>|\{[^}]*\}")
 WHITESPACE_PATTERN = re.compile(r"\s+")
 TERMINAL_PUNCT_PATTERN = re.compile(r"[.!?…”’\"')\]]\s*$")
 TRAILING_CONTINUATION_PATTERN = re.compile(r"(\.{2,}|-{2,}|…)\s*$")
-LOWERCASE_START_PATTERN = re.compile(r"^[a-z]")
 DIALOGUE_DASH_PATTERN = re.compile(r"(?:^|(?<=\s))-(?!-)\s?")
 STUTTER_WORD_PATTERN = re.compile(r"(?<![A-Za-z])([A-Za-z])-\1(?![A-Za-z])", re.IGNORECASE)
 STUTTER_PREFIX_PATTERN = re.compile(r"(?<![A-Za-z])([A-Za-z])-(?=\1[a-z])", re.IGNORECASE)
@@ -201,14 +200,17 @@ def music_continuation(text):
     remainder = MUSIC_NOTE_PATTERN.sub("", text, count=1).strip()
     if LEADING_ELLIPSIS_PATTERN.match(remainder):
         return False
-    letter_start = LEADING_NON_LETTER_PATTERN.match(remainder).end()
-    if letter_start >= len(remainder):
-        return False
-    return remainder[letter_start].islower()
+    return first_letter_is_lower(remainder)
 
 
 def strip_edge_notes(text):
     return EDGE_NOTE_PATTERN.sub("", text)
+
+
+def first_letter_is_lower(text):
+    match = LEADING_NON_LETTER_PATTERN.match(text)
+    rest = text[match.end():]
+    return bool(rest) and rest[0].islower()
 
 
 def fold_text(raw, strip_sdh_enabled=False):
@@ -290,7 +292,7 @@ def should_merge(prev_seg, curr_seg):
     if has_terminal_punct(prev_seg["text"]):
         return False
     gap = time_to_ms(curr_seg["start"]) - time_to_ms(prev_seg["end"])
-    return gap <= GAP_THRESHOLD_MS or bool(LOWERCASE_START_PATTERN.match(curr_seg["text"]))
+    return gap <= GAP_THRESHOLD_MS or first_letter_is_lower(curr_seg["text"])
 
 
 def find_stutter_resolution(text, glossary):
