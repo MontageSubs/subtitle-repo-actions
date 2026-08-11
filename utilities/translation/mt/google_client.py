@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: google_client.py
-# Version: 1.3
+# Version: 1.3.1
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -72,7 +72,7 @@ SCRIPT_NAME = "google_client"
 
 ENDPOINT = "https://translate-pa.googleapis.com/v1/translateHtml"
 API_KEY_ENV = "GOOGLE_TRANSLATE_API_KEY"
-DEFAULT_BATCH_CHARS = 1800
+DEFAULT_BATCH_CHARS = 3000
 DEFAULT_CONCURRENCY = 8
 REQUEST_TIMEOUT = 30
 MAX_ATTEMPTS = 3
