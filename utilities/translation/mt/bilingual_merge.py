@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: bilingual_merge.py
-# Version: 1.2.0
+# Version: 1.3.0
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -10,25 +10,31 @@
 #
 # Description / 描述:
 #     Merges machine-translated JSON payload back with the original extracted
-#     subtitle data to generate a bilingual SRT file. Handles text splitting
-#     for merged translation units using punctuation, tokenization (jieba), or
-#     fallback character ratio methods. Restores glossary placeholders to their
-#     target terms.
+#     subtitle data to generate a bilingual SRT file. Splits merged translation
+#     units back into per-cue segments using punctuation/length-ratio boundary
+#     estimation (word tokenization via jieba where available), driven by the
+#     `spans` list each unit carries (no marker syntax involved anywhere).
 #     将机器翻译返回的 JSON 数据与最初提取的字幕数据合并，生成双语 SRT 文件。
-#     针对合并翻译的单元，使用标点、分词（jieba）或后备字符比例等方式进行文本拆分，
-#     并将词表占位符还原为目标术语。
+#     依据每个翻译单元自带的 `spans` 列表（原始片段文本+时间轴），用标点/
+#     长度比例边界估计（可用时以结巴分词辅助定位）拆分合并翻译回各原始
+#     字幕片段，全程不涉及任何标记符号。
 #
 # Features:
 #     - Reconstructs bilingual subtitle blocks maintaining original cue timing.
 #     - Splits translation units back into segments using length constraints,
 #       sentence boundaries, or jieba-based word tokenization.
-#     - Restores protected glossary placeholders (e.g., ⟦G0000⟧).
 #     - Automatically handles missing translations and logs approximation splits.
+#     - Fixes missing space between Chinese text and music notes (♪ etc.).
+#     - Music-line detection based on the source cue's leading character
+#       (tag-tolerant); matched translations get a {\an7} top-position tag,
+#       missing leading notes are added back, and interior notes are collapsed
+#       into a single space.
+#     - Sentence-splitting bracket set covers CJK/French/German quotes and
+#       Spanish inverted punctuation.
 #
 # 功能:
 #     - 重构双语字幕块并保持原始时间轴。
 #     - 利用长度限制、句尾标点或结巴分词（jieba）将翻译单元重新拆分为字幕段落。
-#     - 还原受保护的专有名词占位符（如 ⟦G0000⟧）。
 #     - 自动处理缺失的翻译，并记录近似拆分的单元。
 #     - 修复中文译文中音符（♪等）与相邻文字间丢失的空格。
 #     - 音乐行判定基于原文首字符（兼容 <i> 等前导标签）；命中时译文加 {\an7}
@@ -58,7 +64,6 @@
 import argparse
 import json
 import logging
-import os
 import re
 import subprocess
 import sys
@@ -86,13 +91,6 @@ except ImportError:
 
 SCRIPT_NAME = "bilingual_merge"
 
-LATIN_LANGS = {"en", "es", "fr", "de", "it", "pt", "nl", "pl", "sv", "da", "no", "fi", "ro", "cs", "hu", "tr", "id", "vi", "ms", "tl", "ca", "eu", "gl", "la"}
-NON_LATIN_LANGS = {"zh", "ja", "ko", "ru", "uk", "ar", "he", "hi", "th", "el", "bg", "fa"}
-LATIN_WORD_PATTERN = re.compile(r"[a-zA-Z]{2,}")
-NON_LATIN_CHAR_PATTERN = re.compile(r"[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af\u0400-\u04ff\u0600-\u06ff]")
-
-SEGMENT_MARKER_PATTERN = re.compile(r"\u27e6S(\d{2})\u27e7")
-GLOSSARY_PLACEHOLDER_PATTERN = re.compile(r"\s*(\u27e6G\d{4}\u27e7)\s*")
 ELLIPSIS_PATTERN = re.compile(r"\.{2,}|…+")
 DASH_ARTIFACT_PATTERN = re.compile(r"—+|-{2,}")
 CJK_TERMINATOR_PATTERN = re.compile(r"[。，、]")
@@ -120,63 +118,15 @@ def log(message):
     print(f"{SCRIPT_NAME}: {message}", file=sys.stderr)
 
 
-def should_retranslate(text, source_lang, target_lang):
-    if not text or not source_lang or not target_lang:
-        return False
-    s = source_lang.split("-")[0].lower()
-    t = target_lang.split("-")[0].lower()
-    cleaned = strip_markers(text)
-    if s in LATIN_LANGS and t in NON_LATIN_LANGS:
-        return len(LATIN_WORD_PATTERN.findall(cleaned)) > 1
-    if s in NON_LATIN_LANGS and t in LATIN_LANGS:
-        return len(NON_LATIN_CHAR_PATTERN.findall(cleaned)) > 1
-    return False
+def collect_glossary_terms(units):
+    return {m["target"] for unit in units for m in (unit.get("term_matches") or []) if m.get("target")}
 
 
-def retranslate_clean(text, source_lang, target_lang, api_key):
-    if not api_key or not text.strip():
-        return None
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    client_path = os.path.join(script_dir, "google_client.py")
-    payload = {
-        "units": [{"id": "0", "text": text, "segments": [{"cue_id": 0, "seg_idx": 0, "text": text}], "resolved": False}],
-        "source_lang": source_lang,
-        "target_lang": target_lang
-    }
-    try:
-        env = os.environ.copy()
-        env["GOOGLE_TRANSLATE_API_KEY"] = api_key
-        proc = subprocess.run(
-            [sys.executable, client_path],
-            input=json.dumps(payload),
-            text=True,
-            capture_output=True,
-            env=env,
-            timeout=30
-        )
-        if proc.returncode == 0:
-            data = json.loads(proc.stdout)
-            if data.get("success") and "0" in data.get("translations", {}):
-                return data["translations"]["0"]
-        else:
-            log(f"retranslate subprocess error: {proc.stderr.strip()}")
-    except Exception as e:
-        log(f"retranslate failed: {e}")
-    return None
-
-
-def restore_glossary(text, glossary_map):
-    def substitute(match):
-        return glossary_map.get(match.group(1), match.group(1))
-
-    return GLOSSARY_PLACEHOLDER_PATTERN.sub(substitute, text)
-
-
-def register_glossary_terms(glossary_map):
+def register_glossary_terms(terms):
     if jieba is None:
         return
-    for target_term in {term for term in glossary_map.values() if term}:
-        jieba.add_word(target_term)
+    for term in terms:
+        jieba.add_word(term)
 
 
 def enforce_line_edges(text):
@@ -239,6 +189,7 @@ def effective_length(text):
 
 FALLBACK_BOUNDARY_PATTERN = re.compile(r"[，,、；;。.!?…\s]+")
 
+
 def word_boundaries(text):
     if jieba is not None:
         boundaries = [0]
@@ -268,7 +219,6 @@ LEFT_CUT_PATTERN = re.compile(r"[“「『（([{＜〈《【〔„‚«‹¿¡]"
 ORIGINAL_PUNCT_TOLERANCE = 0.20
 INFERRED_PUNCT_TOLERANCE = 0.15
 INFERRED_MIN_SHARE = 0.5
-MARKER_LENGTH_TOLERANCE = 0.4
 
 
 def resolve_cut(text, cursor, expected, boundary, max_cut):
@@ -300,35 +250,17 @@ def enforce_punctuation_placement(parts):
     return [p.strip() for p in parts]
 
 
-def strip_markers(text):
-    return SEGMENT_MARKER_PATTERN.sub("", text)
-
-
-def split_by_markers(translated_text, segment_count):
-    matches = list(SEGMENT_MARKER_PATTERN.finditer(translated_text))
-    if len(matches) != segment_count:
-        return None
-    indices = [int(m.group(1)) for m in matches]
-    if sorted(indices) != list(range(segment_count)):
-        return None
-    parts = [None] * segment_count
-    for i, match in enumerate(matches):
-        end = matches[i + 1].start() if i + 1 < len(matches) else len(translated_text)
-        parts[indices[i]] = translated_text[match.end():end].strip()
-    return parts if all(parts) else None
-
-
-def split_by_boundary(translated_text, segments):
-    boundary_types = [classify_boundary(seg["text"]) for seg in segments[:-1]]
-    lengths = [effective_length(seg["text"]) for seg in segments]
+def split_by_boundary(translated_text, spans):
+    boundary_types = [classify_boundary(span["text"]) for span in spans[:-1]]
+    lengths = [effective_length(span["text"]) for span in spans]
     total = sum(lengths) or 1
     total_len = len(translated_text)
-    segment_count = len(segments)
+    span_count = len(spans)
     cursor, cumulative, parts, tags = 0, 0, [], []
     for i, (length, boundary) in enumerate(zip(lengths[:-1], boundary_types)):
         cumulative += length
         expected = total_len * cumulative / total
-        max_cut = total_len - (segment_count - 1 - i)
+        max_cut = total_len - (span_count - 1 - i)
         cut, tag = resolve_cut(translated_text, cursor, expected, boundary, max_cut)
         tags.append(tag)
         parts.append(translated_text[cursor:cut].strip())
@@ -343,7 +275,7 @@ def split_by_boundary(translated_text, segments):
     return parts, method
 
 
-def repair_empty_parts(parts, segments):
+def repair_empty_parts(parts, spans):
     parts = list(parts)
     for i, part in enumerate(parts):
         if part:
@@ -352,35 +284,17 @@ def repair_empty_parts(parts, segments):
         if not (0 <= neighbor < len(parts)):
             continue
         lo, hi = sorted((i, neighbor))
-        fixed, _ = split_by_boundary(parts[neighbor], segments[lo:hi + 1])
+        fixed, _ = split_by_boundary(parts[neighbor], spans[lo:hi + 1])
         parts[lo], parts[hi] = fixed
     return parts
 
 
-def validate_marker_lengths(parts, segments):
-    lengths = [effective_length(seg["text"]) for seg in segments]
-    total = sum(lengths) or 1
-    actual_total = sum(len(p) for p in parts) or 1
-    for length, part in zip(lengths[1:], parts[1:]):
-        expected_share = length / total
-        if expected_share <= 0:
-            continue
-        actual_share = len(part) / actual_total
-        if abs(actual_share - expected_share) / expected_share > MARKER_LENGTH_TOLERANCE:
-            return False
-    return True
-
-
-def split_translation(translated_text, segments):
-    if len(segments) == 1:
-        return [strip_markers(translated_text)], "single"
-    marker_parts = split_by_markers(translated_text, len(segments))
-    if marker_parts and validate_marker_lengths(marker_parts, segments):
-        parts, method = marker_parts, "marker"
-    else:
-        parts, method = split_by_boundary(strip_markers(translated_text), segments)
+def split_translation(translated_text, spans):
+    if len(spans) == 1:
+        return [translated_text.strip()], "single"
+    parts, method = split_by_boundary(translated_text, spans)
     parts = enforce_punctuation_placement(parts)
-    return repair_empty_parts(parts, segments), method
+    return repair_empty_parts(parts, spans), method
 
 
 BRACKET_CHAR_PATTERN = re.compile(r"[()（）\[\]【】{}]")
@@ -410,45 +324,26 @@ def normalize_exclaim_question(text):
     return EXCLAIM_QUESTION_RUN_PATTERN.sub(substitute, text)
 
 
-def build_bilingual_cues(cues, units, translations, glossary_map, source_lang=None, target_lang=None, api_key=None):
+def build_bilingual_cues(cues, units, translations):
     cue_segments = {}
     approx_splits = []
     for unit in units:
+        spans = unit["spans"]
         translated = translations.get(str(unit["id"]))
-        segments = unit["segments"]
-        retranslated_flag = False
-
-        if translated and should_retranslate(translated, source_lang, target_lang):
-            clean_source = strip_markers(unit.get("text") or "".join(seg["text"] for seg in segments))
-            new_translated = retranslate_clean(clean_source, source_lang, target_lang, api_key)
-            if new_translated:
-                log(f"unit {unit['id']}: successfully re-translated without markers")
-                translated = new_translated
-                retranslated_flag = True
-
         if translated is None:
-            for seg in segments:
-                cue_segments.setdefault(seg["cue_id"], {})[seg["seg_idx"]] = None
+            for span in spans:
+                cue_segments.setdefault(span["id"], []).append(None)
             continue
-        translated = restore_glossary(translated, glossary_map)
-        translated = strip_unsourced_brackets("".join(seg["text"] for seg in segments), translated)
-
-        if retranslated_flag and len(segments) > 1:
-            parts, method = split_by_boundary(strip_markers(translated), segments)
-            parts = enforce_punctuation_placement(parts)
-            parts = repair_empty_parts(parts, segments)
-        else:
-            parts, method = split_translation(translated, segments)
-
-        if method not in ("single", "marker", "original_boundary", "inferred_punctuation"):
+        translated = strip_unsourced_brackets("".join(span["text"] for span in spans), translated)
+        parts, method = split_translation(translated, spans)
+        if method not in ("single", "original_boundary", "inferred_punctuation"):
             approx_splits.append({"unit_id": unit["id"], "method": method})
-        for seg, part in zip(segments, parts):
-            cue_segments.setdefault(seg["cue_id"], {})[seg["seg_idx"]] = normalize_chinese(part)
+        for span, part in zip(spans, parts):
+            cue_segments.setdefault(span["id"], []).append(normalize_chinese(part))
 
     results = []
     for cue in cues:
-        seg_map = cue_segments.get(cue["id"], {})
-        parts = [seg_map[i] for i in sorted(seg_map)] if seg_map else []
+        parts = cue_segments.get(cue["id"])
         if not parts or any(p is None for p in parts):
             translation = None
         elif len(parts) > 1:
@@ -476,20 +371,14 @@ def render_srt(cues):
     return "\n\n".join(blocks) + "\n"
 
 
-def merge(extract_data, translate_data, api_key=None):
+def merge(extract_data, translate_data):
     if jieba is not None:
         log(f"jieba: available (v{getattr(jieba, '__version__', 'unknown')})")
     else:
         log("jieba: unavailable, splitting falls back to punctuation/char boundaries")
     translations = translate_data.get("translations", {})
-    source_lang = translate_data.get("source_lang")
-    target_lang = translate_data.get("target_lang")
-    glossary_map = extract_data.get("glossary_map", {})
-    register_glossary_terms(glossary_map)
-    cues, approx_splits = build_bilingual_cues(
-        extract_data["cues"], extract_data["units"], translations, glossary_map,
-        source_lang, target_lang, api_key
-    )
+    register_glossary_terms(collect_glossary_terms(extract_data["units"]))
+    cues, approx_splits = build_bilingual_cues(extract_data["cues"], extract_data["units"], translations)
     missing = sum(1 for cue in cues if cue.get("translation") is None)
     return {"success": True, "srt": render_srt(cues), "approx_splits": approx_splits, "missing_count": missing}
 
@@ -499,14 +388,12 @@ def main():
     parser.add_argument("--extract", required=True)
     parser.add_argument("--translations", required=True)
     parser.add_argument("--output", default=None)
-    parser.add_argument("--api-key", default=None)
     args = parser.parse_args()
 
     extract_data = json.load(open(args.extract, encoding="utf-8"))
     translate_data = json.load(open(args.translations, encoding="utf-8"))
-    api_key = args.api_key or os.environ.get("GOOGLE_TRANSLATE_API_KEY")
 
-    result = merge(extract_data, translate_data, api_key)
+    result = merge(extract_data, translate_data)
     log(f"status: ok (cues={len(extract_data['cues'])}, missing={result['missing_count']}, approx_splits={len(result['approx_splits'])})")
 
     if args.output:

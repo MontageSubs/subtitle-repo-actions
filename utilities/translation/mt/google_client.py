@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: google_client.py
-# Version: 1.1.0
+# Version: 1.2.0
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -10,23 +10,37 @@
 #
 # Description / 描述:
 #     Batches and translates subtitle units using Google Translate's PA endpoint.
-#     Employs concurrent threading for faster translation, wraps text in HTML 
+#     Employs concurrent threading for faster translation, wraps text in HTML
 #     anchors to preserve alignment, and handles retries/fallbacks automatically.
-#     使用 Google Translate PA 接口进行字幕单元批量机器翻译。
-#     采用并发线程池加速翻译，通过 HTML anchor 标签包裹文本以保留对应关系，
-#     并自动处理请求重试与失败回退。
+#     For units carrying glossary `term_matches`, builds an inline-name variant
+#     (real target term embedded in the source sentence) and/or a placeholder
+#     variant per unit, picks the better result via an untranslated-residue
+#     diagnostic, restores placeholders locally, and issues a single isolated
+#     retry when the chosen result still looks untranslated.
+#     使用 Google Translate PA 接口进行字幕单元批量机器翻译。采用并发线程池
+#     加速翻译，通过 HTML anchor 标签包裹文本以保留对应关系，并自动处理
+#     请求重试与失败回退。对携带词表命中（term_matches）的单元，按单元自身
+#     的嵌入比例生成"固定译名直接嵌入原文"与/或"占位符"两个版本分别发送，
+#     依据未翻译残留诊断择优采用并在本地回填占位符；若最终结果仍疑似未
+#     翻译，单独重发一次原句作为质量兜底。
 #
 # Features:
 #     - Concurrent HTTP requests via ThreadPoolExecutor.
 #     - Smart text batching based on character limits (DEFAULT_BATCH_CHARS).
 #     - Protective HTML formatting (<a> tags) to isolate lines and map results.
 #     - Robust retry mechanism for failed or partially failed translation batches.
+#     - Per-unit inline-name / placeholder dual variants, chosen by an
+#       untranslated-residue diagnostic (Latin<->CJK word/char counting).
+#     - Single isolated retry (no loop) when the final chosen result still
+#       looks untranslated; kept only if the retry actually differs.
 #
 # 功能:
 #     - 基于 ThreadPoolExecutor 的并发 HTTP 请求。
 #     - 基于字符数限制（DEFAULT_BATCH_CHARS）的智能文本分批。
 #     - 使用 HTML <a> 标签保护并隔离行文本，确保原译文精准映射。
 #     - 针对失败或部分失败请求的健壮重试机制。
+#     - 按单元自身嵌入比例生成嵌入版/占位符版，依未翻译诊断择优并回填。
+#     - 最终结果仍疑似未翻译时单独重发一次（不循环），结果不同才采用。
 #
 # Usage / 用法:
 #     python google_client.py --input extract.json --source-lang en --target-lang zh-CN --output translations.json
@@ -69,6 +83,15 @@ ANCHOR_PATTERN = re.compile(r"<a i=(\d+)>(.*?)</a>", re.DOTALL)
 ITALIC_PATTERN = re.compile(r"<i>.*?</i>", re.DOTALL)
 USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+
+EMBED_RATIO_THRESHOLD = 0.30
+TERM_PLACEHOLDER_TEMPLATE = "\u27e6T{:02d}\u27e7"
+VARIANT_PRIORITY = ("embedded", "placeholder", "plain")
+
+LATIN_LANGS = {"en", "es", "fr", "de", "it", "pt", "nl", "pl", "sv", "da", "no", "fi", "ro", "cs", "hu", "tr", "id", "vi", "ms", "tl", "ca", "eu", "gl", "la"}
+NON_LATIN_LANGS = {"zh", "ja", "ko", "ru", "uk", "ar", "he", "hi", "th", "el", "bg", "fa"}
+LATIN_WORD_PATTERN = re.compile(r"[a-zA-Z]{2,}")
+NON_LATIN_CHAR_PATTERN = re.compile(r"[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af\u0400-\u04ff\u0600-\u06ff]")
 
 
 def log(message):
@@ -141,7 +164,7 @@ def translate_batch(batch, source_lang, target_lang, api_key):
         log(f"attempt {attempt}: missing {len(missing)} of {len(batch)} units")
         if attempt < MAX_ATTEMPTS:
             time.sleep(RETRY_DELAY)
-    return result, sorted(missing)
+    return result, sorted(missing, key=str)
 
 
 def translate(units, source_lang, target_lang, api_key, batch_chars, concurrency=DEFAULT_CONCURRENCY):
@@ -169,6 +192,103 @@ def translate(units, source_lang, target_lang, api_key, batch_chars, concurrency
     return translations, skipped
 
 
+def is_untranslated(text, source_lang, target_lang):
+    if not text or not source_lang or not target_lang:
+        return False
+    s, t = source_lang.split("-")[0].lower(), target_lang.split("-")[0].lower()
+    if s in LATIN_LANGS and t in NON_LATIN_LANGS:
+        return len(LATIN_WORD_PATTERN.findall(text)) > 1
+    if s in NON_LATIN_LANGS and t in LATIN_LANGS:
+        return len(NON_LATIN_CHAR_PATTERN.findall(text)) > 1
+    return False
+
+
+def apply_term_matches(text, term_matches, variant):
+    pieces, cursor, mapping = [], 0, {}
+    for idx, match in enumerate(term_matches):
+        pieces.append(text[cursor:match["start"]])
+        if variant == "embedded":
+            pieces.append(match["target"])
+        else:
+            placeholder = TERM_PLACEHOLDER_TEMPLATE.format(idx)
+            mapping[placeholder] = match["target"]
+            pieces.append(placeholder)
+        cursor = match["end"]
+    pieces.append(text[cursor:])
+    return "".join(pieces), mapping
+
+
+def build_variants(unit):
+    text, matches, ratio = unit["text"], unit.get("term_matches") or [], unit.get("embed_ratio", 0.0)
+    if not matches:
+        return {"plain": (text, {})}
+    if ratio > EMBED_RATIO_THRESHOLD:
+        return {"placeholder": apply_term_matches(text, matches, "placeholder")}
+    return {
+        "embedded": apply_term_matches(text, matches, "embedded"),
+        "placeholder": apply_term_matches(text, matches, "placeholder"),
+    }
+
+
+def flatten_units(units):
+    items = []
+    for unit in units:
+        for variant, (text, _mapping) in build_variants(unit).items():
+            items.append({"id": f"{unit['id']}:{variant}", "text": text})
+    return items
+
+
+def restore_placeholders(text, mapping):
+    for placeholder, target in mapping.items():
+        text = text.replace(placeholder, target)
+    return text
+
+
+def resolve_translation(unit, translations, source_lang, target_lang):
+    variants = build_variants(unit)
+    for variant in VARIANT_PRIORITY:
+        if variant not in variants:
+            continue
+        source_text, mapping = variants[variant]
+        result = translations.get(f"{unit['id']}:{variant}")
+        if result is None:
+            continue
+        if variant == "embedded" and "placeholder" in variants and is_untranslated(result, source_lang, target_lang):
+            continue
+        return restore_placeholders(result, mapping), source_text, mapping
+    return None, None, None
+
+
+def retry_single(text, source_lang, target_lang, api_key):
+    if not text or not text.strip():
+        return None
+    result, _missing = translate_batch([{"id": "retry", "text": text}], source_lang, target_lang, api_key)
+    return result.get("retry")
+
+
+def translate_units(units, source_lang, target_lang, api_key, batch_chars, concurrency):
+    resolved = {unit["id"]: unit["resolved"] for unit in units if unit.get("resolved") is not None}
+    pending = [unit for unit in units if unit.get("resolved") is None]
+    items = flatten_units(pending)
+    translations_raw, _skipped = translate(items, source_lang, target_lang, api_key, batch_chars, concurrency) if items else ({}, [])
+
+    results = dict(resolved)
+    for unit in pending:
+        final_text, source_text, mapping = resolve_translation(unit, translations_raw, source_lang, target_lang)
+        if final_text is not None and is_untranslated(final_text, source_lang, target_lang):
+            retried = retry_single(source_text, source_lang, target_lang, api_key)
+            if retried:
+                candidate = restore_placeholders(retried, mapping)
+                if candidate != final_text:
+                    log(f"unit {unit['id']}: retry changed result")
+                    final_text = candidate
+        results[unit["id"]] = final_text
+
+    skipped = [uid for uid, text in results.items() if text is None]
+    translations = {str(uid): text for uid, text in results.items() if text is not None}
+    return translations, skipped
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", default=None)
@@ -192,11 +312,7 @@ def main():
     elif not units:
         result = {"success": False, "reason": "no_units", "translations": {}, "skipped": [], "source_lang": source_lang, "target_lang": target_lang}
     else:
-        resolved = {str(unit["id"]): unit["resolved"] for unit in units if unit.get("resolved")}
-        translatable = [unit for unit in units if not unit.get("resolved")]
-        translations_raw, skipped = translate(translatable, source_lang, target_lang, api_key, args.batch_chars, args.concurrency) if translatable else ({}, [])
-        translations = {str(k): v for k, v in translations_raw.items()}
-        translations.update(resolved)
+        translations, skipped = translate_units(units, source_lang, target_lang, api_key, args.batch_chars, args.concurrency)
         result = {
             "success": bool(translations),
             "translations": translations,

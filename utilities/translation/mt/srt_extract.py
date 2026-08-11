@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: srt_extract.py
-# Version: 1.1.0
+# Version: 1.2.0
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -11,9 +11,9 @@
 # Description / 描述:
 #     Extracts subtitle cues from SRT files, splits/merges dialogue segments
 #     based on sentence boundaries, timing gaps, quotes, and stutter patterns,
-#     and protects glossary terms with placeholders to build translation units.
+#     and annotates glossary term positions to build translation units.
 #     从 SRT 字幕文件中提取字幕块，结合句尾标点、时间间隔（GAP）、引号与
-#     口吃/残留规则进行对话拆分与单元合并，并通过占位符保护专有名词词表，
+#     口吃/残留规则进行对话拆分与单元合并，并标注词表命中位置，
 #     输出供后续机器翻译脚本使用的结构化 JSON 数据。
 #
 # Features:
@@ -21,16 +21,23 @@
 #     - Splits multi-speaker dialogue lines marked with leading dashes ('- ').
 #     - Resolves name stutters and matches terminology against provided glossary.
 #     - Groups subtitle cues based on punctuation, pause gaps, and quote continuity.
-#     - Protects glossary terms using standardized placeholders (e.g., ⟦G0000⟧).
+#     - Units carry natural, unmarked merged text plus a `spans` list (original
+#       per-piece text/timing) so downstream can reconstruct without markers.
+#     - Annotates glossary hits as `term_matches` (position + source + target)
+#       and an `embed_ratio`; actual placeholder-vs-inline-name decision is
+#       deferred to the translation step, which owns batch/context context.
 #
 # 功能:
 #     - 解析 SRT 字幕结构，标准化时间轴与文本格式。
 #     - 识别并拆分双人对话破折号（'- '），处理字母口吃与词表名称修复。
 #     - 基于标点、时间间隔（GAP_THRESHOLD_MS）与跨行引号逻辑切分/合并翻译单元。
-#     - 解析 Markdown 格式词表，生成双向占位符映射（如 ⟦G0000⟧）保护专有名词。
-#     - 标准化输出 JSON 数据，包含原字幕 Cue、翻译 Unit 及词表映射信息。
-#     - 默认剥离 SDH（听障辅助）内容，纯 SDH 行整行丢弃，行内 SDH 仅剥离对应片段
-#       （--keep-sdh 可关闭）；含音符的行豁免于 SDH 剥离之外。
+#     - 单元文本为自然连续原文，不嵌入任何标记符号；随附 `spans`（被吸收的
+#       原始片段及各自时间轴/原文）供下游拆分回填。
+#     - 标注词表命中的位置、原文与固定译名（`term_matches`）及嵌入比例
+#       （`embed_ratio`），是否嵌入原文或改用占位符由翻译脚本决定。
+#     - 默认剥离 SDH（听障辅助）内容：整行 SDH 括号内容丢弃、行内 SDH
+#       仅剥离对应片段，逐行识别"说话人标签+冒号"前缀（如 MAN:/两人：）
+#       并剥离（--keep-sdh 可关闭）；含音符的行豁免于 SDH 剥离之外。
 #     - 音乐歌词行按大小写判断是否跨 cue 续接合并，合并组发送翻译前剥离首尾音符。
 #
 # Usage / 用法:
@@ -67,8 +74,6 @@ SHORT_REPLY_LETTER_PATTERN = re.compile(r"[A-Za-z]")
 SHORT_REPLY_MAX_LETTERS = 3
 STUTTER_RESIDUAL_PATTERN = re.compile(r"[A-Za-z]")
 TRAILING_MARK_PATTERN = re.compile(r"[!?…]+$")
-PLACEHOLDER_TEMPLATE = "\u27e6G{:04d}\u27e7"
-SEGMENT_MARKER_TEMPLATE = "\u27e6S{:02d}\u27e7"
 GAP_THRESHOLD_MS = 200
 
 MUSIC_NOTE_CHARS = "\u2669\u266a\u266b\u266c"
@@ -78,6 +83,16 @@ LEADING_ELLIPSIS_PATTERN = re.compile(r"^(\.{2,}|\u2026)")
 LEADING_NON_LETTER_PATTERN = re.compile(r"^[^A-Za-z]*")
 EDGE_NOTE_PATTERN = re.compile(f"^[{MUSIC_NOTE_CHARS}\\s]+|[{MUSIC_NOTE_CHARS}\\s]+$")
 
+SPEAKER_TAG_MAX_CHARS = 24
+SPEAKER_TAG_PATTERN = re.compile(rf"^([^:\uff1a]{{1,{SPEAKER_TAG_MAX_CHARS}}})[:\uff1a]\s*(\S.*)$")
+UPPERCASE_LETTER_PATTERN = re.compile(r"[A-Z]")
+LOWERCASE_LETTER_PATTERN = re.compile(r"[a-z]")
+SPEAKER_TAG_LABELS = frozenset({
+    "both", "all", "man", "woman", "men", "women", "voice", "voiceover",
+    "crowd", "narrator", "group",
+    "两人", "众人", "全体", "男声", "女声", "众声", "画外音", "旁白", "二人", "三人", "齐声", "合",
+})
+
 GLOSSARY_HEADING = "人物与专有名词"
 SECTION_END_PATTERN = re.compile(r"^##\s", re.MULTILINE)
 TABLE_ROW_PATTERN = re.compile(r"^\|(.+)\|\s*$")
@@ -85,6 +100,7 @@ SEPARATOR_ROW_PATTERN = re.compile(r"^[\s|:-]+$")
 NAME_SEPARATOR_PATTERN = re.compile(r"[·・]")
 TERM_BOUNDARY_LEFT = r"(?<![A-Za-z0-9])"
 TERM_BOUNDARY_RIGHT = r"(?![A-Za-z0-9])"
+EMBED_RATIO_DEFAULT = 0.0
 
 
 def log(message):
@@ -97,14 +113,25 @@ def time_to_ms(value):
     return ((int(hh) * 60 + int(mm)) * 60 + int(ss)) * 1000 + int(ms)
 
 
-def fold_text(raw):
-    lines = [WHITESPACE_PATTERN.sub(" ", TAG_PATTERN.sub("", line)).strip() for line in raw.splitlines()]
-    return " ".join(line for line in lines if line)
-
-
 def strip_letter_stutter(text):
     text = STUTTER_WORD_PATTERN.sub(lambda m: m.group(1), text)
     return STUTTER_PREFIX_PATTERN.sub("", text)
+
+
+def is_speaker_tag(tag):
+    tag = tag.strip()
+    if not tag:
+        return False
+    if UPPERCASE_LETTER_PATTERN.search(tag) and not LOWERCASE_LETTER_PATTERN.search(tag):
+        return True
+    return tag.lower() in SPEAKER_TAG_LABELS
+
+
+def strip_speaker_tag(line):
+    match = SPEAKER_TAG_PATTERN.match(line)
+    if match and is_speaker_tag(match.group(1)):
+        return match.group(2)
+    return line
 
 
 def strip_sdh(text):
@@ -131,6 +158,17 @@ def strip_edge_notes(text):
     return EDGE_NOTE_PATTERN.sub("", text)
 
 
+def fold_text(raw, strip_sdh_enabled=False):
+    lines = []
+    for raw_line in raw.splitlines():
+        line = WHITESPACE_PATTERN.sub(" ", TAG_PATTERN.sub("", raw_line)).strip()
+        if strip_sdh_enabled and line and not MUSIC_NOTE_PATTERN.search(line):
+            line = strip_speaker_tag(line).strip()
+        if line:
+            lines.append(line)
+    return " ".join(lines)
+
+
 def parse_srt(content, strip_sdh_enabled=True):
     content = content.replace("\r\n", "\n").replace("\r", "\n")
     cues = []
@@ -148,7 +186,7 @@ def parse_srt(content, strip_sdh_enabled=True):
             continue
         time_match = TIME_LINE_PATTERN.match(lines[time_line_idx].strip())
         cue_id = int(lines[0].strip()) if time_line_idx == 1 and lines[0].strip().isdigit() else len(cues) + 1
-        text = fold_text("\n".join(lines[time_line_idx + 1:]))
+        text = fold_text("\n".join(lines[time_line_idx + 1:]), strip_sdh_enabled)
         if strip_sdh_enabled:
             cleaned = strip_sdh(text)
             if cleaned != text:
@@ -245,15 +283,10 @@ def find_pure_glossary_line(text, glossary):
 def build_segments(cues, glossary):
     segments = []
     for cue in cues:
-        parts = split_dialogue(cue["text"])
-        dialogue = len(parts) > 1
-        for seg_idx, part in enumerate(parts):
+        for part in split_dialogue(cue["text"]):
             resolved = find_pure_glossary_line(part, glossary) or find_stutter_resolution(part, glossary)
             text = part if resolved else strip_letter_stutter(part)
-            segments.append({
-                "cue_id": cue["id"], "seg_idx": seg_idx, "dialogue": dialogue,
-                "text": text, "start": cue["start"], "end": cue["end"], "resolved": resolved,
-            })
+            segments.append({"cue_id": cue["id"], "text": text, "start": cue["start"], "end": cue["end"], "resolved": resolved})
     return segments
 
 
@@ -329,52 +362,44 @@ def build_glossary_from_markdown(content):
     return glossary
 
 
-def protect_terms(text, glossary, counter):
-    mapping = {}
-    if not glossary:
-        return text, mapping, counter
+def match_glossary_terms(text, glossary):
+    matches, claimed = [], []
     for source_term, target_term in sorted(glossary.items(), key=lambda kv: -len(kv[0])):
         if not source_term:
             continue
-        pattern = re.compile(TERM_BOUNDARY_LEFT + re.escape(source_term) + r"(-\d+)?" + TERM_BOUNDARY_RIGHT)
-
-        def substitute(match):
-            nonlocal counter
-            placeholder = PLACEHOLDER_TEMPLATE.format(counter)
-            mapping[placeholder] = target_term + (match.group(1) or "")
-            counter += 1
-            return placeholder
-
-        text = pattern.sub(substitute, text)
-    return text, mapping, counter
+        pattern = re.compile(TERM_BOUNDARY_LEFT + re.escape(source_term) + TERM_BOUNDARY_RIGHT)
+        for m in pattern.finditer(text):
+            if any(a < m.end() and m.start() < b for a, b in claimed):
+                continue
+            claimed.append((m.start(), m.end()))
+            matches.append({"start": m.start(), "end": m.end(), "source": source_term, "target": target_term})
+    matches.sort(key=lambda m: m["start"])
+    if not matches or not text:
+        return matches, EMBED_RATIO_DEFAULT
+    embedded_len = len(text) - sum(m["end"] - m["start"] for m in matches) + sum(len(m["target"]) for m in matches)
+    return matches, embedded_len / len(text)
 
 
 def build_units(cues, glossary):
     units = []
-    glossary_map = {}
-    counter = 0
-    for group in group_segments(build_segments(cues, glossary)):
-        segments = [{"cue_id": s["cue_id"], "seg_idx": s["seg_idx"], "dialogue": s["dialogue"], "text": s["text"]} for s in group]
+    for unit_id, group in enumerate(group_segments(build_segments(cues, glossary)), start=1):
+        spans = [{"id": s["cue_id"], "start": s["start"], "end": s["end"], "text": s["text"]} for s in group]
         if len(group) == 1 and group[0]["resolved"]:
-            units.append({"id": len(units), "segments": segments, "text": "", "resolved": group[0]["resolved"]})
+            units.append({"id": unit_id, "spans": spans, "text": "", "term_matches": [], "embed_ratio": EMBED_RATIO_DEFAULT, "resolved": group[0]["resolved"]})
             continue
         is_music_group = len(group) > 1 and any(is_music_segment(seg["text"]) for seg in group)
-        marked_text = "".join(
-            f"{SEGMENT_MARKER_TEMPLATE.format(i)}{strip_edge_notes(seg['text']) if is_music_group else seg['text']} "
-            for i, seg in enumerate(group)
-        ).strip()
-        protected_text, mapping, counter = protect_terms(marked_text, glossary, counter)
-        glossary_map.update(mapping)
-        units.append({"id": len(units), "segments": segments, "text": protected_text, "resolved": None})
-    return units, glossary_map
+        text = " ".join(strip_edge_notes(seg["text"]) if is_music_group else seg["text"] for seg in group).strip()
+        term_matches, embed_ratio = match_glossary_terms(text, glossary)
+        units.append({"id": unit_id, "spans": spans, "text": text, "term_matches": term_matches, "embed_ratio": embed_ratio, "resolved": None})
+    return units
 
 
 def extract(content, glossary, strip_sdh_enabled=True):
     cues, sdh_stats = parse_srt(content, strip_sdh_enabled)
     if not cues:
-        return {"success": False, "reason": "no_cues_parsed", "cues": [], "units": [], "glossary_map": {}, "sdh_removed": sdh_stats}
-    units, glossary_map = build_units(cues, glossary)
-    return {"success": True, "cues": cues, "units": units, "glossary_map": glossary_map, "sdh_removed": sdh_stats}
+        return {"success": False, "reason": "no_cues_parsed", "cues": [], "units": [], "sdh_removed": sdh_stats}
+    units = build_units(cues, glossary)
+    return {"success": True, "cues": cues, "units": units, "sdh_removed": sdh_stats}
 
 
 def main():
