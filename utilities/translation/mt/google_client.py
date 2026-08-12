@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: google_client.py
-# Version: 1.4
+# Version: 1.5
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -11,23 +11,37 @@
 # Description / 描述:
 #     Batches and translates subtitle units using Google Translate's PA endpoint.
 #     Employs concurrent threading for faster translation, wraps text in HTML
-#     anchors to preserve alignment, and handles retries/fallbacks automatically.
+#     inline anchors to preserve alignment, and handles retries/fallbacks automatically.
 #     For units carrying glossary `term_matches`, builds an inline-name variant
 #     (real target term embedded in the source sentence) and/or a placeholder
 #     variant per unit, picks the better result via an untranslated-residue
 #     diagnostic, restores placeholders locally, and issues a single isolated
 #     retry when the chosen result still looks untranslated.
 #     使用 Google Translate PA 接口进行字幕单元批量机器翻译。采用并发线程池
-#     加速翻译，通过 HTML anchor 标签包裹文本以保留对应关系，并自动处理
+#     加速翻译，通过 HTML 行内标签包裹文本以保留对应关系，并自动处理
 #     请求重试与失败回退。对携带词表命中（term_matches）的单元，按单元自身
 #     的嵌入比例生成"固定译名直接嵌入原文"与/或"占位符"两个版本分别发送，
 #     依据未翻译残留诊断择优采用并在本地回填占位符；若最终结果仍疑似未
 #     翻译，单独重发一次原句作为质量兜底。
 #
+#     v1.5: Batch payload switched from block-level `<div>` (one per unit,
+#     newline-joined) to inline `<span>` (concatenated with no separator).
+#     Block elements are a natural segmentation signal to NMT engines even
+#     within a single request, silencing cross-unit context; inline elements
+#     carry no such signal, letting the whole batch read as one continuous
+#     passage. Effect should be confirmed against real API output, not
+#     assumed from the tag semantics alone.
+#     v1.5: 批量payload由block级`<div>`（每unit一个，换行分隔）改为行内
+#     `<span>`（无分隔符直接拼接）。block级元素即便在同一次请求内也是NMT
+#     引擎天然的分段信号，会削弱跨unit上下文；行内元素不带这层信号，让整批
+#     文本读起来是连续一段。实际效果需拿真实API返回核实，不能仅凭标签语义
+#     假定生效。
+#
 # Features:
 #     - Concurrent HTTP requests via ThreadPoolExecutor.
 #     - Smart text batching based on character limits (DEFAULT_BATCH_CHARS).
-#     - Protective HTML formatting (<a> tags) to isolate lines and map results.
+#     - Protective inline HTML formatting (<span> tags) to isolate units and
+#       map results, without introducing block-level segmentation signals.
 #     - Robust retry mechanism for failed or partially failed translation batches.
 #     - Per-unit inline-name / placeholder dual variants, chosen by an
 #       untranslated-residue diagnostic (Latin<->CJK word/char counting).
@@ -37,7 +51,8 @@
 # 功能:
 #     - 基于 ThreadPoolExecutor 的并发 HTTP 请求。
 #     - 基于字符数限制（DEFAULT_BATCH_CHARS）的智能文本分批。
-#     - 使用 HTML <a> 标签保护并隔离行文本，确保原译文精准映射。
+#     - 使用 HTML 行内 <span> 标签保护并隔离单元、确保对应关系，同时不引入
+#       block级分段信号。
 #     - 针对失败或部分失败请求的健壮重试机制。
 #     - 按单元自身嵌入比例生成嵌入版/占位符版，依未翻译诊断择优并回填。
 #     - 最终结果仍疑似未翻译时单独重发一次（不循环），结果不同才采用。
@@ -79,7 +94,7 @@ MAX_ATTEMPTS = 3
 RETRY_DELAY = 3
 PROGRESS_INTERVAL = 20
 
-BLOCK_PATTERN = re.compile(r'<div[^>]*id=["\']?(\d+)["\']?[^>]*>(.*?)</div>', re.DOTALL | re.IGNORECASE)
+SPAN_PATTERN = re.compile(r'<span[^>]*id=["\']?([a-zA-Z0-9]+)["\']?[^>]*>(.*?)</span>', re.DOTALL | re.IGNORECASE)
 ITALIC_PATTERN = re.compile(r"<i>.*?</i>", re.DOTALL)
 USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
@@ -88,9 +103,6 @@ DEBUG_MODE = False
 DEBUG_RAW_IN_FILE = None
 DEBUG_RAW_OUT_FILE = None
 DEBUG_LOCK = threading.Lock()
-
-BLOCK_PATTERN = re.compile(r'<div[^>]*id=["\']?([a-zA-Z0-9]+)["\']?[^>]*>(.*?)</div>', re.DOTALL | re.IGNORECASE)
-ITALIC_PATTERN = re.compile(r"<i>.*?</i>", re.DOTALL)
 
 EMBED_RATIO_THRESHOLD = 0.30
 TERM_PLACEHOLDER_TEMPLATE = "\u27e6T{:02d}\u27e7"
@@ -132,13 +144,13 @@ def build_batches(units, batch_chars):
 
 
 def build_request_body(batch, source_lang, target_lang):
-    html = "\n".join(f'<div id="{unit["id"]}">{escape_html(unit["text"])}</div>' for unit in batch)
+    html = "".join(f'<span id="{unit["id"]}">{escape_html(unit["text"])}</span>' for unit in batch)
     return json.dumps([[[html], source_lang, target_lang], "te"]).encode("utf-8")
 
 
 def parse_translated_html(html):
     result = {}
-    for match in BLOCK_PATTERN.finditer(html):
+    for match in SPAN_PATTERN.finditer(html):
         raw_idx = match.group(1)
         idx = int(raw_idx) if raw_idx.isdigit() else raw_idx
         text = unescape_html(ITALIC_PATTERN.sub("", match.group(2))).strip()

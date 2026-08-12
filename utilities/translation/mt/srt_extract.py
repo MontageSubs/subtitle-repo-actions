@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: srt_extract.py
-# Version: 1.6
+# Version: 1.7
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -15,6 +15,20 @@
 #     从 SRT 字幕文件中提取字幕块，结合句尾标点、时间间隔（GAP）、引号与
 #     口吃/残留规则进行对话拆分与单元合并，并标注词表命中位置，
 #     输出供后续机器翻译脚本使用的结构化 JSON 数据。
+#
+#     v1.7: Isolated short cues (<=ISOLATED_MAX_WORDS words, e.g. "Shit.")
+#     no longer stay stranded without context. They merge cross-cue toward
+#     whichever neighbor falls within SCENE_ADJACENCY_MS (next preferred,
+#     falling back to prev), bypassing the terminal-punctuation guard that
+#     normally blocks merging. The resulting join is marked with an inline
+#     ⟦cNNNN⟧ token (also recorded as span["boundary"]="marker") so the
+#     paired bilingual_merge.py can split on this hard boundary instead of
+#     guessing from punctuation/length ratio alone.
+#     v1.7: 孤立短句（≤ISOLATED_MAX_WORDS个单词，如"Shit."）不再因缺乏上下文
+#     而独立成句。会跨cue向阈值内最近的邻居合并（优先向后，其次向前），
+#     绕开原本阻止合并的句尾标点检查。合并接缝会插入 ⟦cNNNN⟧ 行内标记
+#     （同时记录为 span["boundary"]="marker"），供配套的 bilingual_merge.py
+#     按此硬边界拆分，而非仅依赖标点/长度比例猜测。
 #
 # Features:
 #     - Parses SRT subtitle structures and normalizes text and timestamps.
@@ -80,6 +94,10 @@ SHORT_REPLY_MAX_LETTERS = 3
 STUTTER_RESIDUAL_PATTERN = re.compile(r"[A-Za-z]")
 TRAILING_MARK_PATTERN = re.compile(r"[!?…]+$")
 GAP_THRESHOLD_MS = 200
+WORD_TOKEN_PATTERN = re.compile(r"[A-Za-z]+(?:['’][A-Za-z]+)*")
+ISOLATED_MAX_WORDS = 2
+SCENE_ADJACENCY_MS = 1500
+MARKER_TEMPLATE = "\u27e6c{:04d}\u27e7"
 
 MUSIC_NOTE_CHARS = "\u2669\u266a\u266b\u266c"
 MUSIC_NOTE_PATTERN = re.compile(f"[{MUSIC_NOTE_CHARS}]")
@@ -294,15 +312,37 @@ def update_quote_state(text, is_pending):
     return is_pending
 
 
-def should_merge(prev_seg, curr_seg):
+def is_isolated_short(text):
+    return len(WORD_TOKEN_PATTERN.findall(text)) <= ISOLATED_MAX_WORDS
+
+
+def assign_merge_sides(segments):
+    for i, seg in enumerate(segments):
+        if seg["resolved"] or is_music_segment(seg["text"]) or not is_isolated_short(seg["text"]):
+            continue
+        if i + 1 < len(segments):
+            gap_next = time_to_ms(segments[i + 1]["start"]) - time_to_ms(seg["end"])
+            if gap_next <= SCENE_ADJACENCY_MS:
+                seg["merge_side"] = "next"
+                continue
+        if i > 0:
+            gap_prev = time_to_ms(seg["start"]) - time_to_ms(segments[i - 1]["end"])
+            if gap_prev <= SCENE_ADJACENCY_MS:
+                seg["merge_side"] = "prev"
+    return segments
+
+
+def merge_reason(prev_seg, curr_seg):
     if prev_seg["cue_id"] == curr_seg["cue_id"]:
-        return is_short_reply(curr_seg["text"])
+        return "dash" if is_short_reply(curr_seg["text"]) else None
     if is_music_segment(prev_seg["text"]) and is_music_segment(curr_seg["text"]):
-        return music_continuation(curr_seg["text"])
+        return "music" if music_continuation(curr_seg["text"]) else None
+    if prev_seg.get("merge_side") == "next" or curr_seg.get("merge_side") == "prev":
+        return "marker"
     if has_terminal_punct(prev_seg["text"]):
-        return False
+        return None
     gap = time_to_ms(curr_seg["start"]) - time_to_ms(prev_seg["end"])
-    return gap <= GAP_THRESHOLD_MS or first_letter_is_lower(curr_seg["text"])
+    return "gap" if gap <= GAP_THRESHOLD_MS or first_letter_is_lower(curr_seg["text"]) else None
 
 
 def find_stutter_resolution(text, glossary):
@@ -349,7 +389,7 @@ def build_segments(cues, glossary):
             resolved = find_pure_glossary_line(part, glossary) or find_stutter_resolution(part, glossary)
             text = part if resolved else strip_letter_stutter(part)
             segments.append({"cue_id": cue["id"], "text": text, "start": cue["start"], "end": cue["end"], "resolved": resolved})
-    return segments
+    return assign_merge_sides(segments)
 
 
 QUOTE_PENDING_LIMIT = 10
@@ -369,7 +409,17 @@ def group_segments(segments):
             quote_pending = False
             quote_span = 0
             continue
-        if current and (quote_pending or should_merge(current[-1], seg)):
+        merged = False
+        if current:
+            if quote_pending:
+                merged = True
+            else:
+                reason = merge_reason(current[-1], seg)
+                if reason:
+                    merged = True
+                    if reason == "marker":
+                        seg["marker_boundary"] = True
+        if merged:
             current.append(seg)
         else:
             if current:
@@ -445,26 +495,39 @@ def match_glossary_terms(text, glossary):
     return matches, embedded_len / len(text)
 
 
+def join_group_text(group, is_music_group):
+    pieces = []
+    for i, seg in enumerate(group):
+        piece = strip_edge_notes(seg["text"]) if is_music_group else seg["text"]
+        if i > 0:
+            pieces.append(f" {MARKER_TEMPLATE.format(seg['cue_id'])} " if seg.get("marker_boundary") else " ")
+        pieces.append(piece)
+    return "".join(pieces).strip()
+
+
 def build_units(cues, glossary):
     units = []
+    marker_merges = 0
     for unit_id, group in enumerate(group_segments(build_segments(cues, glossary)), start=1):
-        spans = [{"id": s["cue_id"], "start": s["start"], "end": s["end"], "text": s["text"]} for s in group]
+        spans = [{"id": s["cue_id"], "start": s["start"], "end": s["end"], "text": s["text"],
+                   "boundary": "marker" if s.get("marker_boundary") else None} for s in group]
+        marker_merges += sum(1 for s in group if s.get("marker_boundary"))
         if len(group) == 1 and group[0]["resolved"]:
             units.append({"id": unit_id, "spans": spans, "text": "", "term_matches": [], "embed_ratio": EMBED_RATIO_DEFAULT, "resolved": group[0]["resolved"]})
             continue
         is_music_group = len(group) > 1 and any(is_music_segment(seg["text"]) for seg in group)
-        text = " ".join(strip_edge_notes(seg["text"]) if is_music_group else seg["text"] for seg in group).strip()
+        text = join_group_text(group, is_music_group)
         term_matches, embed_ratio = match_glossary_terms(text, glossary)
         units.append({"id": unit_id, "spans": spans, "text": text, "term_matches": term_matches, "embed_ratio": embed_ratio, "resolved": None})
-    return units
+    return units, marker_merges
 
 
 def extract(content, glossary, strip_sdh_enabled=True):
     cues, sdh_stats = parse_srt(content, strip_sdh_enabled)
     if not cues:
-        return {"success": False, "reason": "no_cues_parsed", "cues": [], "units": [], "sdh_removed": sdh_stats}
-    units = build_units(cues, glossary)
-    return {"success": True, "cues": cues, "units": units, "sdh_removed": sdh_stats}
+        return {"success": False, "reason": "no_cues_parsed", "cues": [], "units": [], "sdh_removed": sdh_stats, "marker_merges": 0}
+    units, marker_merges = build_units(cues, glossary)
+    return {"success": True, "cues": cues, "units": units, "sdh_removed": sdh_stats, "marker_merges": marker_merges}
 
 
 def main():
@@ -483,7 +546,7 @@ def main():
     if not args.keep_sdh:
         stats = result["sdh_removed"]
         sdh_note = f", sdh_dropped={stats['dropped']}, sdh_stripped={stats['stripped']}"
-    log(f"status: {'ok' if result['success'] else 'failed'} (cues={len(result['cues'])}, units={len(result['units'])}{sdh_note})")
+    log(f"status: {'ok' if result['success'] else 'failed'} (cues={len(result['cues'])}, units={len(result['units'])}{sdh_note}, marker_merges={result['marker_merges']})")
 
     output = json.dumps(result, ensure_ascii=False)
     if args.output:

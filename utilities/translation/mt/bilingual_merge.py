@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: bilingual_merge.py
-# Version: 1.6.1
+# Version: 1.7
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -13,11 +13,25 @@
 #     subtitle data to generate a bilingual SRT file. Splits merged translation
 #     units back into per-cue segments using punctuation/length-ratio boundary
 #     estimation (word tokenization via jieba where available), driven by the
-#     `spans` list each unit carries (no marker syntax involved anywhere).
+#     `spans` list each unit carries.
 #     将机器翻译返回的 JSON 数据与最初提取的字幕数据合并，生成双语 SRT 文件。
 #     依据每个翻译单元自带的 `spans` 列表（原始片段文本+时间轴），用标点/
 #     长度比例边界估计（可用时以结巴分词辅助定位）拆分合并翻译回各原始
-#     字幕片段，全程不涉及任何标记符号。
+#     字幕片段。
+#
+#     v1.7: Spans marked with boundary="marker" (isolated short cues merged
+#     cross-cue by srt_extract.py v1.7) are split on the literal ⟦cNNNN⟧
+#     token instead of guessed punctuation/ratio boundaries. Token order/
+#     identity is verified against the spans before trusting it; any
+#     mismatch falls back to the existing estimation path for that unit
+#     (with markers treated as protected spans so estimation never cuts
+#     through a stray token). Any leftover token is stripped before output
+#     regardless of which path was taken.
+#     v1.7: 标记为 boundary="marker" 的接缝（由 srt_extract.py v1.7 跨cue
+#     合并的孤立短句）按字面 ⟦cNNNN⟧ 标记硬切割，不再靠标点/比例猜测。
+#     切割前先核对标记的顺序与编号是否与spans吻合，不吻合则该unit整体
+#     回退到原有估计路径（并将标记视为受保护片段，估计逻辑绝不会从中切开）。
+#     无论走哪条路径，残留标记在输出前一律清除。
 #
 # Features:
 #     - Reconstructs bilingual subtitle blocks maintaining original cue timing.
@@ -112,6 +126,8 @@ BOUNDARY_SEARCH_PATTERNS = {
     "period": re.compile(r"[.。!?！？]+['\"”’)\]]*"),
     "colon": re.compile(r"[:：]+"),
 }
+MARKER_PATTERN = re.compile(r"\u27e6c(\d+)\u27e7")
+RESIDUAL_MARKER_PATTERN = re.compile(r"\s*\u27e6[^\u27e6\u27e7]*\u27e7\s*")
 
 
 def log(message):
@@ -256,6 +272,7 @@ INFERRED_MIN_SHARE = 0.5
 def find_protected_spans(text, glossary_terms):
     spans = [(m.start(), m.end()) for m in BOOK_TITLE_PATTERN.finditer(text)]
     spans.extend((m.start(), m.end()) for m in LATIN_WORD_PATTERN.finditer(text))
+    spans.extend((m.start(), m.end()) for m in MARKER_PATTERN.finditer(text))
     for term in glossary_terms:
         if not term:
             continue
@@ -399,10 +416,39 @@ def enforce_quote_closure(parts, translated_text):
     return closed
 
 
+def split_by_markers(translated_text, spans, protected=()):
+    expected_ids = [span["id"] for span in spans[1:] if span.get("boundary") == "marker"]
+    if not expected_ids:
+        return None
+    found_ids = [int(g) for g in MARKER_PATTERN.findall(translated_text)]
+    if found_ids != expected_ids:
+        return None
+    cut_indices = [i for i, span in enumerate(spans[1:], start=1) if span.get("boundary") == "marker"]
+    text_chunks = MARKER_PATTERN.split(translated_text)[0::2]
+    parts, cursor = [], 0
+    for chunk_index, cut in enumerate(cut_indices):
+        sub_spans = spans[cursor:cut]
+        sub_text = text_chunks[chunk_index]
+        sub_parts = [sub_text.strip()] if len(sub_spans) == 1 else split_by_boundary(sub_text, sub_spans, protected)[0]
+        parts.extend(sub_parts)
+        cursor = cut
+    sub_spans = spans[cursor:]
+    sub_text = text_chunks[-1]
+    parts.extend([sub_text.strip()] if len(sub_spans) == 1 else split_by_boundary(sub_text, sub_spans, protected)[0])
+    return parts
+
+
 def split_translation(translated_text, spans, protected=()):
     if len(spans) == 1:
         return [translated_text.strip()], "single"
-    parts, method = split_by_boundary(translated_text, spans, protected)
+    parts = split_by_markers(translated_text, spans, protected)
+    if parts is not None:
+        method = "marker_boundary"
+    else:
+        parts, method = split_by_boundary(translated_text, spans, protected)
+        if any(span.get("boundary") == "marker" for span in spans[1:]):
+            method = "marker_mismatch"
+    parts = [RESIDUAL_MARKER_PATTERN.sub(" ", p).strip() for p in parts]
     parts = enforce_punctuation_placement(parts)
     parts = repair_empty_parts(parts, spans, protected)
     return enforce_quote_closure(parts, translated_text), method
@@ -473,7 +519,7 @@ def build_bilingual_cues(cues, units, translations):
         translated = strip_unsourced_brackets("".join(span["text"] for span in spans), translated)
         protected = find_protected_spans(translated, glossary_terms)
         parts, method = split_translation(translated, spans, protected)
-        if method not in ("single", "original_boundary", "inferred_punctuation"):
+        if method not in ("single", "original_boundary", "inferred_punctuation", "marker_boundary"):
             approx_splits.append({"unit_id": unit["id"], "method": method})
         for span, part in zip(spans, parts):
             cue_segments.setdefault(span["id"], []).append(normalize_chinese(part))
