@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: bilingual_merge.py
-# Version: 1.6
+# Version: 1.6.1
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -144,6 +144,7 @@ def strip_terminator(match):
     return " " if WORD_CHAR_PATTERN.search(match.string, match.end()) else ""
 
 
+CJK_OPEN_QUOTE, CJK_CLOSE_QUOTE = "“", "”"
 MUSIC_NOTE_CHARS = "\u2669\u266a\u266b\u266c"
 MUSIC_NOTE_PATTERN = re.compile(f"[{MUSIC_NOTE_CHARS}]")
 MUSIC_NOTE_LEADING_GAP_PATTERN = re.compile(f"(?<=\\S)([{MUSIC_NOTE_CHARS}])")
@@ -172,6 +173,27 @@ def format_music_line(text):
     if text[-1] not in MUSIC_NOTE_CHARS:
         text = f"{text}\u266a"
     return WHITESPACE_COLLAPSE_PATTERN.sub(" ", fix_music_spacing(text)).strip()
+
+
+QUOTE_OPEN_CHARS = {'"', CJK_OPEN_QUOTE}
+QUOTE_CLOSE_CHARS = {'"', CJK_CLOSE_QUOTE}
+
+
+def source_starts_with_quote(text):
+    stripped = SOURCE_LEADING_TAG_PATTERN.sub("", text)
+    return bool(stripped) and stripped[0] in QUOTE_OPEN_CHARS
+
+
+def source_ends_with_quote(text):
+    return bool(text) and text[-1] in QUOTE_CLOSE_CHARS
+
+
+def restore_quote_markers(translation, source_text):
+    if source_starts_with_quote(source_text) and translation[0] not in QUOTE_OPEN_CHARS:
+        translation = CJK_OPEN_QUOTE + translation
+    if source_ends_with_quote(source_text) and translation[-1] not in QUOTE_CLOSE_CHARS:
+        translation = translation + CJK_CLOSE_QUOTE
+    return translation
 
 
 def normalize_chinese(text):
@@ -360,9 +382,6 @@ def repair_empty_parts(parts, spans, protected=()):
     return parts
 
 
-CJK_OPEN_QUOTE, CJK_CLOSE_QUOTE = "“", "”"
-
-
 def enforce_quote_closure(parts, translated_text):
     if len(parts) < 2 or not (translated_text.startswith(CJK_OPEN_QUOTE) and translated_text.endswith(CJK_CLOSE_QUOTE)):
         return parts
@@ -473,6 +492,8 @@ def build_bilingual_cues(cues, units, translations):
             translation = normalize_exclaim_question(translation)
             if source_is_music(cue["text"]):
                 translation = POSITION_TOP_TAG + format_music_line(translation)
+            else:
+                translation = restore_quote_markers(translation, cue["text"])
         results.append({**cue, "translation": translation})
     return results, approx_splits
 
