@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: bilingual_merge.py
-# Version: 1.5
+# Version: 1.6
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -360,12 +360,33 @@ def repair_empty_parts(parts, spans, protected=()):
     return parts
 
 
+CJK_OPEN_QUOTE, CJK_CLOSE_QUOTE = "“", "”"
+
+
+def enforce_quote_closure(parts, translated_text):
+    if len(parts) < 2 or not (translated_text.startswith(CJK_OPEN_QUOTE) and translated_text.endswith(CJK_CLOSE_QUOTE)):
+        return parts
+    last = len(parts) - 1
+    closed = []
+    for i, part in enumerate(parts):
+        if not part:
+            closed.append(part)
+            continue
+        if i > 0 and not part.startswith(CJK_OPEN_QUOTE):
+            part = CJK_OPEN_QUOTE + part
+        if i < last and not part.endswith(CJK_CLOSE_QUOTE):
+            part = part + CJK_CLOSE_QUOTE
+        closed.append(part)
+    return closed
+
+
 def split_translation(translated_text, spans, protected=()):
     if len(spans) == 1:
         return [translated_text.strip()], "single"
     parts, method = split_by_boundary(translated_text, spans, protected)
     parts = enforce_punctuation_placement(parts)
-    return repair_empty_parts(parts, spans, protected), method
+    parts = repair_empty_parts(parts, spans, protected)
+    return enforce_quote_closure(parts, translated_text), method
 
 
 BRACKET_CHAR_PATTERN = re.compile(r"[()（）\[\]【】{}]")

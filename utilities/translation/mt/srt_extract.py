@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: srt_extract.py
-# Version: 1.5
+# Version: 1.6
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -282,8 +282,10 @@ def is_short_reply(text):
 
 
 def update_quote_state(text, is_pending):
-    for char in text:
+    for index, char in enumerate(text):
         if char == '"':
+            if index == 0 and is_pending:
+                continue
             is_pending = not is_pending
         elif char == '“':
             is_pending = True
