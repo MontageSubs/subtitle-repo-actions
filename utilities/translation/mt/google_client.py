@@ -108,10 +108,32 @@ EMBED_RATIO_THRESHOLD = 0.30
 TERM_PLACEHOLDER_TEMPLATE = "\u27e6T{:02d}\u27e7"
 VARIANT_PRIORITY = ("embedded", "placeholder", "plain")
 
-LATIN_LANGS = {"en", "es", "fr", "de", "it", "pt", "nl", "pl", "sv", "da", "no", "fi", "ro", "cs", "hu", "tr", "id", "vi", "ms", "tl", "ca", "eu", "gl", "la"}
-NON_LATIN_LANGS = {"zh", "ja", "ko", "ru", "uk", "ar", "he", "hi", "th", "el", "bg", "fa"}
-LATIN_WORD_PATTERN = re.compile(r"[a-zA-Z]{2,}")
-NON_LATIN_CHAR_PATTERN = re.compile(r"[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af\u0400-\u04ff\u0600-\u06ff]")
+WORD_BASED_SCRIPTS = {"latin", "cyrillic", "arabic", "devanagari", "hebrew", "greek"}
+SCRIPT_CHAR_RANGES = {
+    "latin": "A-Za-z",
+    "cyrillic": "\u0400-\u04ff",
+    "arabic": "\u0600-\u06ff",
+    "devanagari": "\u0900-\u097f",
+    "hebrew": "\u0590-\u05ff",
+    "greek": "\u0370-\u03ff",
+    "cjk": "\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af",
+    "thai": "\u0e00-\u0e7f",
+}
+SCRIPT_LEAK_PATTERNS = {
+    name: re.compile(f"[{chars}]{{2,}}" if name in WORD_BASED_SCRIPTS else f"[{chars}]")
+    for name, chars in SCRIPT_CHAR_RANGES.items()
+}
+LANGUAGE_SCRIPTS = {
+    "en": "latin", "es": "latin", "fr": "latin", "de": "latin", "it": "latin", "pt": "latin",
+    "nl": "latin", "pl": "latin", "sv": "latin", "da": "latin", "no": "latin", "fi": "latin",
+    "ro": "latin", "cs": "latin", "hu": "latin", "tr": "latin", "id": "latin", "vi": "latin",
+    "ms": "latin", "tl": "latin", "ca": "latin", "eu": "latin", "gl": "latin", "la": "latin",
+    "zh": "cjk", "ja": "cjk", "ko": "cjk",
+    "ru": "cyrillic", "uk": "cyrillic", "bg": "cyrillic",
+    "ar": "arabic", "fa": "arabic", "ur": "arabic",
+    "hi": "devanagari", "ne": "devanagari", "mr": "devanagari",
+    "th": "thai", "he": "hebrew", "el": "greek",
+}
 
 
 def log(message):
@@ -231,15 +253,17 @@ def translate(units, source_lang, target_lang, api_key, batch_chars, concurrency
     return translations, skipped
 
 
+def script_of(lang):
+    return LANGUAGE_SCRIPTS.get((lang or "").split("-")[0].lower())
+
+
 def is_untranslated(text, source_lang, target_lang):
-    if not text or not source_lang or not target_lang:
+    if not text:
         return False
-    s, t = source_lang.split("-")[0].lower(), target_lang.split("-")[0].lower()
-    if s in LATIN_LANGS and t in NON_LATIN_LANGS:
-        return len(LATIN_WORD_PATTERN.findall(text)) > 1
-    if s in NON_LATIN_LANGS and t in LATIN_LANGS:
-        return len(NON_LATIN_CHAR_PATTERN.findall(text)) > 1
-    return False
+    source_script, target_script = script_of(source_lang), script_of(target_lang)
+    if not source_script or not target_script or source_script == target_script:
+        return False
+    return len(SCRIPT_LEAK_PATTERNS[source_script].findall(text)) > 1
 
 
 def apply_term_matches(text, term_matches, variant):

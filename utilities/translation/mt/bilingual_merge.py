@@ -82,28 +82,38 @@ import re
 import subprocess
 import sys
 
-try:
-    import jieba
-    jieba.setLogLevel(logging.ERROR)
-except ImportError:
-    try:
-        subprocess.check_call(
-            [sys.executable, "-m", "pip", "install", "jieba"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=60
-        )
-        import jieba
-        jieba.setLogLevel(logging.ERROR)
-    except Exception as e:
-        print(json.dumps({
-            "success": False,
-            "reason": "dependency_install_failed",
-            "detail": str(e)
-        }, ensure_ascii=False))
-        sys.exit(0)
-
 SCRIPT_NAME = "bilingual_merge"
+
+_jieba_module = None
+_jieba_checked = False
+
+
+def is_chinese_target(target_lang):
+    return (target_lang or "").split("-")[0].lower() == "zh"
+
+
+def ensure_jieba():
+    global _jieba_module, _jieba_checked
+    if _jieba_checked:
+        return _jieba_module
+    _jieba_checked = True
+    try:
+        import jieba
+    except ImportError:
+        try:
+            subprocess.check_call(
+                [sys.executable, "-m", "pip", "install", "jieba"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=60
+            )
+            import jieba
+        except Exception as e:
+            log(f"jieba unavailable, falling back to boundary heuristics: {e}")
+            return None
+    jieba.setLogLevel(logging.ERROR)
+    _jieba_module = jieba
+    return _jieba_module
 
 ELLIPSIS_PATTERN = re.compile(r"\.{2,}|…+")
 DASH_ARTIFACT_PATTERN = re.compile(r"—+|-{2,}")
@@ -138,11 +148,14 @@ def collect_glossary_terms(units):
     return {m["target"] for unit in units for m in (unit.get("term_matches") or []) if m.get("target")}
 
 
-def register_glossary_terms(terms):
-    if jieba is None:
+def register_glossary_terms(terms, target_lang):
+    if not is_chinese_target(target_lang):
+        return
+    jieba_module = ensure_jieba()
+    if jieba_module is None:
         return
     for term in terms:
-        jieba.add_word(term)
+        jieba_module.add_word(term)
 
 
 def enforce_line_edges(text):
@@ -161,6 +174,7 @@ def strip_terminator(match):
 
 
 CJK_OPEN_QUOTE, CJK_CLOSE_QUOTE = "“", "”"
+TARGET_QUOTE_PAIRS = {"zh": (CJK_OPEN_QUOTE, CJK_CLOSE_QUOTE)}
 MUSIC_NOTE_CHARS = "\u2669\u266a\u266b\u266c"
 MUSIC_NOTE_PATTERN = re.compile(f"[{MUSIC_NOTE_CHARS}]")
 MUSIC_NOTE_LEADING_GAP_PATTERN = re.compile(f"(?<=\\S)([{MUSIC_NOTE_CHARS}])")
@@ -191,32 +205,37 @@ def format_music_line(text):
     return WHITESPACE_COLLAPSE_PATTERN.sub(" ", fix_music_spacing(text)).strip()
 
 
-QUOTE_OPEN_CHARS = {'"', CJK_OPEN_QUOTE}
-QUOTE_CLOSE_CHARS = {'"', CJK_CLOSE_QUOTE}
+def target_quote_pair(target_lang):
+    return TARGET_QUOTE_PAIRS.get((target_lang or "").split("-")[0].lower())
 
 
 def source_starts_with_quote(text):
     stripped = SOURCE_LEADING_TAG_PATTERN.sub("", text)
-    return bool(stripped) and stripped[0] in QUOTE_OPEN_CHARS
+    return bool(stripped) and stripped[0] in ('"', CJK_OPEN_QUOTE)
 
 
 def source_ends_with_quote(text):
-    return bool(text) and text[-1] in QUOTE_CLOSE_CHARS
+    return bool(text) and text[-1] in ('"', CJK_CLOSE_QUOTE)
 
 
-def restore_quote_markers(translation, source_text):
-    if source_starts_with_quote(source_text) and translation[0] not in QUOTE_OPEN_CHARS:
-        translation = CJK_OPEN_QUOTE + translation
-    if source_ends_with_quote(source_text) and translation[-1] not in QUOTE_CLOSE_CHARS:
-        translation = translation + CJK_CLOSE_QUOTE
+def restore_quote_markers(translation, source_text, target_lang):
+    quotes = target_quote_pair(target_lang)
+    if not quotes or not translation:
+        return translation
+    open_q, close_q = quotes
+    if source_starts_with_quote(source_text) and translation[0] not in ('"', open_q):
+        translation = open_q + translation
+    if source_ends_with_quote(source_text) and translation[-1] not in ('"', close_q):
+        translation = translation + close_q
     return translation
 
 
-def normalize_chinese(text):
+def normalize_translation(text, target_lang):
     text = ELLIPSIS_PATTERN.sub("...", text)
     text = DASH_ARTIFACT_PATTERN.sub("...", text)
-    text = CJK_TERMINATOR_PATTERN.sub(strip_terminator, text)
-    text = HALFWIDTH_COMMA_PATTERN.sub(strip_terminator, text)
+    if is_chinese_target(target_lang):
+        text = CJK_TERMINATOR_PATTERN.sub(strip_terminator, text)
+        text = HALFWIDTH_COMMA_PATTERN.sub(strip_terminator, text)
     text = fix_music_spacing(text)
     text = WHITESPACE_COLLAPSE_PATTERN.sub(" ", text).strip()
     return enforce_line_edges(text)
@@ -237,16 +256,23 @@ def effective_length(text):
 FALLBACK_BOUNDARY_PATTERN = re.compile(r"[，,、；;。.!?…\s]+")
 
 
-def word_boundaries(text):
-    if jieba is not None:
-        boundaries = [0]
-        for word in jieba.cut(text):
-            boundaries.append(boundaries[-1] + len(word))
-    else:
-        boundaries = {0, len(text)}
-        boundaries.update(m.end() for m in FALLBACK_BOUNDARY_PATTERN.finditer(text))
-        boundaries = sorted(boundaries)
-    return [b for b in boundaries if b in (0, len(text)) or (text[b - 1] != "·" and text[b] != "·")]
+WHITESPACE_TOKEN_PATTERN = re.compile(r"\S+\s*")
+
+
+def word_boundaries(text, target_lang):
+    if is_chinese_target(target_lang):
+        jieba_module = ensure_jieba()
+        if jieba_module is not None:
+            boundaries = [0]
+            for word in jieba_module.cut(text):
+                boundaries.append(boundaries[-1] + len(word))
+            return [b for b in boundaries if b in (0, len(text)) or (text[b - 1] != "·" and text[b] != "·")]
+    if re.search(r"\s", text):
+        boundaries = [0] + [m.end() for m in WHITESPACE_TOKEN_PATTERN.finditer(text)]
+        return sorted(set(boundaries) | {len(text)})
+    boundaries = {0, len(text)}
+    boundaries.update(m.end() for m in FALLBACK_BOUNDARY_PATTERN.finditer(text))
+    return sorted(boundaries)
 
 
 def nearest_boundary(boundaries, target):
@@ -297,7 +323,7 @@ def escape_protected_span(pos, protected):
     return pos
 
 
-def resolve_cut(text, cursor, expected, boundary, max_cut, protected=()):
+def resolve_cut(text, cursor, expected, boundary, max_cut, protected=(), target_lang=None):
     limit = len(text)
     ceiling = min(limit, max_cut)
     chunk = max(expected - cursor, 0)
@@ -316,7 +342,7 @@ def resolve_cut(text, cursor, expected, boundary, max_cut, protected=()):
         cut = min(inferred, key=lambda pos: abs(pos - expected))
         if abs(cut - expected) <= max(INFERRED_PUNCT_TOLERANCE * chunk, 2):
             return cut, "inferred"
-    boundaries = [b for b in (bd + cursor for bd in word_boundaries(text[cursor:]))
+    boundaries = [b for b in (bd + cursor for bd in word_boundaries(text[cursor:], target_lang))
                   if cursor < b < ceiling and not inside_protected_span(b, protected)]
     if boundaries:
         return nearest_boundary(boundaries, expected), None
@@ -335,7 +361,7 @@ def enforce_punctuation_placement(parts):
     return [p.strip() for p in parts]
 
 
-def split_by_boundary(translated_text, spans, protected=()):
+def split_by_boundary(translated_text, spans, protected=(), target_lang=None):
     boundary_types = [classify_boundary(span["text"]) for span in spans[:-1]]
     lengths = [effective_length(span["text"]) for span in spans]
     total = sum(lengths) or 1
@@ -370,7 +396,7 @@ def split_by_boundary(translated_text, spans, protected=()):
             expected = len(translated_text) * target_ratio
             
         max_cut = len(translated_text) - (span_count - 1 - i)
-        cut, tag = resolve_cut(translated_text, cursor, expected, boundary, max_cut, protected)
+        cut, tag = resolve_cut(translated_text, cursor, expected, boundary, max_cut, protected, target_lang)
         tags.append(tag)
         parts.append(translated_text[cursor:cut].strip())
         cursor = cut
@@ -381,11 +407,11 @@ def split_by_boundary(translated_text, spans, protected=()):
     elif "inferred" in tags:
         method = "inferred_punctuation"
     else:
-        method = "word_boundary" if jieba is not None else "char_ratio"
+        method = "word_boundary"
     return parts, method
 
 
-def repair_empty_parts(parts, spans, protected=()):
+def repair_empty_parts(parts, spans, protected=(), target_lang=None):
     parts = list(parts)
     for i, part in enumerate(parts):
         if part:
@@ -394,13 +420,17 @@ def repair_empty_parts(parts, spans, protected=()):
         if not (0 <= neighbor < len(parts)):
             continue
         lo, hi = sorted((i, neighbor))
-        fixed, _ = split_by_boundary(parts[neighbor], spans[lo:hi + 1], protected)
+        fixed, _ = split_by_boundary(parts[neighbor], spans[lo:hi + 1], protected, target_lang)
         parts[lo], parts[hi] = fixed
     return parts
 
 
-def enforce_quote_closure(parts, translated_text):
-    if len(parts) < 2 or not (translated_text.startswith(CJK_OPEN_QUOTE) and translated_text.endswith(CJK_CLOSE_QUOTE)):
+def enforce_quote_closure(parts, translated_text, target_lang):
+    quotes = target_quote_pair(target_lang)
+    if not quotes or len(parts) < 2:
+        return parts
+    open_q, close_q = quotes
+    if not (translated_text.startswith(open_q) and translated_text.endswith(close_q)):
         return parts
     last = len(parts) - 1
     closed = []
@@ -408,15 +438,15 @@ def enforce_quote_closure(parts, translated_text):
         if not part:
             closed.append(part)
             continue
-        if i > 0 and not part.startswith(CJK_OPEN_QUOTE):
-            part = CJK_OPEN_QUOTE + part
-        if i < last and not part.endswith(CJK_CLOSE_QUOTE):
-            part = part + CJK_CLOSE_QUOTE
+        if i > 0 and not part.startswith(open_q):
+            part = open_q + part
+        if i < last and not part.endswith(close_q):
+            part = part + close_q
         closed.append(part)
     return closed
 
 
-def split_by_markers(translated_text, spans, protected=()):
+def split_by_markers(translated_text, spans, protected=(), target_lang=None):
     expected_ids = [span["id"] for span in spans[1:] if span.get("boundary") == "marker"]
     if not expected_ids:
         return None
@@ -429,29 +459,29 @@ def split_by_markers(translated_text, spans, protected=()):
     for chunk_index, cut in enumerate(cut_indices):
         sub_spans = spans[cursor:cut]
         sub_text = text_chunks[chunk_index]
-        sub_parts = [sub_text.strip()] if len(sub_spans) == 1 else split_by_boundary(sub_text, sub_spans, protected)[0]
+        sub_parts = [sub_text.strip()] if len(sub_spans) == 1 else split_by_boundary(sub_text, sub_spans, protected, target_lang)[0]
         parts.extend(sub_parts)
         cursor = cut
     sub_spans = spans[cursor:]
     sub_text = text_chunks[-1]
-    parts.extend([sub_text.strip()] if len(sub_spans) == 1 else split_by_boundary(sub_text, sub_spans, protected)[0])
+    parts.extend([sub_text.strip()] if len(sub_spans) == 1 else split_by_boundary(sub_text, sub_spans, protected, target_lang)[0])
     return parts
 
 
-def split_translation(translated_text, spans, protected=()):
+def split_translation(translated_text, spans, protected=(), target_lang=None):
     if len(spans) == 1:
         return [translated_text.strip()], "single"
-    parts = split_by_markers(translated_text, spans, protected)
+    parts = split_by_markers(translated_text, spans, protected, target_lang)
     if parts is not None:
         method = "marker_boundary"
     else:
-        parts, method = split_by_boundary(translated_text, spans, protected)
+        parts, method = split_by_boundary(translated_text, spans, protected, target_lang)
         if any(span.get("boundary") == "marker" for span in spans[1:]):
             method = "marker_mismatch"
     parts = [RESIDUAL_MARKER_PATTERN.sub(" ", p).strip() for p in parts]
     parts = enforce_punctuation_placement(parts)
-    parts = repair_empty_parts(parts, spans, protected)
-    return enforce_quote_closure(parts, translated_text), method
+    parts = repair_empty_parts(parts, spans, protected, target_lang)
+    return enforce_quote_closure(parts, translated_text, target_lang), method
 
 
 BRACKET_CHAR_PATTERN = re.compile(r"[()（）\[\]【】{}]")
@@ -503,7 +533,7 @@ def determine_dash_style(cues):
 DASH_REPLACE_PATTERN = re.compile(r"(^|\s)-\s*")
 
 
-def build_bilingual_cues(cues, units, translations):
+def build_bilingual_cues(cues, units, translations, target_lang):
     cue_segments = {}
     approx_splits = []
     glossary_terms = collect_glossary_terms(units)
@@ -518,11 +548,11 @@ def build_bilingual_cues(cues, units, translations):
             continue
         translated = strip_unsourced_brackets("".join(span["text"] for span in spans), translated)
         protected = find_protected_spans(translated, glossary_terms)
-        parts, method = split_translation(translated, spans, protected)
+        parts, method = split_translation(translated, spans, protected, target_lang)
         if method not in ("single", "original_boundary", "inferred_punctuation", "marker_boundary"):
             approx_splits.append({"unit_id": unit["id"], "method": method})
         for span, part in zip(spans, parts):
-            cue_segments.setdefault(span["id"], []).append(normalize_chinese(part))
+            cue_segments.setdefault(span["id"], []).append(normalize_translation(part, target_lang))
 
     results = []
     for cue in cues:
@@ -539,7 +569,7 @@ def build_bilingual_cues(cues, units, translations):
             if source_is_music(cue["text"]):
                 translation = POSITION_TOP_TAG + format_music_line(translation)
             else:
-                translation = restore_quote_markers(translation, cue["text"])
+                translation = restore_quote_markers(translation, cue["text"], target_lang)
         results.append({**cue, "translation": translation})
     return results, approx_splits
 
@@ -558,13 +588,16 @@ def render_srt(cues):
 
 
 def merge(extract_data, translate_data):
-    if jieba is not None:
-        log(f"jieba: available (v{getattr(jieba, '__version__', 'unknown')})")
-    else:
-        log("jieba: unavailable, splitting falls back to punctuation/char boundaries")
+    target_lang = translate_data.get("target_lang", "")
+    if is_chinese_target(target_lang):
+        jieba_module = ensure_jieba()
+        if jieba_module is not None:
+            log(f"jieba: available (v{getattr(jieba_module, '__version__', 'unknown')})")
+        else:
+            log("jieba: unavailable, splitting falls back to punctuation boundaries")
     translations = translate_data.get("translations", {})
-    register_glossary_terms(collect_glossary_terms(extract_data["units"]))
-    cues, approx_splits = build_bilingual_cues(extract_data["cues"], extract_data["units"], translations)
+    register_glossary_terms(collect_glossary_terms(extract_data["units"]), target_lang)
+    cues, approx_splits = build_bilingual_cues(extract_data["cues"], extract_data["units"], translations, target_lang)
     missing = sum(1 for cue in cues if cue.get("translation") is None)
     return {"success": True, "srt": render_srt(cues), "approx_splits": approx_splits, "missing_count": missing}
 

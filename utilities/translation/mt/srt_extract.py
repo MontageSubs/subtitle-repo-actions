@@ -84,7 +84,7 @@ SCRIPT_NAME = "srt_extract"
 TIME_LINE_PATTERN = re.compile(r"(\d{2}:\d{2}:\d{2}[,.]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,.]\d{3})")
 TAG_PATTERN = re.compile(r"<[^>]+>|\{[^}]*\}")
 WHITESPACE_PATTERN = re.compile(r"\s+")
-TERMINAL_PUNCT_PATTERN = re.compile(r"[.!?…”’\"')\]]\s*$")
+TERMINAL_PUNCT_PATTERN = re.compile(r"[.!?…”’\"')\]。！？」』】）]\s*$")
 TRAILING_CONTINUATION_PATTERN = re.compile(r"(\.{2,}|-{2,}|…)\s*$")
 DIALOGUE_DASH_PATTERN = re.compile(r"(?:^|(?<=\s))-(?!-)\s?")
 STUTTER_WORD_PATTERN = re.compile(r"(?<![A-Za-z])([A-Za-z])-\1(?![A-Za-z])", re.IGNORECASE)
@@ -96,6 +96,7 @@ TRAILING_MARK_PATTERN = re.compile(r"[!?…]+$")
 GAP_THRESHOLD_MS = 200
 WORD_TOKEN_PATTERN = re.compile(r"[A-Za-z]+(?:['’][A-Za-z]+)*")
 ISOLATED_MAX_WORDS = 2
+ISOLATED_MAX_CHARS_NON_LATIN = 4
 SCENE_ADJACENCY_MS = 1500
 MARKER_TEMPLATE = "\u27e6c{:04d}\u27e7"
 
@@ -106,6 +107,13 @@ SDH_BRACKET_PATTERN = re.compile(r"\[[^" + INNER_B + r"]*\]|\([^" + INNER_B + r"
 LEADING_ELLIPSIS_PATTERN = re.compile(r"^(\.{2,}|\u2026)")
 LEADING_NON_LETTER_PATTERN = re.compile(r"^[^A-Za-z]*")
 EDGE_NOTE_PATTERN = re.compile(f"^[{MUSIC_NOTE_CHARS}\\s]+|[{MUSIC_NOTE_CHARS}\\s]+$")
+
+LATIN_SOURCE_LANGS = {"en", "es", "fr", "de", "it", "pt", "nl", "pl", "sv", "da", "no", "fi", "ro", "cs", "hu", "tr", "id", "vi", "ms", "tl", "ca", "eu", "gl", "la"}
+
+
+def is_latin_source(source_lang):
+    return (source_lang or "en").split("-")[0].lower() in LATIN_SOURCE_LANGS
+
 
 COLON = ":"
 NARRATOR_BLOCK_PHRASES = (
@@ -239,15 +247,15 @@ def first_letter_is_lower(text):
     return bool(rest) and rest[0].islower()
 
 
-def fold_text(raw, strip_sdh_enabled=False):
+def fold_text(raw, strip_sdh_enabled=False, latin_source=True):
     lines = [WHITESPACE_PATTERN.sub(" ", TAG_PATTERN.sub("", raw_line)).strip() for raw_line in raw.splitlines()]
     lines = [line for line in lines if line]
-    if strip_sdh_enabled and lines and not any(MUSIC_NOTE_PATTERN.search(line) for line in lines):
+    if strip_sdh_enabled and latin_source and lines and not any(MUSIC_NOTE_PATTERN.search(line) for line in lines):
         lines = strip_speaker_tags(lines)
     return " ".join(line for line in lines if line)
 
 
-def parse_srt(content, strip_sdh_enabled=True):
+def parse_srt(content, strip_sdh_enabled=True, latin_source=True):
     content = content.replace("\r\n", "\n").replace("\r", "\n")
     cues = []
     sdh_stats = {"dropped": 0, "stripped": 0}
@@ -264,7 +272,7 @@ def parse_srt(content, strip_sdh_enabled=True):
             continue
         time_match = TIME_LINE_PATTERN.match(lines[time_line_idx].strip())
         cue_id = int(lines[0].strip()) if time_line_idx == 1 and lines[0].strip().isdigit() else len(cues) + 1
-        text = fold_text("\n".join(lines[time_line_idx + 1:]), strip_sdh_enabled)
+        text = fold_text("\n".join(lines[time_line_idx + 1:]), strip_sdh_enabled, latin_source)
         if strip_sdh_enabled:
             cleaned = strip_sdh(text)
             if cleaned != text:
@@ -295,8 +303,10 @@ def has_terminal_punct(text):
     return bool(TERMINAL_PUNCT_PATTERN.search(text))
 
 
-def is_short_reply(text):
-    return len(SHORT_REPLY_LETTER_PATTERN.findall(text)) <= SHORT_REPLY_MAX_LETTERS
+def is_short_reply(text, latin_source=True):
+    if latin_source:
+        return len(SHORT_REPLY_LETTER_PATTERN.findall(text)) <= SHORT_REPLY_MAX_LETTERS
+    return len(text.strip()) <= SHORT_REPLY_MAX_LETTERS
 
 
 def update_quote_state(text, is_pending):
@@ -305,20 +315,22 @@ def update_quote_state(text, is_pending):
             if index == 0 and is_pending:
                 continue
             is_pending = not is_pending
-        elif char == '“':
+        elif char in ('“', '「', '«'):
             is_pending = True
-        elif char == '”':
+        elif char in ('”', '」', '»'):
             is_pending = False
     return is_pending
 
 
-def is_isolated_short(text):
-    return len(WORD_TOKEN_PATTERN.findall(text)) <= ISOLATED_MAX_WORDS
+def is_isolated_short(text, latin_source=True):
+    if latin_source:
+        return len(WORD_TOKEN_PATTERN.findall(text)) <= ISOLATED_MAX_WORDS
+    return len(text.strip()) <= ISOLATED_MAX_CHARS_NON_LATIN
 
 
-def assign_merge_sides(segments):
+def assign_merge_sides(segments, latin_source=True):
     for i, seg in enumerate(segments):
-        if seg["resolved"] or is_music_segment(seg["text"]) or not is_isolated_short(seg["text"]):
+        if seg["resolved"] or is_music_segment(seg["text"]) or not is_isolated_short(seg["text"], latin_source):
             continue
         if i + 1 < len(segments):
             gap_next = time_to_ms(segments[i + 1]["start"]) - time_to_ms(seg["end"])
@@ -332,9 +344,9 @@ def assign_merge_sides(segments):
     return segments
 
 
-def merge_reason(prev_seg, curr_seg):
+def merge_reason(prev_seg, curr_seg, latin_source=True):
     if prev_seg["cue_id"] == curr_seg["cue_id"]:
-        return "dash" if is_short_reply(curr_seg["text"]) else None
+        return "dash" if is_short_reply(curr_seg["text"], latin_source) else None
     if is_music_segment(prev_seg["text"]) and is_music_segment(curr_seg["text"]):
         return "music" if music_continuation(curr_seg["text"]) else None
     if prev_seg.get("merge_side") == "next" or curr_seg.get("merge_side") == "prev":
@@ -362,7 +374,13 @@ def find_stutter_resolution(text, glossary):
     return None
 
 
-def find_pure_glossary_line(text, glossary):
+def has_residual_text(text, latin_source=True):
+    if latin_source:
+        return bool(STUTTER_RESIDUAL_PATTERN.search(text))
+    return bool(text.strip())
+
+
+def find_pure_glossary_line(text, glossary, latin_source=True):
     stripped, matched_any = text, False
     for source_term in sorted(glossary, key=len, reverse=True):
         if not source_term:
@@ -371,7 +389,7 @@ def find_pure_glossary_line(text, glossary):
         if pattern.search(stripped):
             matched_any = True
         stripped = pattern.sub("", stripped)
-    if not matched_any or STUTTER_RESIDUAL_PATTERN.search(stripped):
+    if not matched_any or has_residual_text(stripped, latin_source):
         return None
     resolved = text
     for source_term, target_term in sorted(glossary.items(), key=lambda kv: -len(kv[0])):
@@ -382,20 +400,22 @@ def find_pure_glossary_line(text, glossary):
     return resolved
 
 
-def build_segments(cues, glossary):
+def build_segments(cues, glossary, latin_source=True):
     segments = []
     for cue in cues:
         for part in split_dialogue(cue["text"]):
-            resolved = find_pure_glossary_line(part, glossary) or find_stutter_resolution(part, glossary)
-            text = part if resolved else strip_letter_stutter(part)
+            resolved = find_pure_glossary_line(part, glossary, latin_source)
+            if not resolved and latin_source:
+                resolved = find_stutter_resolution(part, glossary)
+            text = part if resolved or not latin_source else strip_letter_stutter(part)
             segments.append({"cue_id": cue["id"], "text": text, "start": cue["start"], "end": cue["end"], "resolved": resolved})
-    return assign_merge_sides(segments)
+    return assign_merge_sides(segments, latin_source)
 
 
 QUOTE_PENDING_LIMIT = 10
 
 
-def group_segments(segments):
+def group_segments(segments, latin_source=True):
     groups = []
     current = []
     quote_pending = False
@@ -414,7 +434,7 @@ def group_segments(segments):
             if quote_pending:
                 merged = True
             else:
-                reason = merge_reason(current[-1], seg)
+                reason = merge_reason(current[-1], seg, latin_source)
                 if reason:
                     merged = True
                     if reason == "marker":
@@ -505,10 +525,10 @@ def join_group_text(group, is_music_group):
     return "".join(pieces).strip()
 
 
-def build_units(cues, glossary):
+def build_units(cues, glossary, latin_source=True):
     units = []
     marker_merges = 0
-    for unit_id, group in enumerate(group_segments(build_segments(cues, glossary)), start=1):
+    for unit_id, group in enumerate(group_segments(build_segments(cues, glossary, latin_source), latin_source), start=1):
         spans = [{"id": s["cue_id"], "start": s["start"], "end": s["end"], "text": s["text"],
                    "boundary": "marker" if s.get("marker_boundary") else None} for s in group]
         marker_merges += sum(1 for s in group if s.get("marker_boundary"))
@@ -522,11 +542,12 @@ def build_units(cues, glossary):
     return units, marker_merges
 
 
-def extract(content, glossary, strip_sdh_enabled=True):
-    cues, sdh_stats = parse_srt(content, strip_sdh_enabled)
+def extract(content, glossary, strip_sdh_enabled=True, source_lang="en"):
+    latin_source = is_latin_source(source_lang)
+    cues, sdh_stats = parse_srt(content, strip_sdh_enabled, latin_source)
     if not cues:
         return {"success": False, "reason": "no_cues_parsed", "cues": [], "units": [], "sdh_removed": sdh_stats, "marker_merges": 0}
-    units, marker_merges = build_units(cues, glossary)
+    units, marker_merges = build_units(cues, glossary, latin_source)
     return {"success": True, "cues": cues, "units": units, "sdh_removed": sdh_stats, "marker_merges": marker_merges}
 
 
@@ -535,13 +556,14 @@ def main():
     parser.add_argument("--input", default=None)
     parser.add_argument("--glossary", default=None)
     parser.add_argument("--output", default=None)
+    parser.add_argument("--source-lang", default="en")
     parser.add_argument("--keep-sdh", action="store_true")
     args = parser.parse_args()
 
     raw = open(args.input, encoding="utf-8-sig").read() if args.input else sys.stdin.read()
     glossary = build_glossary_from_markdown(open(args.glossary, encoding="utf-8").read()) if args.glossary else {}
 
-    result = extract(raw, glossary, strip_sdh_enabled=not args.keep_sdh)
+    result = extract(raw, glossary, strip_sdh_enabled=not args.keep_sdh, source_lang=args.source_lang)
     sdh_note = ""
     if not args.keep_sdh:
         stats = result["sdh_removed"]
