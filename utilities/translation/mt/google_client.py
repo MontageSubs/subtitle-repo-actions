@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: google_client.py
-# Version: 2.0
+# Version: 2.1
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -52,6 +52,18 @@
 #     标示场景间的真实上下文断裂。分批现在整章节打包进一批（仅当单个章节
 #     本身超过batch_chars时才按字符数贪心拆分），取代原先完全无视场景边界、
 #     逐unit按字符数切分的方式。
+#
+#     v1.7: 移除 flatten_units 中额外自增的 span id（原先靠 index_map 反查
+#     回 unit_id:variant），改为直接以 "unit_id:variant" 字符串本身作为
+#     span id（SPAN_PATTERN 相应放宽以接受冒号）。原有转换层纯属绕开正则
+#     限制的技术债，删除后 span id 与 unit id 一一对应，日志/调试输出不再
+#     需要额外换算。
+#     v1.7: Removed flatten_units' extra auto-increment span id (previously
+#     reverse-mapped back to unit_id:variant via index_map) in favor of using
+#     the "unit_id:variant" string itself as the span id (SPAN_PATTERN
+#     loosened to accept a colon). The old indirection existed only to work
+#     around the regex's character class; removing it makes span id and unit
+#     id directly correspond, with no extra translation step in logs/debug.
 #
 # Features:
 #     - Concurrent HTTP requests via ThreadPoolExecutor.
@@ -114,7 +126,7 @@ MAX_ATTEMPTS = 3
 RETRY_DELAY = 3
 PROGRESS_INTERVAL = 20
 
-SPAN_PATTERN = re.compile(r'<span[^>]*id=["\']?([a-zA-Z0-9]+)["\']?[^>]*>(.*?)</span>', re.DOTALL | re.IGNORECASE)
+SPAN_PATTERN = re.compile(r'<span[^>]*id=["\']?([a-zA-Z0-9:]+)["\']?[^>]*>(.*?)</span>', re.DOTALL | re.IGNORECASE)
 ITALIC_PATTERN = re.compile(r"<i>.*?</i>", re.DOTALL)
 USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
@@ -357,15 +369,14 @@ def build_variants(unit):
 
 
 def flatten_units(units, chapter_of_unit):
-    items, index_map, chapter_items = [], {}, {}
+    items, chapter_items = [], {}
     for unit in units:
         chapter_id = chapter_of_unit.get(unit["id"])
         for variant, (text, _mapping) in build_variants(unit).items():
-            idx = len(items)
-            items.append({"id": idx, "text": text})
-            index_map[idx] = f"{unit['id']}:{variant}"
-            chapter_items.setdefault(chapter_id, []).append(idx)
-    return items, index_map, list(chapter_items.values())
+            item_id = f"{unit['id']}:{variant}"
+            items.append({"id": item_id, "text": text})
+            chapter_items.setdefault(chapter_id, []).append(item_id)
+    return items, list(chapter_items.values())
 
 
 def restore_placeholders(text, mapping):
@@ -448,9 +459,8 @@ def translate_units(units, chapters, source_lang, target_lang, api_key, batch_ch
     resolved = {unit["id"]: unit["resolved"] for unit in units if unit.get("resolved") is not None}
     pending = [unit for unit in units if unit.get("resolved") is None]
     chapter_of_unit = {uid: chapter["id"] for chapter in chapters for uid in chapter["unit_ids"]}
-    items, index_map, chapter_groups = flatten_units(pending, chapter_of_unit)
-    indexed_raw, _skipped = translate(items, chapter_groups, source_lang, target_lang, api_key, batch_chars, concurrency) if items else ({}, [])
-    translations_raw = {index_map[idx]: text for idx, text in indexed_raw.items()}
+    items, chapter_groups = flatten_units(pending, chapter_of_unit)
+    translations_raw, _skipped = translate(items, chapter_groups, source_lang, target_lang, api_key, batch_chars, concurrency) if items else ({}, [])
 
     results = dict(resolved)
     for unit in pending:

@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: srt_extract.py
-# Version: 2.0.1
+# Version: 2.1
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -42,6 +42,22 @@
 #     因此穿插在对话中的音乐（如对话间隔中的歌曲）会被归入同一个独立章节，
 #     而非散落在前后对话章节里；片头曲与片尾曲之间若确有场景间隔，仍会分属
 #     不同章节。
+#
+#     v1.9: cue id 不再取自源 SRT 文件自身编号（该编号在 SDH 整行被剥离后
+#     不再连续可靠），统一改为内部严格递增。音乐章节（同一首歌/连续歌词的
+#     整个 chapter）不再按续接规则拆成多个各自独立发送的 unit——那样跨
+#     unit 边界发送时（各自一个 `<span>`）翻译引擎仍可能在响应里串位——
+#     而是整章合并为一个 unit，每句歌词前都带 ⟦cNNNN⟧，只用一个 `<span>`
+#     发送。下游按 cue id 精确回填，即便引擎打乱了歌词行序也能正确归位。
+#     v1.9: Cue ids no longer come from the source SRT's own numbering
+#     (unreliable once SDH-only lines are dropped entirely); now strictly
+#     sequential internally. A music chapter (one song/lyric run) is no
+#     longer split into several continuation-grouped units each sent as its
+#     own `<span>` — the engine could still scramble content across those
+#     span boundaries in its response. It's now merged into a single unit
+#     for the whole chapter, every line prefixed with ⟦cNNNN⟧, sent as one
+#     `<span>`. Downstream relocates content by cue id, correct even if the
+#     engine reorders song lines.
 #
 # Features:
 #     - Parses SRT subtitle structures and normalizes text and timestamps.
@@ -290,7 +306,7 @@ def parse_srt(content, strip_sdh_enabled=True, latin_source=True):
         if time_line_idx is None:
             continue
         time_match = TIME_LINE_PATTERN.match(lines[time_line_idx].strip())
-        cue_id = int(lines[0].strip()) if time_line_idx == 1 and lines[0].strip().isdigit() else len(cues) + 1
+        cue_id = len(cues) + 1
         text = fold_text("\n".join(lines[time_line_idx + 1:]), strip_sdh_enabled, latin_source)
         if strip_sdh_enabled:
             cleaned = strip_sdh(text)
@@ -541,52 +557,56 @@ def join_group_text(group, is_music_group):
     pieces = []
     for i, seg in enumerate(group):
         piece = strip_edge_notes(seg["text"]) if is_music_group else seg["text"]
-        if is_music_segment(seg["text"]):
-            piece = f"\u27e6u{seg['cue_id']:04d}\u27e7{piece}"
-        if i > 0:
+        if is_music_group:
+            marker = f"{MARKER_TEMPLATE.format(seg['cue_id'])} "
+            pieces.append(f" {marker}" if i > 0 else marker)
+        elif i > 0:
             pieces.append(f" {MARKER_TEMPLATE.format(seg['cue_id'])} " if seg.get("marker_boundary") else " ")
         pieces.append(piece)
     return "".join(pieces).strip()
-
-
-def build_units(cues, glossary, latin_source=True):
-    units = []
-    groups = []
-    marker_merges = 0
-    for unit_id, group in enumerate(group_segments(build_segments(cues, glossary, latin_source), latin_source), start=1):
-        spans = [{"id": s["cue_id"], "start": s["start"], "end": s["end"], "text": s["text"],
-                   "boundary": "marker" if s.get("marker_boundary") else None} for s in group]
-        marker_merges += sum(1 for s in group if s.get("marker_boundary"))
-        if len(group) == 1 and group[0]["resolved"]:
-            units.append({"id": unit_id, "spans": spans, "text": "", "term_matches": [], "embed_ratio": EMBED_RATIO_DEFAULT, "resolved": group[0]["resolved"]})
-            groups.append(group)
-            continue
-        is_music_group = len(group) > 1 and any(is_music_segment(seg["text"]) for seg in group)
-        text = join_group_text(group, is_music_group)
-        term_matches, embed_ratio = match_glossary_terms(text, glossary)
-        units.append({"id": unit_id, "spans": spans, "text": text, "term_matches": term_matches, "embed_ratio": embed_ratio, "resolved": None})
-        groups.append(group)
-    return units, groups, marker_merges
 
 
 def unit_kind(group):
     return "music" if any(is_music_segment(seg["text"]) for seg in group) else "dialogue"
 
 
-def build_chapters(units, groups):
+def chapterize(groups):
     chapters = []
     open_chapter, thread_end = {}, {}
-    for unit, group in zip(units, groups):
+    for group in groups:
         kind = unit_kind(group)
         start_ms, end_ms = time_to_ms(group[0]["start"]), time_to_ms(group[-1]["end"])
         chapter = open_chapter.get(kind)
         if chapter is None or start_ms - thread_end[kind] > SCENE_CHANGE_MS:
-            chapter = {"id": len(chapters) + 1, "kind": kind, "unit_ids": []}
+            chapter = {"kind": kind, "groups": []}
             chapters.append(chapter)
             open_chapter[kind] = chapter
-        chapter["unit_ids"].append(unit["id"])
+        chapter["groups"].append(group)
         thread_end[kind] = end_ms
     return chapters
+
+
+def build_units(cues, glossary, latin_source=True):
+    groups = group_segments(build_segments(cues, glossary, latin_source), latin_source)
+    units, chapters, marker_merges, unit_id = [], [], 0, 0
+    for chapter_index, raw_chapter in enumerate(chapterize(groups), start=1):
+        is_music_chapter = raw_chapter["kind"] == "music"
+        member_groups = [[seg for group in raw_chapter["groups"] for seg in group]] if is_music_chapter else raw_chapter["groups"]
+        unit_ids = []
+        for group in member_groups:
+            unit_id += 1
+            spans = [{"id": s["cue_id"], "start": s["start"], "end": s["end"], "text": s["text"],
+                       "boundary": "marker" if (is_music_chapter or s.get("marker_boundary")) else None} for s in group]
+            marker_merges += sum(1 for s in group if s.get("marker_boundary"))
+            if len(group) == 1 and group[0]["resolved"]:
+                units.append({"id": unit_id, "spans": spans, "text": "", "term_matches": [], "embed_ratio": EMBED_RATIO_DEFAULT, "resolved": group[0]["resolved"]})
+            else:
+                text = join_group_text(group, is_music_chapter)
+                term_matches, embed_ratio = match_glossary_terms(text, glossary)
+                units.append({"id": unit_id, "spans": spans, "text": text, "term_matches": term_matches, "embed_ratio": embed_ratio, "resolved": None})
+            unit_ids.append(unit_id)
+        chapters.append({"id": chapter_index, "kind": raw_chapter["kind"], "unit_ids": unit_ids})
+    return units, chapters, marker_merges
 
 
 def extract(content, glossary, strip_sdh_enabled=True, source_lang="en"):
@@ -594,8 +614,7 @@ def extract(content, glossary, strip_sdh_enabled=True, source_lang="en"):
     cues, sdh_stats = parse_srt(content, strip_sdh_enabled, latin_source)
     if not cues:
         return {"success": False, "reason": "no_cues_parsed", "cues": [], "units": [], "chapters": [], "sdh_removed": sdh_stats, "marker_merges": 0}
-    units, groups, marker_merges = build_units(cues, glossary, latin_source)
-    chapters = build_chapters(units, groups)
+    units, chapters, marker_merges = build_units(cues, glossary, latin_source)
     return {"success": True, "cues": cues, "units": units, "chapters": chapters, "sdh_removed": sdh_stats, "marker_merges": marker_merges}
 
 
