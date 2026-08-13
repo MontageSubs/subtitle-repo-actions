@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: bilingual_merge.py
-# Version: 1.9
+# Version: 2.0
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -78,11 +78,13 @@
 import argparse
 import json
 import logging
+import os
 import re
 import subprocess
 import sys
 
 SCRIPT_NAME = "bilingual_merge"
+DEBUG_MODE = False
 
 _jieba_module = None
 _jieba_checked = False
@@ -222,17 +224,26 @@ def restore_quote_markers(translation, source_text, target_lang):
     quotes = target_quote_pair(target_lang)
     if not quotes or not translation:
         return translation
+    if not (source_starts_with_quote(source_text) and source_ends_with_quote(source_text)):
+        return translation
     open_q, close_q = quotes
-    if source_starts_with_quote(source_text) and translation[0] not in ('"', open_q):
+    if translation[0] not in ('"', open_q):
         translation = open_q + translation
-    if source_ends_with_quote(source_text) and translation[-1] not in ('"', close_q):
+    if translation[-1] not in ('"', close_q):
         translation = translation + close_q
     return translation
 
 
+def space_after_ellipsis(match):
+    text, end = match.string, match.end()
+    if end == len(text) or text[end].isspace() or text[end] in NO_LINE_START_CHARS:
+        return "..."
+    return "... "
+
+
 def normalize_translation(text, target_lang):
-    text = ELLIPSIS_PATTERN.sub("...", text)
     text = DASH_ARTIFACT_PATTERN.sub("...", text)
+    text = ELLIPSIS_PATTERN.sub(space_after_ellipsis, text)
     if is_chinese_target(target_lang):
         text = CJK_TERMINATOR_PATTERN.sub(strip_terminator, text)
         text = HALFWIDTH_COMMA_PATTERN.sub(strip_terminator, text)
@@ -244,6 +255,7 @@ def normalize_translation(text, target_lang):
 LATIN_WORD_PATTERN = re.compile(r"[a-zA-Z]+(?:['’][a-zA-Z]+)*")
 DIGIT_PATTERN = re.compile(r"\d")
 OTHER_WORD_PATTERN = re.compile(r"[^\W_a-zA-Z0-9]", re.UNICODE)
+PUNCT_WEIGHT_PATTERN = re.compile(r"[，,、；;。.!?！？：:…]")
 
 
 def effective_length(text):
@@ -290,15 +302,20 @@ CLOSING_TAIL_CHARS = "'\"”’)\\]}》」』】〕＞〉»›"
 GENERAL_PUNCT_SEARCH_PATTERN = re.compile(r"[，,、；;。.!?！？：:…]+[" + CLOSING_TAIL_CHARS + r"]*")
 LEFT_CUT_PATTERN = re.compile(r"[“「『（([{＜〈《【〔„‚«‹¿¡]")
 BOOK_TITLE_PATTERN = re.compile(r"《[^《》]*》")
-ORIGINAL_PUNCT_TOLERANCE = 0.20
+EMBEDDED_QUOTE_PATTERN = re.compile(r"“[^“”]*”")
+EMBEDDED_QUOTE_MAX_CHARS = 16
+ORIGINAL_PUNCT_TOLERANCE = {"trail_off": 0.60, "comma": 0.20, "period": 0.20, "colon": 0.20}
 INFERRED_PUNCT_TOLERANCE = 0.15
 INFERRED_MIN_SHARE = 0.5
 
 
-def find_protected_spans(text, glossary_terms):
+def find_protected_spans(text, glossary_terms, target_lang=None):
     spans = [(m.start(), m.end()) for m in BOOK_TITLE_PATTERN.finditer(text)]
     spans.extend((m.start(), m.end()) for m in LATIN_WORD_PATTERN.finditer(text))
     spans.extend((m.start(), m.end()) for m in MARKER_PATTERN.finditer(text))
+    if target_quote_pair(target_lang):
+        spans.extend((m.start(), m.end()) for m in EMBEDDED_QUOTE_PATTERN.finditer(text)
+                     if m.start() > 0 and m.end() < len(text) and m.end() - m.start() <= EMBEDDED_QUOTE_MAX_CHARS)
     for term in glossary_terms:
         if not term:
             continue
@@ -332,7 +349,7 @@ def resolve_cut(text, cursor, expected, boundary, max_cut, protected=(), target_
                       if cursor < m.end() < ceiling and not inside_protected_span(m.end(), protected)]
         if candidates:
             cut = min(candidates, key=lambda pos: abs(pos - expected))
-            if abs(cut - expected) <= max(ORIGINAL_PUNCT_TOLERANCE * chunk, 3):
+            if abs(cut - expected) <= max(ORIGINAL_PUNCT_TOLERANCE.get(boundary, 0.20) * chunk, 3):
                 return cut, "original"
     inferred = [m.end() for m in GENERAL_PUNCT_SEARCH_PATTERN.finditer(text, cursor)
                 if cursor < m.end() < ceiling and not inside_protected_span(m.end(), protected)]
@@ -375,6 +392,8 @@ def split_by_boundary(translated_text, spans, protected=(), target_lang=None):
         weights[m.start()] = 0.5
     for m in OTHER_WORD_PATTERN.finditer(translated_text):
         weights[m.start()] = 1.0
+    for m in PUNCT_WEIGHT_PATTERN.finditer(translated_text):
+        weights[m.start()] = 0.5
         
     total_weight = sum(weights)
     span_count = len(spans)
@@ -411,10 +430,14 @@ def split_by_boundary(translated_text, spans, protected=(), target_lang=None):
     return parts, method
 
 
+def has_content(text):
+    return bool(WORD_CHAR_PATTERN.search(text))
+
+
 def repair_empty_parts(parts, spans, protected=(), target_lang=None):
     parts = list(parts)
     for i, part in enumerate(parts):
-        if part:
+        if has_content(part):
             continue
         neighbor = i - 1 if i > 0 else i + 1
         if not (0 <= neighbor < len(parts)):
@@ -547,10 +570,10 @@ def build_bilingual_cues(cues, units, translations, target_lang):
                 cue_segments.setdefault(span["id"], []).append(None)
             continue
         translated = strip_unsourced_brackets("".join(span["text"] for span in spans), translated)
-        protected = find_protected_spans(translated, glossary_terms)
+        protected = find_protected_spans(translated, glossary_terms, target_lang)
         parts, method = split_translation(translated, spans, protected, target_lang)
         if method not in ("single", "original_boundary", "inferred_punctuation", "marker_boundary"):
-            approx_splits.append({"unit_id": unit["id"], "method": method})
+            approx_splits.append({"unit_id": unit["id"], "cues": [span["id"] for span in spans], "method": method})
         for span, part in zip(spans, parts):
             cue_segments.setdefault(span["id"], []).append(normalize_translation(part, target_lang))
 
@@ -589,7 +612,7 @@ def render_srt(cues):
 
 def merge(extract_data, translate_data):
     target_lang = translate_data.get("target_lang", "")
-    if is_chinese_target(target_lang):
+    if DEBUG_MODE and is_chinese_target(target_lang):
         jieba_module = ensure_jieba()
         if jieba_module is not None:
             log(f"jieba: available (v{getattr(jieba_module, '__version__', 'unknown')})")
@@ -598,16 +621,37 @@ def merge(extract_data, translate_data):
     translations = translate_data.get("translations", {})
     register_glossary_terms(collect_glossary_terms(extract_data["units"]), target_lang)
     cues, approx_splits = build_bilingual_cues(extract_data["cues"], extract_data["units"], translations, target_lang)
-    missing = sum(1 for cue in cues if cue.get("translation") is None)
-    return {"success": True, "srt": render_srt(cues), "approx_splits": approx_splits, "missing_count": missing}
+
+    unit_of_cue = {span["id"]: unit["id"] for unit in extract_data["units"] for span in unit["spans"]}
+    position_of_cue = {cue["id"]: position for position, cue in enumerate(cues, start=1)}
+    missing_cues = [cue["id"] for cue in cues if cue.get("translation") is None]
+
+    if DEBUG_MODE:
+        for split in approx_splits:
+            positions = [position_of_cue[cid] for cid in split["cues"]]
+            log(f"approximate split: unit {split['unit_id']} / cues {split['cues']} / srt #{positions} via {split['method']}")
+        for cid in missing_cues:
+            log(f"missing translation: cue {cid} / unit {unit_of_cue.get(cid)} / srt #{position_of_cue[cid]}")
+
+    return {
+        "success": True,
+        "srt": render_srt(cues),
+        "approx_splits": approx_splits,
+        "missing_count": len(missing_cues),
+        "missing_cues": missing_cues,
+    }
 
 
 def main():
+    global DEBUG_MODE
     parser = argparse.ArgumentParser()
     parser.add_argument("--extract", required=True)
     parser.add_argument("--translations", required=True)
     parser.add_argument("--output", default=None)
+    parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
+
+    DEBUG_MODE = args.debug or os.environ.get("DEBUG") == "1"
 
     extract_data = json.load(open(args.extract, encoding="utf-8"))
     translate_data = json.load(open(args.translations, encoding="utf-8"))

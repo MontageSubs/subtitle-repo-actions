@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: google_client.py
-# Version: 1.9
+# Version: 2.0
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -37,11 +37,30 @@
 #     文本读起来是连续一段。实际效果需拿真实API返回核实，不能仅凭标签语义
 #     假定生效。
 #
+#     v1.6: Reinstates block-level `<div>` — now one per chapter (a scene/song
+#     run from srt_extract.py's `chapters`) instead of one per unit, wrapping
+#     the same inline `<span>`-concatenated units it holds. This confines the
+#     v1.5 "read as one continuous passage" effect to within a chapter, while
+#     the `<div>` boundary still signals a real context break between scenes.
+#     Batching now packs whole chapters into a batch (falling back to a
+#     char-greedy split only when a single chapter alone exceeds batch_chars),
+#     replacing the old unit-by-unit char-count split that ignored scene
+#     boundaries entirely.
+#     v1.6: 恢复block级`<div>`——但改为每章节（srt_extract.py `chapters`中的
+#     场景/歌曲片段）一个，而非每unit一个，内部仍是原有行内`<span>`拼接。
+#     这把v1.5"读作连续一段"的效果收束在单个章节内，同时`<div>`边界仍能
+#     标示场景间的真实上下文断裂。分批现在整章节打包进一批（仅当单个章节
+#     本身超过batch_chars时才按字符数贪心拆分），取代原先完全无视场景边界、
+#     逐unit按字符数切分的方式。
+#
 # Features:
 #     - Concurrent HTTP requests via ThreadPoolExecutor.
-#     - Smart text batching based on character limits (DEFAULT_BATCH_CHARS).
+#     - Chapter-aware batching: whole chapters (scene/song runs) are packed
+#       into a batch under character limits (DEFAULT_BATCH_CHARS), splitting
+#       by character count only as a fallback for an oversized chapter.
 #     - Protective inline HTML formatting (<span> tags) to isolate units and
-#       map results, without introducing block-level segmentation signals.
+#       map results within a chapter's <div>, keeping context continuous
+#       inside a scene while still signaling a break between scenes.
 #     - Robust retry mechanism for failed or partially failed translation batches.
 #     - Per-unit inline-name / placeholder dual variants, chosen by an
 #       untranslated-residue diagnostic (Latin<->CJK word/char counting).
@@ -50,9 +69,10 @@
 #
 # 功能:
 #     - 基于 ThreadPoolExecutor 的并发 HTTP 请求。
-#     - 基于字符数限制（DEFAULT_BATCH_CHARS）的智能文本分批。
-#     - 使用 HTML 行内 <span> 标签保护并隔离单元、确保对应关系，同时不引入
-#       block级分段信号。
+#     - 章节感知分批：整章节（场景/歌曲片段）在字符数限制内打包进同一批
+#       （DEFAULT_BATCH_CHARS），仅当单个章节超限时才按字符数兜底拆分。
+#     - 使用 HTML 行内 <span> 标签在章节 <div> 内保护并隔离单元、确保对应
+#       关系，令场景内上下文连续，同时场景间仍有边界信号。
 #     - 针对失败或部分失败请求的健壮重试机制。
 #     - 按单元自身嵌入比例生成嵌入版/占位符版，依未翻译诊断择优并回填。
 #     - 最终结果仍疑似未翻译时单独重发一次（不循环），结果不同才采用。
@@ -150,23 +170,56 @@ def unescape_html(text):
                 .replace("&gt;", ">").replace("&quot;", '"').replace("&#39;", "'"))
 
 
-def build_batches(units, batch_chars):
+def split_oversized_chapter(items, batch_chars):
+    pieces, piece, piece_chars = [], [], 0
+    for item in items:
+        item_chars = len(item["text"])
+        if piece and piece_chars + item_chars > batch_chars:
+            pieces.append(piece)
+            piece, piece_chars = [], 0
+        piece.append(item)
+        piece_chars += item_chars
+    if piece:
+        pieces.append(piece)
+    return pieces
+
+
+def build_batches(items, chapter_groups, batch_chars):
+    by_id = {item["id"]: item for item in items}
     batches = []
     current, current_chars = [], 0
-    for unit in units:
-        unit_chars = len(unit["text"])
-        if current and current_chars + unit_chars > batch_chars:
+
+    def flush():
+        nonlocal current, current_chars
+        if current:
             batches.append(current)
-            current, current_chars = [], 0
-        current.append(unit)
-        current_chars += unit_chars
-    if current:
-        batches.append(current)
+        current, current_chars = [], 0
+
+    for group in chapter_groups:
+        group_items = [by_id[i] for i in group if i in by_id]
+        if not group_items:
+            continue
+        group_chars = sum(len(item["text"]) for item in group_items)
+        if group_chars > batch_chars:
+            flush()
+            batches.extend([piece] for piece in split_oversized_chapter(group_items, batch_chars))
+        elif current_chars + group_chars > batch_chars:
+            flush()
+            current, current_chars = [group_items], group_chars
+        else:
+            current.append(group_items)
+            current_chars += group_chars
+    flush()
     return batches
 
 
+def build_chapter_html(group):
+    spans = "".join(f'<span id="{item["id"]}">{escape_html(item["text"])}</span>' for item in group)
+    return f"<div>{spans}</div>"
+
+
 def build_request_body(batch, source_lang, target_lang):
-    html = "".join(f'<span id="{unit["id"]}">{escape_html(unit["text"])}</span>' for unit in batch)
+    html = "".join(build_chapter_html(group) for group in batch)
     return json.dumps([[[html], source_lang, target_lang], "te"]).encode("utf-8")
 
 
@@ -205,7 +258,8 @@ def call_google(batch, source_lang, target_lang, api_key):
 
 
 def translate_batch(batch, source_lang, target_lang, api_key):
-    expected_ids = {unit["id"] for unit in batch}
+    items = [item for group in batch for item in group]
+    expected_ids = {item["id"] for item in items}
     result, missing = {}, expected_ids
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
@@ -217,7 +271,7 @@ def translate_batch(batch, source_lang, target_lang, api_key):
         if not missing:
             return result, []
             
-        log(f"attempt {attempt}: missing {len(missing)} of {len(batch)} units")
+        log(f"attempt {attempt}: missing {len(missing)} of {len(items)} units")
         if DEBUG_MODE:
             with DEBUG_LOCK:
                 log(f"debug: Expected IDs: {sorted(list(expected_ids), key=str)}")
@@ -225,12 +279,21 @@ def translate_batch(batch, source_lang, target_lang, api_key):
                 
         if attempt < MAX_ATTEMPTS:
             time.sleep(RETRY_DELAY)
+
+    if len(items) > 1:
+        by_id = {item["id"]: item for item in items}
+        log(f"isolating {len(missing)} unit(s) still missing after batch retries")
+        for uid in sorted(missing, key=str):
+            solo_result, _solo_missing = translate_batch([[by_id[uid]]], source_lang, target_lang, api_key)
+            if uid in solo_result:
+                result[uid] = solo_result[uid]
+        missing = expected_ids - result.keys()
     return result, sorted(missing, key=str)
 
 
-def translate(units, source_lang, target_lang, api_key, batch_chars, concurrency=DEFAULT_CONCURRENCY):
+def translate(items, chapter_groups, source_lang, target_lang, api_key, batch_chars, concurrency=DEFAULT_CONCURRENCY):
     translations, skipped = {}, []
-    batches = build_batches(units, batch_chars)
+    batches = build_batches(items, chapter_groups, batch_chars)
     total_batches = len(batches)
     start_time = last_report = time.time()
     completed = 0
@@ -247,7 +310,7 @@ def translate(units, source_lang, target_lang, api_key, batch_chars, concurrency
                 now = time.time()
                 should_log = now - last_report >= PROGRESS_INTERVAL or completed == total_batches
                 if should_log:
-                    log(f"progress: {len(translations)}/{len(units)} units "
+                    log(f"progress: {len(translations)}/{len(items)} units "
                         f"(batch {completed}/{total_batches}, {now - start_time:.0f}s elapsed)")
                     last_report = now
     return translations, skipped
@@ -293,14 +356,16 @@ def build_variants(unit):
     }
 
 
-def flatten_units(units):
-    items, index_map = [], {}
+def flatten_units(units, chapter_of_unit):
+    items, index_map, chapter_items = [], {}, {}
     for unit in units:
+        chapter_id = chapter_of_unit.get(unit["id"])
         for variant, (text, _mapping) in build_variants(unit).items():
             idx = len(items)
             items.append({"id": idx, "text": text})
             index_map[idx] = f"{unit['id']}:{variant}"
-    return items, index_map
+            chapter_items.setdefault(chapter_id, []).append(idx)
+    return items, index_map, list(chapter_items.values())
 
 
 def restore_placeholders(text, mapping):
@@ -327,15 +392,64 @@ def resolve_translation(unit, translations, source_lang, target_lang):
 def retry_single(text, source_lang, target_lang, api_key):
     if not text or not text.strip():
         return None
-    result, _missing = translate_batch([{"id": "retry", "text": text}], source_lang, target_lang, api_key)
+    result, _missing = translate_batch([[{"id": "retry", "text": text}]], source_lang, target_lang, api_key)
     return result.get("retry")
 
 
-def translate_units(units, source_lang, target_lang, api_key, batch_chars, concurrency):
+CONTENT_CHAR_PATTERN = re.compile(r"\w", re.UNICODE)
+WINDOW_MARKER_PATTERN = re.compile(r"\u27e6c(\d+)\u27e7")
+WINDOW_CONTEXT_RADIUS = 20
+WINDOW_KEEP_RADIUS = 2
+LENGTH_RATIO_MIN = 0.15
+LENGTH_RATIO_MAX = 6.0
+
+
+def has_content(text):
+    return bool(text) and bool(CONTENT_CHAR_PATTERN.search(text))
+
+
+def content_length(text):
+    return len(CONTENT_CHAR_PATTERN.findall(text or ""))
+
+
+def is_length_plausible(source_text, translated_text):
+    source_len = content_length(source_text)
+    if source_len == 0:
+        return True
+    ratio = content_length(translated_text) / source_len
+    return LENGTH_RATIO_MIN <= ratio <= LENGTH_RATIO_MAX
+
+
+def retry_windowed(units, suspect_id, source_lang, target_lang, api_key):
+    index = {unit["id"]: i for i, unit in enumerate(units)}
+    i = index[suspect_id]
+    window = units[max(0, i - WINDOW_CONTEXT_RADIUS):i + WINDOW_CONTEXT_RADIUS + 1]
+    if len(window) < 2:
+        return {}
+    pieces = [window[0]["text"]]
+    for unit in window[1:]:
+        pieces.append(f" \u27e6c{unit['id']:04d}\u27e7 ")
+        pieces.append(unit["text"])
+    windowed_text = "".join(pieces)
+    result, _missing = translate_batch([[{"id": "window", "text": windowed_text}]], source_lang, target_lang, api_key)
+    response = result.get("window")
+    if response is None:
+        return {}
+    expected_ids = [unit["id"] for unit in window[1:]]
+    found_ids = [int(g) for g in WINDOW_MARKER_PATTERN.findall(response)]
+    if found_ids != expected_ids:
+        return {}
+    chunks = WINDOW_MARKER_PATTERN.split(response)[0::2]
+    keep_ids = {unit["id"] for unit in units[max(0, i - WINDOW_KEEP_RADIUS):i + WINDOW_KEEP_RADIUS + 1]}
+    return {unit["id"]: chunk.strip() for unit, chunk in zip(window, chunks) if unit["id"] in keep_ids}
+
+
+def translate_units(units, chapters, source_lang, target_lang, api_key, batch_chars, concurrency):
     resolved = {unit["id"]: unit["resolved"] for unit in units if unit.get("resolved") is not None}
     pending = [unit for unit in units if unit.get("resolved") is None]
-    items, index_map = flatten_units(pending)
-    indexed_raw, _skipped = translate(items, source_lang, target_lang, api_key, batch_chars, concurrency) if items else ({}, [])
+    chapter_of_unit = {uid: chapter["id"] for chapter in chapters for uid in chapter["unit_ids"]}
+    items, index_map, chapter_groups = flatten_units(pending, chapter_of_unit)
+    indexed_raw, _skipped = translate(items, chapter_groups, source_lang, target_lang, api_key, batch_chars, concurrency) if items else ({}, [])
     translations_raw = {index_map[idx]: text for idx, text in indexed_raw.items()}
 
     results = dict(resolved)
@@ -349,6 +463,18 @@ def translate_units(units, source_lang, target_lang, api_key, batch_chars, concu
                     log(f"unit {unit['id']}: retry changed result")
                     final_text = candidate
         results[unit["id"]] = final_text
+
+    unit_by_id = {unit["id"]: unit for unit in units}
+    suspects = [uid for uid, text in results.items()
+                if text is not None and has_content(unit_by_id[uid]["text"])
+                and (not has_content(text) or not is_length_plausible(unit_by_id[uid]["text"], text))]
+    for uid in suspects:
+        recovered = retry_windowed(units, uid, source_lang, target_lang, api_key)
+        if recovered:
+            log(f"windowed retry around unit {uid}: recovered {sorted(recovered)}")
+            results.update(recovered)
+        else:
+            log(f"windowed retry around unit {uid}: markers did not align, left as-is")
 
     skipped = [uid for uid, text in results.items() if text is None]
     translations = {str(uid): text for uid, text in results.items() if text is not None}
@@ -378,6 +504,7 @@ def main():
     raw = open(args.input, encoding="utf-8").read() if args.input else sys.stdin.read()
     payload = json.loads(raw)
     units = payload.get("units", [])
+    chapters = payload.get("chapters", [])
     source_lang = args.source_lang or payload.get("source_lang", "en")
     target_lang = args.target_lang or payload.get("target_lang", "zh-CN")
     api_key = args.api_key or os.environ.get(API_KEY_ENV)
@@ -387,7 +514,7 @@ def main():
     elif not units:
         result = {"success": False, "reason": "no_units", "translations": {}, "skipped": [], "source_lang": source_lang, "target_lang": target_lang}
     else:
-        translations, skipped = translate_units(units, source_lang, target_lang, api_key, args.batch_chars, args.concurrency)
+        translations, skipped = translate_units(units, chapters, source_lang, target_lang, api_key, args.batch_chars, args.concurrency)
         result = {
             "success": bool(translations),
             "translations": translations,

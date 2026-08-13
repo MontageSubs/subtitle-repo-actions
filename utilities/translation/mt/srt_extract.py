@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: srt_extract.py
-# Version: 1.9
+# Version: 2.0
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -30,6 +30,19 @@
 #     （同时记录为 span["boundary"]="marker"），供配套的 bilingual_merge.py
 #     按此硬边界拆分，而非仅依赖标点/长度比例猜测。
 #
+#     v1.8: Units are now grouped into `chapters`, each a run of units of the
+#     same kind (dialogue/music) with no gap exceeding SCENE_CHANGE_MS between
+#     them. Music and dialogue are tracked as two independent timelines, so
+#     interleaved music cues (e.g. a song threaded between dialogue lines)
+#     collapse into their own chapter instead of being scattered across the
+#     surrounding dialogue chapters, while opening/closing songs separated by
+#     a real scene gap still land in separate chapters.
+#     v1.8: 单元现在按 `chapters` 分组，每个章节是一段同类型（对话/音乐）且
+#     彼此间隔不超过 SCENE_CHANGE_MS 的连续单元。音乐与对话各自维护独立时间线，
+#     因此穿插在对话中的音乐（如对话间隔中的歌曲）会被归入同一个独立章节，
+#     而非散落在前后对话章节里；片头曲与片尾曲之间若确有场景间隔，仍会分属
+#     不同章节。
+#
 # Features:
 #     - Parses SRT subtitle structures and normalizes text and timestamps.
 #     - Splits multi-speaker dialogue lines marked with leading dashes ('- ').
@@ -40,6 +53,9 @@
 #     - Annotates glossary hits as `term_matches` (position + source + target)
 #       and an `embed_ratio`; actual placeholder-vs-inline-name decision is
 #       deferred to the translation step, which owns batch/context context.
+#     - Groups units into `chapters` (scene/song-level runs) so downstream
+#       batching can send whole scenes as translation context instead of
+#       splitting arbitrarily by character count.
 #
 # 功能:
 #     - 解析 SRT 字幕结构，标准化时间轴与文本格式。
@@ -49,6 +65,8 @@
 #       原始片段及各自时间轴/原文）供下游拆分回填。
 #     - 标注词表命中的位置、原文与固定译名（`term_matches`）及嵌入比例
 #       （`embed_ratio`），是否嵌入原文或改用占位符由翻译脚本决定。
+#     - 将单元归入 `chapters`（场景/歌曲级片段），供下游按整场景批量发送
+#       翻译上下文，而非仅按字符数任意切分。
 #     - 默认剥离 SDH（听障辅助）内容：整行 SDH 括号内容丢弃；说话人标签
 #       （如 "JOHN: text"）剥离逻辑严格取材于 Subtitle Edit 的
 #       RemoveTextForHI.cs（RemoveColon，OnlyUppercase=True 默认档位）：
@@ -84,7 +102,7 @@ SCRIPT_NAME = "srt_extract"
 TIME_LINE_PATTERN = re.compile(r"(\d{2}:\d{2}:\d{2}[,.]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,.]\d{3})")
 TAG_PATTERN = re.compile(r"<[^>]+>|\{[^}]*\}")
 WHITESPACE_PATTERN = re.compile(r"\s+")
-TERMINAL_PUNCT_PATTERN = re.compile(r"[.!?…”’\"')\]。！？」』】）]\s*$")
+TERMINAL_PUNCT_PATTERN = re.compile(r"[.!?。！？][’”\"')\]」』】）]*\s*$")
 TRAILING_CONTINUATION_PATTERN = re.compile(r"(\.{2,}|-{2,}|…)\s*$")
 DIALOGUE_DASH_PATTERN = re.compile(r"(?:^|(?<=\s))-(?!-)\s?")
 STUTTER_WORD_PATTERN = re.compile(r"(?<![A-Za-z])([A-Za-z])-\1(?![A-Za-z])", re.IGNORECASE)
@@ -95,9 +113,10 @@ STUTTER_RESIDUAL_PATTERN = re.compile(r"[A-Za-z]")
 TRAILING_MARK_PATTERN = re.compile(r"[!?…]+$")
 GAP_THRESHOLD_MS = 200
 WORD_TOKEN_PATTERN = re.compile(r"[A-Za-z]+(?:['’][A-Za-z]+)*")
-ISOLATED_MAX_WORDS = 2
+ISOLATED_MERGE_MAX_WORDS = 0
 ISOLATED_MAX_CHARS_NON_LATIN = 4
 SCENE_ADJACENCY_MS = 1500
+SCENE_CHANGE_MS = 4000
 MARKER_TEMPLATE = "\u27e6c{:04d}\u27e7"
 
 MUSIC_NOTE_CHARS = "\u2669\u266a\u266b\u266c"
@@ -323,8 +342,10 @@ def update_quote_state(text, is_pending):
 
 
 def is_isolated_short(text, latin_source=True):
+    if not ISOLATED_MERGE_MAX_WORDS:
+        return False
     if latin_source:
-        return len(WORD_TOKEN_PATTERN.findall(text)) <= ISOLATED_MAX_WORDS
+        return len(WORD_TOKEN_PATTERN.findall(text)) <= ISOLATED_MERGE_MAX_WORDS
     return len(text.strip()) <= ISOLATED_MAX_CHARS_NON_LATIN
 
 
@@ -432,8 +453,9 @@ def group_segments(segments, latin_source=True):
         merged = False
         if current:
             if quote_pending:
-                merged = True
-            else:
+                gap = time_to_ms(seg["start"]) - time_to_ms(current[-1]["end"])
+                merged = gap <= SCENE_ADJACENCY_MS
+            if not merged:
                 reason = merge_reason(current[-1], seg, latin_source)
                 if reason:
                     merged = True
@@ -527,6 +549,7 @@ def join_group_text(group, is_music_group):
 
 def build_units(cues, glossary, latin_source=True):
     units = []
+    groups = []
     marker_merges = 0
     for unit_id, group in enumerate(group_segments(build_segments(cues, glossary, latin_source), latin_source), start=1):
         spans = [{"id": s["cue_id"], "start": s["start"], "end": s["end"], "text": s["text"],
@@ -534,21 +557,44 @@ def build_units(cues, glossary, latin_source=True):
         marker_merges += sum(1 for s in group if s.get("marker_boundary"))
         if len(group) == 1 and group[0]["resolved"]:
             units.append({"id": unit_id, "spans": spans, "text": "", "term_matches": [], "embed_ratio": EMBED_RATIO_DEFAULT, "resolved": group[0]["resolved"]})
+            groups.append(group)
             continue
         is_music_group = len(group) > 1 and any(is_music_segment(seg["text"]) for seg in group)
         text = join_group_text(group, is_music_group)
         term_matches, embed_ratio = match_glossary_terms(text, glossary)
         units.append({"id": unit_id, "spans": spans, "text": text, "term_matches": term_matches, "embed_ratio": embed_ratio, "resolved": None})
-    return units, marker_merges
+        groups.append(group)
+    return units, groups, marker_merges
+
+
+def unit_kind(group):
+    return "music" if any(is_music_segment(seg["text"]) for seg in group) else "dialogue"
+
+
+def build_chapters(units, groups):
+    chapters = []
+    open_chapter, thread_end = {}, {}
+    for unit, group in zip(units, groups):
+        kind = unit_kind(group)
+        start_ms, end_ms = time_to_ms(group[0]["start"]), time_to_ms(group[-1]["end"])
+        chapter = open_chapter.get(kind)
+        if chapter is None or start_ms - thread_end[kind] > SCENE_CHANGE_MS:
+            chapter = {"id": len(chapters) + 1, "kind": kind, "unit_ids": []}
+            chapters.append(chapter)
+            open_chapter[kind] = chapter
+        chapter["unit_ids"].append(unit["id"])
+        thread_end[kind] = end_ms
+    return chapters
 
 
 def extract(content, glossary, strip_sdh_enabled=True, source_lang="en"):
     latin_source = is_latin_source(source_lang)
     cues, sdh_stats = parse_srt(content, strip_sdh_enabled, latin_source)
     if not cues:
-        return {"success": False, "reason": "no_cues_parsed", "cues": [], "units": [], "sdh_removed": sdh_stats, "marker_merges": 0}
-    units, marker_merges = build_units(cues, glossary, latin_source)
-    return {"success": True, "cues": cues, "units": units, "sdh_removed": sdh_stats, "marker_merges": marker_merges}
+        return {"success": False, "reason": "no_cues_parsed", "cues": [], "units": [], "chapters": [], "sdh_removed": sdh_stats, "marker_merges": 0}
+    units, groups, marker_merges = build_units(cues, glossary, latin_source)
+    chapters = build_chapters(units, groups)
+    return {"success": True, "cues": cues, "units": units, "chapters": chapters, "sdh_removed": sdh_stats, "marker_merges": marker_merges}
 
 
 def main():
@@ -557,8 +603,12 @@ def main():
     parser.add_argument("--glossary", default=None)
     parser.add_argument("--output", default=None)
     parser.add_argument("--source-lang", default="en")
+    parser.add_argument("--isolated-merge-max-words", type=int, default=0)
     parser.add_argument("--keep-sdh", action="store_true")
     args = parser.parse_args()
+
+    global ISOLATED_MERGE_MAX_WORDS
+    ISOLATED_MERGE_MAX_WORDS = args.isolated_merge_max_words
 
     raw = open(args.input, encoding="utf-8-sig").read() if args.input else sys.stdin.read()
     glossary = build_glossary_from_markdown(open(args.glossary, encoding="utf-8").read()) if args.glossary else {}
@@ -568,7 +618,7 @@ def main():
     if not args.keep_sdh:
         stats = result["sdh_removed"]
         sdh_note = f", sdh_dropped={stats['dropped']}, sdh_stripped={stats['stripped']}"
-    log(f"status: {'ok' if result['success'] else 'failed'} (cues={len(result['cues'])}, units={len(result['units'])}{sdh_note}, marker_merges={result['marker_merges']})")
+    log(f"status: {'ok' if result['success'] else 'failed'} (cues={len(result['cues'])}, units={len(result['units'])}, chapters={len(result['chapters'])}{sdh_note}, marker_merges={result['marker_merges']})")
 
     output = json.dumps(result, ensure_ascii=False)
     if args.output:
