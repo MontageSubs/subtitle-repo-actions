@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: bilingual_merge.py
-# Version: 2.0
+# Version: 2.0.1
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -139,8 +139,9 @@ BOUNDARY_SEARCH_PATTERNS = {
     "colon": re.compile(r"[:：]+"),
 }
 MARKER_PATTERN = re.compile(r"\u27e6c(\d+)\u27e7")
+MUSIC_MARKER_PATTERN = re.compile(r"\u27e6u(\d+)\u27e7")
+ALL_MARKER_PATTERN = re.compile(r"\u27e6[cu](\d+)\u27e7")
 RESIDUAL_MARKER_PATTERN = re.compile(r"\s*\u27e6[^\u27e6\u27e7]*\u27e7\s*")
-
 
 def log(message):
     print(f"{SCRIPT_NAME}: {message}", file=sys.stderr)
@@ -312,7 +313,7 @@ INFERRED_MIN_SHARE = 0.5
 def find_protected_spans(text, glossary_terms, target_lang=None):
     spans = [(m.start(), m.end()) for m in BOOK_TITLE_PATTERN.finditer(text)]
     spans.extend((m.start(), m.end()) for m in LATIN_WORD_PATTERN.finditer(text))
-    spans.extend((m.start(), m.end()) for m in MARKER_PATTERN.finditer(text))
+    spans.extend((m.start(), m.end()) for m in ALL_MARKER_PATTERN.finditer(text))
     if target_quote_pair(target_lang):
         spans.extend((m.start(), m.end()) for m in EMBEDDED_QUOTE_PATTERN.finditer(text)
                      if m.start() > 0 and m.end() < len(text) and m.end() - m.start() <= EMBEDDED_QUOTE_MAX_CHARS)
@@ -491,19 +492,38 @@ def split_by_markers(translated_text, spans, protected=(), target_lang=None):
     return parts
 
 
+def split_by_music_markers(translated_text, spans):
+    expected_ids = [span["id"] for span in spans]
+    found_ids = [int(g) for g in MUSIC_MARKER_PATTERN.findall(translated_text)]
+    if not found_ids or found_ids != expected_ids:
+        return None
+    chunks = MUSIC_MARKER_PATTERN.split(translated_text)
+    parts = [chunks[i * 2 + 2].strip() for i in range(len(spans))]
+    if chunks[0].strip() and parts:
+        parts[0] = chunks[0].strip() + " " + parts[0]
+    return parts
+
+
 def split_translation(translated_text, spans, protected=(), target_lang=None):
+    method = "single"
     if len(spans) == 1:
-        return [translated_text.strip()], "single"
-    parts = split_by_markers(translated_text, spans, protected, target_lang)
-    if parts is not None:
-        method = "marker_boundary"
+        parts = [translated_text.strip()]
     else:
-        parts, method = split_by_boundary(translated_text, spans, protected, target_lang)
-        if any(span.get("boundary") == "marker" for span in spans[1:]):
-            method = "marker_mismatch"
+        parts = split_by_music_markers(translated_text, spans)
+        if parts is not None:
+            method = "music_marker"
+        else:
+            parts = split_by_markers(translated_text, spans, protected, target_lang)
+            if parts is not None:
+                method = "marker_boundary"
+            else:
+                parts, method = split_by_boundary(translated_text, spans, protected, target_lang)
+                if any(span.get("boundary") == "marker" for span in spans[1:]):
+                    method = "marker_mismatch"
     parts = [RESIDUAL_MARKER_PATTERN.sub(" ", p).strip() for p in parts]
     parts = enforce_punctuation_placement(parts)
-    parts = repair_empty_parts(parts, spans, protected, target_lang)
+    if len(spans) > 1:
+        parts = repair_empty_parts(parts, spans, protected, target_lang)
     return enforce_quote_closure(parts, translated_text, target_lang), method
 
 

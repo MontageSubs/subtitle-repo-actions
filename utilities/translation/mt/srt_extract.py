@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: srt_extract.py
-# Version: 2.0
+# Version: 2.0.1
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -541,6 +541,8 @@ def join_group_text(group, is_music_group):
     pieces = []
     for i, seg in enumerate(group):
         piece = strip_edge_notes(seg["text"]) if is_music_group else seg["text"]
+        if is_music_segment(seg["text"]):
+            piece = f"\u27e6u{seg['cue_id']:04d}\u27e7{piece}"
         if i > 0:
             pieces.append(f" {MARKER_TEMPLATE.format(seg['cue_id'])} " if seg.get("marker_boundary") else " ")
         pieces.append(piece)
