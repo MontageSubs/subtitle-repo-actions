@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: bilingual_merge.py
-# Version: 2.1.2
+# Version: 2.2
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -284,12 +284,18 @@ EMBEDDED_QUOTE_MAX_CHARS = 16
 ORIGINAL_PUNCT_TOLERANCE = {"trail_off": 0.60, "comma": 0.20, "period": 0.20, "colon": 0.20}
 INFERRED_PUNCT_TOLERANCE = 0.15
 INFERRED_MIN_SHARE = 0.5
+PUNCT_PROXIMITY_CHARS = 4
+
+
+def is_leading_punct_run(text, match_start):
+    return match_start > 0 and text[match_start - 1] in NO_LINE_END_CHARS
 
 
 def find_protected_spans(text, glossary_terms, target_lang=None):
     spans = [(m.start(), m.end()) for m in BOOK_TITLE_PATTERN.finditer(text)]
     spans.extend((m.start(), m.end()) for m in LATIN_WORD_PATTERN.finditer(text))
     spans.extend((m.start(), m.end()) for m in MARKER_PATTERN.finditer(text))
+    spans.extend((m.start(), m.end()) for m in ELLIPSIS_PATTERN.finditer(text))
     if target_quote_pair(target_lang):
         spans.extend((m.start(), m.end()) for m in EMBEDDED_QUOTE_PATTERN.finditer(text)
                      if m.start() > 0 and m.end() < len(text) and m.end() - m.start() <= EMBEDDED_QUOTE_MAX_CHARS)
@@ -323,18 +329,20 @@ def resolve_cut(text, cursor, expected, boundary, max_cut, protected=(), target_
     chunk = max(expected - cursor, 0)
     if boundary:
         candidates = [m.end() for m in BOUNDARY_SEARCH_PATTERNS[boundary].finditer(text, cursor)
-                      if cursor < m.end() < ceiling and not inside_protected_span(m.end(), protected)]
+                      if cursor < m.end() < ceiling and not inside_protected_span(m.end(), protected)
+                      and not is_leading_punct_run(text, m.start())]
         if candidates:
             cut = min(candidates, key=lambda pos: abs(pos - expected))
-            if abs(cut - expected) <= max(ORIGINAL_PUNCT_TOLERANCE.get(boundary, 0.20) * chunk, 3):
+            if abs(cut - expected) <= max(ORIGINAL_PUNCT_TOLERANCE.get(boundary, 0.20) * chunk, PUNCT_PROXIMITY_CHARS):
                 return cut, "original"
     inferred = [m.end() for m in GENERAL_PUNCT_SEARCH_PATTERN.finditer(text, cursor)
-                if cursor < m.end() < ceiling and not inside_protected_span(m.end(), protected)]
+                if cursor < m.end() < ceiling and not inside_protected_span(m.end(), protected)
+                and not is_leading_punct_run(text, m.start())]
     inferred += [m.start() for m in LEFT_CUT_PATTERN.finditer(text, cursor)
                  if cursor < m.start() < ceiling and not inside_protected_span(m.start(), protected)]
     if inferred:
         cut = min(inferred, key=lambda pos: abs(pos - expected))
-        if abs(cut - expected) <= max(INFERRED_PUNCT_TOLERANCE * chunk, 2):
+        if abs(cut - expected) <= max(INFERRED_PUNCT_TOLERANCE * chunk, PUNCT_PROXIMITY_CHARS):
             return cut, "inferred"
     boundaries = [b for b in (bd + cursor for bd in word_boundaries(text[cursor:], target_lang))
                   if cursor < b < ceiling and not inside_protected_span(b, protected)]
@@ -552,13 +560,14 @@ def build_bilingual_cues(cues, units, translations, target_lang):
     approx_splits = []
     glossary_terms = collect_glossary_terms(units)
     dash_style = determine_dash_style(cues)
-    
+    cue_text_by_id = {cue["id"]: cue["text"] for cue in cues}
+
     for unit in units:
         spans = unit["spans"]
         translated = translations.get(str(unit["id"]))
         if translated is None:
             for span in spans:
-                cue_segments.setdefault(span["id"], []).append(None)
+                cue_segments.setdefault(span["id"], []).append((span.get("dash_index", 0), None))
             continue
         translated = strip_unsourced_brackets("".join(span["text"] for span in spans), translated)
         protected = find_protected_spans(translated, glossary_terms, target_lang)
@@ -566,11 +575,15 @@ def build_bilingual_cues(cues, units, translations, target_lang):
         if method not in ("single", "original_boundary", "inferred_punctuation", "marker_boundary"):
             approx_splits.append({"unit_id": unit["id"], "cues": [span["id"] for span in spans], "method": method})
         for span, part in zip(spans, parts):
-            cue_segments.setdefault(span["id"], []).append(normalize_translation(part, target_lang))
+            part = normalize_translation(part, target_lang)
+            if span.get("kind") == "music" and not source_is_music(cue_text_by_id.get(span["id"], "")):
+                part = format_music_line(part)
+            cue_segments.setdefault(span["id"], []).append((span.get("dash_index", 0), part))
 
     results = []
     for cue in cues:
-        parts = cue_segments.get(cue["id"])
+        entries = cue_segments.get(cue["id"])
+        parts = [p for _, p in sorted(entries, key=lambda e: e[0])] if entries else None
         if not parts or any(p is None for p in parts):
             translation = None
         elif len(parts) > 1:

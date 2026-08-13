@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: srt_extract.py
-# Version: 2.1.2
+# Version: 2.2
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -73,8 +73,8 @@ TRAILING_CONTINUATION_PATTERN = re.compile(r"(\.{2,}|-{2,}|…)\s*$")
 DIALOGUE_DASH_PATTERN = re.compile(r"(?:^|(?<=\s))-(?!-)\s?")
 STUTTER_WORD_PATTERN = re.compile(r"(?<![A-Za-z])([A-Za-z])-\1(?![A-Za-z])", re.IGNORECASE)
 STUTTER_PREFIX_PATTERN = re.compile(r"(?<![A-Za-z])([A-Za-z])-(?=\1[a-z])", re.IGNORECASE)
-SHORT_REPLY_LETTER_PATTERN = re.compile(r"[A-Za-z]")
-SHORT_REPLY_MAX_LETTERS = 3
+SHORT_REPLY_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9]")
+SHORT_REPLY_MAX_TOKENS = 3
 STUTTER_RESIDUAL_PATTERN = re.compile(r"[A-Za-z]")
 TRAILING_MARK_PATTERN = re.compile(r"[!?…]+$")
 GAP_THRESHOLD_MS = 200
@@ -290,8 +290,8 @@ def has_terminal_punct(text):
 
 def is_short_reply(text, latin_source=True):
     if latin_source:
-        return len(SHORT_REPLY_LETTER_PATTERN.findall(text)) <= SHORT_REPLY_MAX_LETTERS
-    return len(text.strip()) <= SHORT_REPLY_MAX_LETTERS
+        return len(SHORT_REPLY_TOKEN_PATTERN.findall(text)) <= SHORT_REPLY_MAX_TOKENS
+    return len(text.strip()) <= SHORT_REPLY_MAX_TOKENS
 
 
 def update_quote_state(text, is_pending):
@@ -394,12 +394,13 @@ def find_pure_glossary_line(text, glossary, latin_source=True):
 def build_segments(cues, glossary, latin_source=True):
     segments = []
     for cue in cues:
-        for part in split_dialogue(cue["text"]):
+        for dash_index, part in enumerate(split_dialogue(cue["text"])):
             resolved = find_pure_glossary_line(part, glossary, latin_source)
             if not resolved and latin_source:
                 resolved = find_stutter_resolution(part, glossary)
             text = part if resolved or not latin_source else strip_letter_stutter(part)
-            segments.append({"cue_id": cue["id"], "text": text, "start": cue["start"], "end": cue["end"], "resolved": resolved})
+            segments.append({"cue_id": cue["id"], "text": text, "start": cue["start"], "end": cue["end"],
+                              "resolved": resolved, "dash_index": dash_index})
     return assign_merge_sides(segments, latin_source)
 
 
@@ -429,7 +430,7 @@ def group_segments(segments, latin_source=True):
                 reason = merge_reason(current[-1], seg, latin_source)
                 if reason:
                     merged = True
-                    if reason == "marker":
+                    if reason in ("marker", "dash"):
                         seg["marker_boundary"] = True
         if merged:
             current.append(seg)
@@ -551,7 +552,9 @@ def build_units(cues, glossary, latin_source=True):
         for group in member_groups:
             unit_id += 1
             spans = [{"id": s["cue_id"], "start": s["start"], "end": s["end"], "text": s["text"],
-                       "boundary": "marker" if (is_music_chapter or s.get("marker_boundary")) else None} for s in group]
+                       "boundary": "marker" if (is_music_chapter or s.get("marker_boundary")) else None,
+                       "dash_index": s.get("dash_index", 0),
+                       "kind": "music" if is_music_segment(s["text"]) else "dialogue"} for s in group]
             marker_merges += sum(1 for s in group if s.get("marker_boundary"))
             if len(group) == 1 and group[0]["resolved"]:
                 units.append({"id": unit_id, "spans": spans, "text": "", "term_matches": [], "embed_ratio": EMBED_RATIO_DEFAULT, "resolved": group[0]["resolved"]})
