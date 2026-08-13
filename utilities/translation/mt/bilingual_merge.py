@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: bilingual_merge.py
-# Version: 2.1
+# Version: 2.1.1
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -223,26 +223,17 @@ def target_quote_pair(target_lang):
     return TARGET_QUOTE_PAIRS.get((target_lang or "").split("-")[0].lower())
 
 
-def source_starts_with_quote(text):
-    stripped = SOURCE_LEADING_TAG_PATTERN.sub("", text)
-    return bool(stripped) and stripped[0] in ('"', CJK_OPEN_QUOTE)
-
-
-def source_ends_with_quote(text):
-    return bool(text) and text[-1] in ('"', CJK_CLOSE_QUOTE)
-
-
 def restore_quote_markers(translation, source_text, target_lang):
     quotes = target_quote_pair(target_lang)
     if not quotes or not translation:
         return translation
-    if not (source_starts_with_quote(source_text) and source_ends_with_quote(source_text)):
-        return translation
     open_q, close_q = quotes
-    if translation[0] not in ('"', open_q):
-        translation = open_q + translation
-    if translation[-1] not in ('"', close_q):
-        translation = translation + close_q
+    open_count = translation.count(open_q)
+    close_count = translation.count(close_q)
+    if open_count > close_count:
+        translation = translation + close_q * (open_count - close_count)
+    elif close_count > open_count:
+        translation = open_q * (close_count - open_count) + translation
     return translation
 
 
@@ -465,18 +456,17 @@ def enforce_quote_closure(parts, translated_text, target_lang):
     if not quotes or len(parts) < 2:
         return parts
     open_q, close_q = quotes
-    if not (translated_text.startswith(open_q) and translated_text.endswith(close_q)):
-        return parts
-    last = len(parts) - 1
     closed = []
-    for i, part in enumerate(parts):
+    for part in parts:
         if not part:
             closed.append(part)
             continue
-        if i > 0 and not part.startswith(open_q):
-            part = open_q + part
-        if i < last and not part.endswith(close_q):
-            part = part + close_q
+        open_count = part.count(open_q)
+        close_count = part.count(close_q)
+        if open_count > close_count:
+            part = part + close_q * (open_count - close_count)
+        elif close_count > open_count:
+            part = open_q * (close_count - open_count) + part
         closed.append(part)
     return closed
 
@@ -519,14 +509,15 @@ def split_by_markers(translated_text, spans, protected=(), target_lang=None):
 
 def split_translation(translated_text, spans, protected=(), target_lang=None):
     if len(spans) == 1:
-        return [translated_text.strip()], "single"
-    parts = split_by_markers(translated_text, spans, protected, target_lang)
-    if parts is not None:
-        method = "marker_boundary"
+        parts, method = [translated_text.strip()], "single"
     else:
-        parts, method = split_by_boundary(translated_text, spans, protected, target_lang)
-        if any(span.get("boundary") == "marker" for span in spans):
-            method = "marker_mismatch"
+        parts = split_by_markers(translated_text, spans, protected, target_lang)
+        if parts is not None:
+            method = "marker_boundary"
+        else:
+            parts, method = split_by_boundary(translated_text, spans, protected, target_lang)
+            if any(span.get("boundary") == "marker" for span in spans):
+                method = "marker_mismatch"
     parts = [RESIDUAL_MARKER_PATTERN.sub(" ", p).strip() for p in parts]
     parts = enforce_punctuation_placement(parts)
     parts = repair_empty_parts(parts, spans, protected, target_lang)

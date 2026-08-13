@@ -132,7 +132,7 @@ WORD_TOKEN_PATTERN = re.compile(r"[A-Za-z]+(?:['’][A-Za-z]+)*")
 ISOLATED_MERGE_MAX_WORDS = 0
 ISOLATED_MAX_CHARS_NON_LATIN = 4
 SCENE_ADJACENCY_MS = 1500
-SCENE_CHANGE_MS = 4000
+SCENE_CHANGE_MS = 30000
 MARKER_TEMPLATE = "\u27e6c{:04d}\u27e7"
 
 MUSIC_NOTE_CHARS = "\u2669\u266a\u266b\u266c"
@@ -369,12 +369,12 @@ def assign_merge_sides(segments, latin_source=True):
     for i, seg in enumerate(segments):
         if seg["resolved"] or is_music_segment(seg["text"]) or not is_isolated_short(seg["text"], latin_source):
             continue
-        if i + 1 < len(segments):
+        if i + 1 < len(segments) and not is_music_segment(segments[i + 1]["text"]):
             gap_next = time_to_ms(segments[i + 1]["start"]) - time_to_ms(seg["end"])
             if gap_next <= SCENE_ADJACENCY_MS:
                 seg["merge_side"] = "next"
                 continue
-        if i > 0:
+        if i > 0 and not is_music_segment(segments[i - 1]["text"]):
             gap_prev = time_to_ms(seg["start"]) - time_to_ms(segments[i - 1]["end"])
             if gap_prev <= SCENE_ADJACENCY_MS:
                 seg["merge_side"] = "prev"
@@ -382,9 +382,13 @@ def assign_merge_sides(segments, latin_source=True):
 
 
 def merge_reason(prev_seg, curr_seg, latin_source=True):
+    prev_is_music = is_music_segment(prev_seg["text"])
+    curr_is_music = is_music_segment(curr_seg["text"])
+    if prev_is_music != curr_is_music:
+        return None
     if prev_seg["cue_id"] == curr_seg["cue_id"]:
         return "dash" if is_short_reply(curr_seg["text"], latin_source) else None
-    if is_music_segment(prev_seg["text"]) and is_music_segment(curr_seg["text"]):
+    if prev_is_music and curr_is_music:
         return "music" if music_continuation(curr_seg["text"]) else None
     if prev_seg.get("merge_side") == "next" or curr_seg.get("merge_side") == "prev":
         return "marker"
@@ -555,9 +559,10 @@ def match_glossary_terms(text, glossary):
 
 def join_group_text(group, is_music_group):
     pieces = []
+    is_multi_music = is_music_group and len(group) > 1
     for i, seg in enumerate(group):
         piece = strip_edge_notes(seg["text"]) if is_music_group else seg["text"]
-        if is_music_group:
+        if is_multi_music:
             marker = f"{MARKER_TEMPLATE.format(seg['cue_id'])} "
             pieces.append(f" {marker}" if i > 0 else marker)
         elif i > 0:
