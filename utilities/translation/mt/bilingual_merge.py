@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: bilingual_merge.py
-# Version: 2.1.1
+# Version: 2.1.2
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -18,32 +18,6 @@
 #     依据每个翻译单元自带的 `spans` 列表（原始片段文本+时间轴），用标点/
 #     长度比例边界估计（可用时以结巴分词辅助定位）拆分合并翻译回各原始
 #     字幕片段。
-#
-#     v1.7: Spans marked with boundary="marker" (isolated short cues merged
-#     cross-cue by srt_extract.py v1.7) are split on the literal ⟦cNNNN⟧
-#     token instead of guessed punctuation/ratio boundaries. Token order/
-#     identity is verified against the spans before trusting it; any
-#     mismatch falls back to the existing estimation path for that unit
-#     (with markers treated as protected spans so estimation never cuts
-#     through a stray token). Any leftover token is stripped before output
-#     regardless of which path was taken.
-#     v1.7: 标记为 boundary="marker" 的接缝（由 srt_extract.py v1.7 跨cue
-#     合并的孤立短句）按字面 ⟦cNNNN⟧ 标记硬切割，不再靠标点/比例猜测。
-#     切割前先核对标记的顺序与编号是否与spans吻合，不吻合则该unit整体
-#     回退到原有估计路径（并将标记视为受保护片段，估计逻辑绝不会从中切开）。
-#     无论走哪条路径，残留标记在输出前一律清除。
-#
-#     v1.8: 新增 split_by_full_markers 分支，专为 srt_extract.py v1.9 起
-#     全员携带 ⟦cNNNN⟧ 的音乐组服务——按 cue id 建字典取值而非要求译文中
-#     标记的出现顺序与 spans 顺序一致，因此即便翻译引擎打乱了歌词行序，
-#     仍能按 id 精确归位（原有仅部分片段带标记的接缝切割路径不变，两者
-#     按 spans 是否全员携带 marker 分派）。
-#     v1.8: Adds split_by_full_markers for srt_extract.py v1.9's fully
-#     marked music groups (every span carries ⟦cNNNN⟧) — resolves content
-#     by cue id lookup rather than requiring markers to appear in the same
-#     order as spans, so reordered song lines still land correctly. The
-#     existing partial-marker seam-cutting path is unchanged; dispatch is
-#     based on whether every span in the unit carries a marker.
 #
 # Features:
 #     - Reconstructs bilingual subtitle blocks maintaining original cue timing.

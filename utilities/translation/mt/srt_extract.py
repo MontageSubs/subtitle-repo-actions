@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: srt_extract.py
-# Version: 2.1
+# Version: 2.1.2
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -15,49 +15,6 @@
 #     从 SRT 字幕文件中提取字幕块，结合句尾标点、时间间隔（GAP）、引号与
 #     口吃/残留规则进行对话拆分与单元合并，并标注词表命中位置，
 #     输出供后续机器翻译脚本使用的结构化 JSON 数据。
-#
-#     v1.7: Isolated short cues (<=ISOLATED_MAX_WORDS words, e.g. "Shit.")
-#     no longer stay stranded without context. They merge cross-cue toward
-#     whichever neighbor falls within SCENE_ADJACENCY_MS (next preferred,
-#     falling back to prev), bypassing the terminal-punctuation guard that
-#     normally blocks merging. The resulting join is marked with an inline
-#     ⟦cNNNN⟧ token (also recorded as span["boundary"]="marker") so the
-#     paired bilingual_merge.py can split on this hard boundary instead of
-#     guessing from punctuation/length ratio alone.
-#     v1.7: 孤立短句（≤ISOLATED_MAX_WORDS个单词，如"Shit."）不再因缺乏上下文
-#     而独立成句。会跨cue向阈值内最近的邻居合并（优先向后，其次向前），
-#     绕开原本阻止合并的句尾标点检查。合并接缝会插入 ⟦cNNNN⟧ 行内标记
-#     （同时记录为 span["boundary"]="marker"），供配套的 bilingual_merge.py
-#     按此硬边界拆分，而非仅依赖标点/长度比例猜测。
-#
-#     v1.8: Units are now grouped into `chapters`, each a run of units of the
-#     same kind (dialogue/music) with no gap exceeding SCENE_CHANGE_MS between
-#     them. Music and dialogue are tracked as two independent timelines, so
-#     interleaved music cues (e.g. a song threaded between dialogue lines)
-#     collapse into their own chapter instead of being scattered across the
-#     surrounding dialogue chapters, while opening/closing songs separated by
-#     a real scene gap still land in separate chapters.
-#     v1.8: 单元现在按 `chapters` 分组，每个章节是一段同类型（对话/音乐）且
-#     彼此间隔不超过 SCENE_CHANGE_MS 的连续单元。音乐与对话各自维护独立时间线，
-#     因此穿插在对话中的音乐（如对话间隔中的歌曲）会被归入同一个独立章节，
-#     而非散落在前后对话章节里；片头曲与片尾曲之间若确有场景间隔，仍会分属
-#     不同章节。
-#
-#     v1.9: cue id 不再取自源 SRT 文件自身编号（该编号在 SDH 整行被剥离后
-#     不再连续可靠），统一改为内部严格递增。音乐章节（同一首歌/连续歌词的
-#     整个 chapter）不再按续接规则拆成多个各自独立发送的 unit——那样跨
-#     unit 边界发送时（各自一个 `<span>`）翻译引擎仍可能在响应里串位——
-#     而是整章合并为一个 unit，每句歌词前都带 ⟦cNNNN⟧，只用一个 `<span>`
-#     发送。下游按 cue id 精确回填，即便引擎打乱了歌词行序也能正确归位。
-#     v1.9: Cue ids no longer come from the source SRT's own numbering
-#     (unreliable once SDH-only lines are dropped entirely); now strictly
-#     sequential internally. A music chapter (one song/lyric run) is no
-#     longer split into several continuation-grouped units each sent as its
-#     own `<span>` — the engine could still scramble content across those
-#     span boundaries in its response. It's now merged into a single unit
-#     for the whole chapter, every line prefixed with ⟦cNNNN⟧, sent as one
-#     `<span>`. Downstream relocates content by cue id, correct even if the
-#     engine reorders song lines.
 #
 # Features:
 #     - Parses SRT subtitle structures and normalizes text and timestamps.
@@ -73,26 +30,19 @@
 #       batching can send whole scenes as translation context instead of
 #       splitting arbitrarily by character count.
 #
-# 功能:
-#     - 解析 SRT 字幕结构，标准化时间轴与文本格式。
-#     - 识别并拆分双人对话破折号（'- '），处理字母口吃与词表名称修复。
-#     - 基于标点、时间间隔（GAP_THRESHOLD_MS）与跨行引号逻辑切分/合并翻译单元。
-#     - 单元文本为自然连续原文，不嵌入任何标记符号；随附 `spans`（被吸收的
-#       原始片段及各自时间轴/原文）供下游拆分回填。
-#     - 标注词表命中的位置、原文与固定译名（`term_matches`）及嵌入比例
-#       （`embed_ratio`），是否嵌入原文或改用占位符由翻译脚本决定。
-#     - 将单元归入 `chapters`（场景/歌曲级片段），供下游按整场景批量发送
-#       翻译上下文，而非仅按字符数任意切分。
-#     - 默认剥离 SDH（听障辅助）内容：整行 SDH 括号内容丢弃；说话人标签
-#       （如 "JOHN: text"）剥离逻辑严格取材于 Subtitle Edit 的
-#       RemoveTextForHI.cs（RemoveColon，OnlyUppercase=True 默认档位）：
-#       仅识别半角冒号，前缀必须整体全大写才剥离，并保留原版的括号内冒号
-#       豁免、数字间冒号豁免、叙述性前缀豁免（ShouldRemoveNarrator）、
-#       两行 cue 中首行未终止标点时的续行豁免。全角冒号（如中文"："）与
-#       非全大写前缀（如 "Both:"）按原版行为一律不剥离——这是源字幕格式
-#       不规范，不在本工具修复范围内。（--keep-sdh 可关闭整个 SDH 剥离；
-#       含音符的 cue 整体豁免于说话人标签剥离之外。）
-#     - 音乐歌词行按大小写判断是否跨 cue 续接合并，合并组发送翻译前剥离首尾音符。
+# 功能特性：
+#     - 解析 SRT 字幕结构，并对文本和时间戳进行标准化。
+#     - 拆分以前导破折号 ('- ') 标记的多发言者对话行。
+#     - 解决名称结巴问题，并根据提供的术语表匹配术语。
+#     - 根据标点、停顿间隙和引号连续性对字幕句组进行分组。
+#     - 单元包含自然的无标记合并文本及 `spans` 列表（原分段
+#       文本/时间），以便下游在无需标记的情况下进行重建。
+#     - 将术语匹配标注为 `term_matches`（位置 + 原文 + 译文）
+#       及 `embed_ratio`；占位符与行内名称的最终决定将推迟到
+#       翻译步骤，由该步骤管理批处理和上下文。
+#     - 将单元分组为 `chapters`（场景/歌曲级别），以便下游批处理
+#       能将整个场景作为翻译上下文发送，而非简单地按字符数
+#       进行随意拆分。
 #
 # Usage / 用法:
 #     python srt_extract.py --input en.srt --glossary GLOSSARY.md --output extract.json

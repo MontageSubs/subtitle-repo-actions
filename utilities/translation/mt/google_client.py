@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: google_client.py
-# Version: 2.1.1
+# Version: 2.1.2
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -23,47 +23,6 @@
 #     的嵌入比例生成"固定译名直接嵌入原文"与/或"占位符"两个版本分别发送，
 #     依据未翻译残留诊断择优采用并在本地回填占位符；若最终结果仍疑似未
 #     翻译，单独重发一次原句作为质量兜底。
-#
-#     v1.5: Batch payload switched from block-level `<div>` (one per unit,
-#     newline-joined) to inline `<span>` (concatenated with no separator).
-#     Block elements are a natural segmentation signal to NMT engines even
-#     within a single request, silencing cross-unit context; inline elements
-#     carry no such signal, letting the whole batch read as one continuous
-#     passage. Effect should be confirmed against real API output, not
-#     assumed from the tag semantics alone.
-#     v1.5: 批量payload由block级`<div>`（每unit一个，换行分隔）改为行内
-#     `<span>`（无分隔符直接拼接）。block级元素即便在同一次请求内也是NMT
-#     引擎天然的分段信号，会削弱跨unit上下文；行内元素不带这层信号，让整批
-#     文本读起来是连续一段。实际效果需拿真实API返回核实，不能仅凭标签语义
-#     假定生效。
-#
-#     v1.6: Reinstates block-level `<div>` — now one per chapter (a scene/song
-#     run from srt_extract.py's `chapters`) instead of one per unit, wrapping
-#     the same inline `<span>`-concatenated units it holds. This confines the
-#     v1.5 "read as one continuous passage" effect to within a chapter, while
-#     the `<div>` boundary still signals a real context break between scenes.
-#     Batching now packs whole chapters into a batch (falling back to a
-#     char-greedy split only when a single chapter alone exceeds batch_chars),
-#     replacing the old unit-by-unit char-count split that ignored scene
-#     boundaries entirely.
-#     v1.6: 恢复block级`<div>`——但改为每章节（srt_extract.py `chapters`中的
-#     场景/歌曲片段）一个，而非每unit一个，内部仍是原有行内`<span>`拼接。
-#     这把v1.5"读作连续一段"的效果收束在单个章节内，同时`<div>`边界仍能
-#     标示场景间的真实上下文断裂。分批现在整章节打包进一批（仅当单个章节
-#     本身超过batch_chars时才按字符数贪心拆分），取代原先完全无视场景边界、
-#     逐unit按字符数切分的方式。
-#
-#     v1.7: 移除 flatten_units 中额外自增的 span id（原先靠 index_map 反查
-#     回 unit_id:variant），改为直接以 "unit_id:variant" 字符串本身作为
-#     span id（SPAN_PATTERN 相应放宽以接受冒号）。原有转换层纯属绕开正则
-#     限制的技术债，删除后 span id 与 unit id 一一对应，日志/调试输出不再
-#     需要额外换算。
-#     v1.7: Removed flatten_units' extra auto-increment span id (previously
-#     reverse-mapped back to unit_id:variant via index_map) in favor of using
-#     the "unit_id:variant" string itself as the span id (SPAN_PATTERN
-#     loosened to accept a colon). The old indirection existed only to work
-#     around the regex's character class; removing it makes span id and unit
-#     id directly correspond, with no extra translation step in logs/debug.
 #
 # Features:
 #     - Concurrent HTTP requests via ThreadPoolExecutor.
