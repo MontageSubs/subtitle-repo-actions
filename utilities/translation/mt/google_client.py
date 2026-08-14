@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: google_client.py
-# Version: 2.3.0
+# Version: 2.3.1
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -44,6 +44,12 @@
 #       untranslated-residue diagnostic (Latin<->CJK word/char counting).
 #     - Single isolated retry (no loop) when the final chosen result still
 #       looks untranslated; kept only if the retry actually differs.
+#     - Context-window fallback (±CONTEXT_RETRY_RADIUS units) for units still
+#       missing or implausibly short/long after all above steps: re-sent
+#       through the same div/span-wrapped batch path (inheriting its own
+#       retry/isolation), so boundary tokens swallowed by repetitive content
+#       (e.g. onomatopoeia) get a properly isolated second chance. Units
+#       still unrecovered are passed through unchanged rather than blocking.
 #
 # 功能:
 #     - 基于 ThreadPoolExecutor 的并发 HTTP 请求。
@@ -59,6 +65,10 @@
 #     - 针对失败或部分失败请求的健壮重试机制。
 #     - 按单元自身嵌入比例生成嵌入版/占位符版，依未翻译诊断择优并回填。
 #     - 最终结果仍疑似未翻译时单独重发一次（不循环），结果不同才采用。
+#     - 前述步骤后仍缺失/长度异常的单元，取其前后各 CONTEXT_RETRY_RADIUS
+#       个单元一并送入与主流程相同的 div/span 包裹批处理路径重跑（天然继承
+#       该路径自身的批内重试与逐条隔离能力），修复重复内容（如拟声词）吞掉
+#       边界标记的问题；仍无法恢复则原样放行，不阻塞下游。
 #
 # Usage / 用法:
 #     python google_client.py --input extract.json --source-lang en --target-lang zh-CN --output translations.json
@@ -419,9 +429,7 @@ def retry_single(text, source_lang, target_lang, api_key):
     return result.get("retry")
 
 
-WINDOW_MARKER_PATTERN = re.compile(r"\u27e6c(\d+)\u27e7")
-WINDOW_CONTEXT_RADIUS = 20
-WINDOW_KEEP_RADIUS = 2
+CONTEXT_RETRY_RADIUS = 5
 LENGTH_RATIO_MIN = 0.15
 LENGTH_RATIO_MAX = 6.0
 
@@ -438,28 +446,15 @@ def is_length_plausible(source_text, translated_text):
     return LENGTH_RATIO_MIN <= ratio <= LENGTH_RATIO_MAX
 
 
-def retry_windowed(units, suspect_id, source_lang, target_lang, api_key):
+def retry_context(units, suspect_id, source_lang, target_lang, api_key):
     index = {unit["id"]: i for i, unit in enumerate(units)}
     i = index[suspect_id]
-    window = units[max(0, i - WINDOW_CONTEXT_RADIUS):i + WINDOW_CONTEXT_RADIUS + 1]
+    window = units[max(0, i - CONTEXT_RETRY_RADIUS):i + CONTEXT_RETRY_RADIUS + 1]
     if len(window) < 2:
         return {}
-    pieces = [window[0]["text"]]
-    for unit in window[1:]:
-        pieces.append(f" \u27e6c{unit['id']:04d}\u27e7 ")
-        pieces.append(unit["text"])
-    windowed_text = "".join(pieces)
-    result, _missing = translate_batch([[{"id": "window", "text": windowed_text}]], source_lang, target_lang, api_key)
-    response = result.get("window")
-    if response is None:
-        return {}
-    expected_ids = [unit["id"] for unit in window[1:]]
-    found_ids = [int(g) for g in WINDOW_MARKER_PATTERN.findall(response)]
-    if found_ids != expected_ids:
-        return {}
-    chunks = WINDOW_MARKER_PATTERN.split(response)[0::2]
-    keep_ids = {unit["id"] for unit in units[max(0, i - WINDOW_KEEP_RADIUS):i + WINDOW_KEEP_RADIUS + 1]}
-    return {unit["id"]: chunk.strip() for unit, chunk in zip(window, chunks) if unit["id"] in keep_ids}
+    items = [{"id": unit["id"], "text": unit["text"]} for unit in window]
+    result, _missing = translate_batch([items], source_lang, target_lang, api_key)
+    return result
 
 
 def translate_units(units, chapters, source_lang, target_lang, api_key, batch_chars, concurrency):
@@ -483,15 +478,21 @@ def translate_units(units, chapters, source_lang, target_lang, api_key, batch_ch
 
     unit_by_id = {unit["id"]: unit for unit in units}
     suspects = [uid for uid, text in results.items()
-                if text is not None and has_content(unit_by_id[uid]["text"])
-                and (not has_content(text) or not is_length_plausible(unit_by_id[uid]["text"], text))]
+                if has_content(unit_by_id[uid]["text"])
+                and (text is None or not has_content(text) or not is_length_plausible(unit_by_id[uid]["text"], text))]
+    resolved = set()
     for uid in suspects:
-        recovered = retry_windowed(units, uid, source_lang, target_lang, api_key)
-        if recovered:
-            log(f"windowed retry around unit {uid}: recovered {sorted(recovered)}")
-            results.update(recovered)
+        if uid in resolved:
+            continue
+        recovered = retry_context(units, uid, source_lang, target_lang, api_key)
+        fixed = {i for i in suspects if i in recovered and has_content(recovered[i])}
+        if fixed:
+            log(f"context retry radius={CONTEXT_RETRY_RADIUS} around unit {uid}: recovered {sorted(fixed, key=str)}")
+            results.update({i: recovered[i] for i in fixed})
         else:
-            log(f"windowed retry around unit {uid}: markers did not align, left as-is")
+            log(f"context retry radius={CONTEXT_RETRY_RADIUS} around unit {uid}: no recovery, kept as-is")
+            fixed = {uid}
+        resolved |= fixed
 
     skipped = [uid for uid, text in results.items() if text is None]
     translations = {str(uid): text for uid, text in results.items() if text is not None}
