@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: google_client.py
-# Version: 2.1.2
+# Version: 2.3.0
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -32,6 +32,13 @@
 #     - Protective inline HTML formatting (<span> tags) to isolate units and
 #       map results within a chapter's <div>, keeping context continuous
 #       inside a scene while still signaling a break between scenes.
+#     - Two alignment modes (ALIGNMENT_MODE, switchable via --alignment-mode):
+#       "span" trusts the provider's returned <span id> boundaries; "marker"
+#       (default) additionally prefixes each unit with an ⟦gID⟧ token and
+#       ignores span boundaries on parse, splitting the flattened response
+#       purely on these tokens so mid-batch mis-splitting cannot misalign
+#       units. Units resolving to punctuation-only text where the source had
+#       real content are treated as missing, feeding the existing retry path.
 #     - Robust retry mechanism for failed or partially failed translation batches.
 #     - Per-unit inline-name / placeholder dual variants, chosen by an
 #       untranslated-residue diagnostic (Latin<->CJK word/char counting).
@@ -44,6 +51,11 @@
 #       （DEFAULT_BATCH_CHARS），仅当单个章节超限时才按字符数兜底拆分。
 #     - 使用 HTML 行内 <span> 标签在章节 <div> 内保护并隔离单元、确保对应
 #       关系，令场景内上下文连续，同时场景间仍有边界信号。
+#     - 两种对齐模式（ALIGNMENT_MODE，可通过 --alignment-mode 切换）：
+#       "span" 信任供应商返回的 <span id> 边界；"marker"（默认）额外为每个
+#       单元前置 ⟦gID⟧ 标记，解析时完全无视 span 边界，仅按该标记切分展平
+#       后的响应文本，杜绝供应商在批内错误拆分内容导致的错位。译文剥离标点
+#       后为空、但原文本身有实际内容的单元一律视为缺失，交由既有重试路径处理。
 #     - 针对失败或部分失败请求的健壮重试机制。
 #     - 按单元自身嵌入比例生成嵌入版/占位符版，依未翻译诊断择优并回填。
 #     - 最终结果仍疑似未翻译时单独重发一次（不循环），结果不同才采用。
@@ -87,6 +99,7 @@ PROGRESS_INTERVAL = 20
 
 SPAN_PATTERN = re.compile(r'<span[^>]*id=["\']?([a-zA-Z0-9:]+)["\']?[^>]*>(.*?)</span>', re.DOTALL | re.IGNORECASE)
 ITALIC_PATTERN = re.compile(r"<i>.*?</i>", re.DOTALL)
+TAG_PATTERN = re.compile(r"<[^>]+>")
 USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 
@@ -94,6 +107,11 @@ DEBUG_MODE = False
 DEBUG_RAW_IN_FILE = None
 DEBUG_RAW_OUT_FILE = None
 DEBUG_LOCK = threading.Lock()
+
+ALIGNMENT_MODE = "marker"
+GROUP_MARKER_TEMPLATE = "\u27e6g{}\u27e7"
+GROUP_MARKER_PATTERN = re.compile(r"\u27e6g([^\u27e6\u27e7]+)\u27e7")
+CONTENT_CHAR_PATTERN = re.compile(r"\w", re.UNICODE)
 
 EMBED_RATIO_THRESHOLD = 0.30
 TERM_PLACEHOLDER_TEMPLATE = "\u27e6T{:02d}\u27e7"
@@ -132,13 +150,16 @@ def log(message):
 
 
 def escape_html(text):
-    return (text.replace("&", "&amp;").replace("<", "&lt;")
-                .replace(">", "&gt;").replace('"', "&quot;").replace("'", "&#39;"))
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def unescape_html(text):
     return (text.replace("&amp;", "&").replace("&lt;", "<")
                 .replace("&gt;", ">").replace("&quot;", '"').replace("&#39;", "'"))
+
+
+def has_content(text):
+    return bool(text) and bool(CONTENT_CHAR_PATTERN.search(text))
 
 
 def split_oversized_chapter(items, batch_chars):
@@ -184,23 +205,43 @@ def build_batches(items, chapter_groups, batch_chars):
     return batches
 
 
-def build_chapter_html(group):
-    spans = "".join(f'<span id="{item["id"]}">{escape_html(item["text"])}</span>' for item in group)
+def build_chapter_html(group, indices):
+    marker = ALIGNMENT_MODE == "marker"
+    spans = "".join(
+        f'<span id={indices[item["id"]]}>'
+        f'{GROUP_MARKER_TEMPLATE.format(indices[item["id"]]) if marker else ""}'
+        f'{escape_html(item["text"])}</span>'
+        for item in group
+    )
     return f"<div>{spans}</div>"
 
 
-def build_request_body(batch, source_lang, target_lang):
-    html = "".join(build_chapter_html(group) for group in batch)
+def build_request_body(batch, source_lang, target_lang, indices):
+    html = "".join(build_chapter_html(group, indices) for group in batch)
     return json.dumps([[[html], source_lang, target_lang], "te"]).encode("utf-8")
 
 
-def parse_translated_html(html):
+def parse_by_spans(html):
     result = {}
     for match in SPAN_PATTERN.finditer(html):
-        raw_idx = match.group(1)
-        idx = int(raw_idx) if raw_idx.isdigit() else raw_idx
+        idx = int(match.group(1))
         text = unescape_html(ITALIC_PATTERN.sub("", match.group(2))).strip()
         result[idx] = f"{result[idx]} {text}" if idx in result else text
+    return result
+
+
+def parse_by_markers(html):
+    flat = unescape_html(TAG_PATTERN.sub("", ITALIC_PATTERN.sub("", html)))
+    parts = GROUP_MARKER_PATTERN.split(flat)
+    result = {}
+    for i in range(1, len(parts), 2):
+        if parts[i].isdigit():
+            result[int(parts[i])] = parts[i + 1].strip()
+    return result
+
+
+def parse_translated_html(html):
+    result = parse_by_markers(html) if ALIGNMENT_MODE == "marker" else parse_by_spans(html)
     if DEBUG_MODE and not result:
         with DEBUG_LOCK:
             log(f"debug: parse_translated_html found NO matching blocks in HTML. Head: {html[:200]}")
@@ -208,7 +249,10 @@ def parse_translated_html(html):
 
 
 def call_google(batch, source_lang, target_lang, api_key):
-    body = build_request_body(batch, source_lang, target_lang)
+    items = [item for group in batch for item in group]
+    indices = {item["id"]: i for i, item in enumerate(items, start=1)}
+    id_by_index = {i: item_id for item_id, i in indices.items()}
+    body = build_request_body(batch, source_lang, target_lang, indices)
     if DEBUG_RAW_IN_FILE:
         with DEBUG_LOCK, open(DEBUG_RAW_IN_FILE, "ab") as f:
             f.write(body + b"\n")
@@ -225,7 +269,20 @@ def call_google(batch, source_lang, target_lang, api_key):
             with DEBUG_LOCK, open(DEBUG_RAW_OUT_FILE, "ab") as f:
                 f.write(raw_response + b"\n")
         payload = json.loads(raw_response.decode("utf-8"))
-    return parse_translated_html(payload[0][0])
+    parsed = parse_translated_html(payload[0][0])
+    source_by_id = {item["id"]: item["text"] for item in items}
+    result = {}
+    for idx, text in parsed.items():
+        item_id = id_by_index.get(idx)
+        if item_id is None:
+            continue
+        if has_content(text) or not has_content(source_by_id.get(item_id, "")):
+            result[item_id] = text
+    return result
+
+
+def cue_ref(item_id):
+    return str(item_id).split(":", 1)[0]
 
 
 def translate_batch(batch, source_lang, target_lang, api_key):
@@ -241,19 +298,15 @@ def translate_batch(batch, source_lang, target_lang, api_key):
         missing = expected_ids - result.keys()
         if not missing:
             return result, []
-            
-        log(f"attempt {attempt}: missing {len(missing)} of {len(items)} units")
-        if DEBUG_MODE:
-            with DEBUG_LOCK:
-                log(f"debug: Expected IDs: {sorted(list(expected_ids), key=str)}")
-                log(f"debug: Received IDs: {sorted(list(result.keys()), key=str)}")
-                
+
+        missing_cues = sorted({cue_ref(i) for i in missing}, key=str)
+        log(f"attempt {attempt}: missing {len(missing)} of {len(items)} units, cues: {', '.join(missing_cues)}")
         if attempt < MAX_ATTEMPTS:
             time.sleep(RETRY_DELAY)
 
     if len(items) > 1:
         by_id = {item["id"]: item for item in items}
-        log(f"isolating {len(missing)} unit(s) still missing after batch retries")
+        log(f"isolating {len(missing)} unit(s) still missing, cues: {', '.join(sorted({cue_ref(i) for i in missing}, key=str))}")
         for uid in sorted(missing, key=str):
             solo_result, _solo_missing = translate_batch([[by_id[uid]]], source_lang, target_lang, api_key)
             if uid in solo_result:
@@ -366,16 +419,11 @@ def retry_single(text, source_lang, target_lang, api_key):
     return result.get("retry")
 
 
-CONTENT_CHAR_PATTERN = re.compile(r"\w", re.UNICODE)
 WINDOW_MARKER_PATTERN = re.compile(r"\u27e6c(\d+)\u27e7")
 WINDOW_CONTEXT_RADIUS = 20
 WINDOW_KEEP_RADIUS = 2
 LENGTH_RATIO_MIN = 0.15
 LENGTH_RATIO_MAX = 6.0
-
-
-def has_content(text):
-    return bool(text) and bool(CONTENT_CHAR_PATTERN.search(text))
 
 
 def content_length(text):
@@ -451,7 +499,7 @@ def translate_units(units, chapters, source_lang, target_lang, api_key, batch_ch
 
 
 def main():
-    global DEBUG_MODE, DEBUG_RAW_IN_FILE, DEBUG_RAW_OUT_FILE
+    global DEBUG_MODE, DEBUG_RAW_IN_FILE, DEBUG_RAW_OUT_FILE, ALIGNMENT_MODE
     
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", default=None)
@@ -461,6 +509,7 @@ def main():
     parser.add_argument("--batch-chars", type=int, default=DEFAULT_BATCH_CHARS)
     parser.add_argument("--concurrency", type=int, default=DEFAULT_CONCURRENCY)
     parser.add_argument("--api-key", default=None)
+    parser.add_argument("--alignment-mode", choices=["span", "marker"], default=None)
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--debug-raw-in", default=None)
     parser.add_argument("--debug-raw-out", default=None)
@@ -469,6 +518,8 @@ def main():
     DEBUG_MODE = args.debug or os.environ.get("DEBUG") == "1"
     DEBUG_RAW_IN_FILE = args.debug_raw_in
     DEBUG_RAW_OUT_FILE = args.debug_raw_out
+    if args.alignment_mode:
+        ALIGNMENT_MODE = args.alignment_mode
 
     raw = open(args.input, encoding="utf-8").read() if args.input else sys.stdin.read()
     payload = json.loads(raw)

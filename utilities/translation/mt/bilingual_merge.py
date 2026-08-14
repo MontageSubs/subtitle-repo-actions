@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: bilingual_merge.py
-# Version: 2.2
+# Version: 2.3.0
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -78,6 +78,20 @@ _jieba_checked = False
 
 def is_chinese_target(target_lang):
     return (target_lang or "").split("-")[0].lower() == "zh"
+
+
+LATIN_PUNCT_SOURCE_LANGS = {
+    "en", "es", "fr", "de", "it", "pt", "nl", "sv", "da", "no", "fi",
+    "pl", "cs", "hu", "ro", "tr", "id", "vi", "ms", "tl", "ca", "eu", "gl",
+}
+
+
+def uses_latin_punctuation(source_lang):
+    return (source_lang or "").split("-")[0].lower() in LATIN_PUNCT_SOURCE_LANGS
+
+
+def punctuation_anchors_enabled(source_lang, target_lang):
+    return is_chinese_target(target_lang) and uses_latin_punctuation(source_lang)
 
 
 def ensure_jieba():
@@ -275,6 +289,20 @@ def classify_boundary(text):
     return None
 
 
+def resolve_anchor_cuts(text, boundary_types, protected):
+    indices_by_type = {}
+    for i, boundary in enumerate(boundary_types):
+        if boundary:
+            indices_by_type.setdefault(boundary, []).append(i)
+    anchors = {}
+    for boundary, indices in indices_by_type.items():
+        candidates = [m.end() for m in BOUNDARY_SEARCH_PATTERNS[boundary].finditer(text)
+                      if not inside_protected_span(m.end(), protected) and not is_leading_punct_run(text, m.start())]
+        if len(candidates) == len(indices):
+            anchors.update(zip(indices, candidates))
+    return anchors
+
+
 CLOSING_TAIL_CHARS = "'\"”’)\\]}》」』】〕＞〉»›"
 GENERAL_PUNCT_SEARCH_PATTERN = re.compile(r"[，,、；;。.!?！？：:…]+[" + CLOSING_TAIL_CHARS + r"]*")
 LEFT_CUT_PATTERN = re.compile(r"[“「『（([{＜〈《【〔„‚«‹¿¡]")
@@ -323,9 +351,11 @@ def escape_protected_span(pos, protected):
     return pos
 
 
-def resolve_cut(text, cursor, expected, boundary, max_cut, protected=(), target_lang=None):
+def resolve_cut(text, cursor, expected, boundary, max_cut, protected=(), target_lang=None, anchor=None):
     limit = len(text)
     ceiling = min(limit, max_cut)
+    if anchor is not None and cursor < anchor < ceiling:
+        return anchor, "original"
     chunk = max(expected - cursor, 0)
     if boundary:
         candidates = [m.end() for m in BOUNDARY_SEARCH_PATTERNS[boundary].finditer(text, cursor)
@@ -363,8 +393,10 @@ def enforce_punctuation_placement(parts):
     return [p.strip() for p in parts]
 
 
-def split_by_boundary(translated_text, spans, protected=(), target_lang=None):
+def split_by_boundary(translated_text, spans, protected=(), target_lang=None, source_lang=None):
     boundary_types = [classify_boundary(span["text"]) for span in spans[:-1]]
+    anchors = resolve_anchor_cuts(translated_text, boundary_types, protected) \
+        if punctuation_anchors_enabled(source_lang, target_lang) else {}
     lengths = [effective_length(span["text"]) for span in spans]
     total = sum(lengths) or 1
     
@@ -400,7 +432,7 @@ def split_by_boundary(translated_text, spans, protected=(), target_lang=None):
             expected = len(translated_text) * target_ratio
             
         max_cut = len(translated_text) - (span_count - 1 - i)
-        cut, tag = resolve_cut(translated_text, cursor, expected, boundary, max_cut, protected, target_lang)
+        cut, tag = resolve_cut(translated_text, cursor, expected, boundary, max_cut, protected, target_lang, anchors.get(i))
         tags.append(tag)
         parts.append(translated_text[cursor:cut].strip())
         cursor = cut
@@ -419,7 +451,7 @@ def has_content(text):
     return bool(WORD_CHAR_PATTERN.search(text))
 
 
-def repair_empty_parts(parts, spans, protected=(), target_lang=None):
+def repair_empty_parts(parts, spans, protected=(), target_lang=None, source_lang=None):
     parts = list(parts)
     for i, part in enumerate(parts):
         if has_content(part):
@@ -428,7 +460,7 @@ def repair_empty_parts(parts, spans, protected=(), target_lang=None):
         if not (0 <= neighbor < len(parts)):
             continue
         lo, hi = sorted((i, neighbor))
-        fixed, _ = split_by_boundary(parts[neighbor], spans[lo:hi + 1], protected, target_lang)
+        fixed, _ = split_by_boundary(parts[neighbor], spans[lo:hi + 1], protected, target_lang, source_lang)
         parts[lo], parts[hi] = fixed
     return parts
 
@@ -465,7 +497,7 @@ def split_by_full_markers(translated_text, spans):
     return [by_id[span["id"]].strip() for span in spans]
 
 
-def split_by_markers(translated_text, spans, protected=(), target_lang=None):
+def split_by_markers(translated_text, spans, protected=(), target_lang=None, source_lang=None):
     if spans and all(span.get("boundary") == "marker" for span in spans):
         return split_by_full_markers(translated_text, spans)
     expected_ids = [span["id"] for span in spans[1:] if span.get("boundary") == "marker"]
@@ -480,29 +512,29 @@ def split_by_markers(translated_text, spans, protected=(), target_lang=None):
     for chunk_index, cut in enumerate(cut_indices):
         sub_spans = spans[cursor:cut]
         sub_text = text_chunks[chunk_index]
-        sub_parts = [sub_text.strip()] if len(sub_spans) == 1 else split_by_boundary(sub_text, sub_spans, protected, target_lang)[0]
+        sub_parts = [sub_text.strip()] if len(sub_spans) == 1 else split_by_boundary(sub_text, sub_spans, protected, target_lang, source_lang)[0]
         parts.extend(sub_parts)
         cursor = cut
     sub_spans = spans[cursor:]
     sub_text = text_chunks[-1]
-    parts.extend([sub_text.strip()] if len(sub_spans) == 1 else split_by_boundary(sub_text, sub_spans, protected, target_lang)[0])
+    parts.extend([sub_text.strip()] if len(sub_spans) == 1 else split_by_boundary(sub_text, sub_spans, protected, target_lang, source_lang)[0])
     return parts
 
 
-def split_translation(translated_text, spans, protected=(), target_lang=None):
+def split_translation(translated_text, spans, protected=(), target_lang=None, source_lang=None):
     if len(spans) == 1:
         parts, method = [translated_text.strip()], "single"
     else:
-        parts = split_by_markers(translated_text, spans, protected, target_lang)
+        parts = split_by_markers(translated_text, spans, protected, target_lang, source_lang)
         if parts is not None:
             method = "marker_boundary"
         else:
-            parts, method = split_by_boundary(translated_text, spans, protected, target_lang)
+            parts, method = split_by_boundary(translated_text, spans, protected, target_lang, source_lang)
             if any(span.get("boundary") == "marker" for span in spans):
                 method = "marker_mismatch"
     parts = [RESIDUAL_MARKER_PATTERN.sub(" ", p).strip() for p in parts]
     parts = enforce_punctuation_placement(parts)
-    parts = repair_empty_parts(parts, spans, protected, target_lang)
+    parts = repair_empty_parts(parts, spans, protected, target_lang, source_lang)
     return enforce_quote_closure(parts, translated_text, target_lang), method
 
 
@@ -555,7 +587,7 @@ def determine_dash_style(cues):
 DASH_REPLACE_PATTERN = re.compile(r"(^|\s)-\s*")
 
 
-def build_bilingual_cues(cues, units, translations, target_lang):
+def build_bilingual_cues(cues, units, translations, target_lang, source_lang=None):
     cue_segments = {}
     approx_splits = []
     glossary_terms = collect_glossary_terms(units)
@@ -571,7 +603,7 @@ def build_bilingual_cues(cues, units, translations, target_lang):
             continue
         translated = strip_unsourced_brackets("".join(span["text"] for span in spans), translated)
         protected = find_protected_spans(translated, glossary_terms, target_lang)
-        parts, method = split_translation(translated, spans, protected, target_lang)
+        parts, method = split_translation(translated, spans, protected, target_lang, source_lang)
         if method not in ("single", "original_boundary", "inferred_punctuation", "marker_boundary"):
             approx_splits.append({"unit_id": unit["id"], "cues": [span["id"] for span in spans], "method": method})
         for span, part in zip(spans, parts):
@@ -622,9 +654,10 @@ def merge(extract_data, translate_data):
             log(f"jieba: available (v{getattr(jieba_module, '__version__', 'unknown')})")
         else:
             log("jieba: unavailable, splitting falls back to punctuation boundaries")
+    source_lang = translate_data.get("source_lang", "")
     translations = translate_data.get("translations", {})
     register_glossary_terms(collect_glossary_terms(extract_data["units"]), target_lang)
-    cues, approx_splits = build_bilingual_cues(extract_data["cues"], extract_data["units"], translations, target_lang)
+    cues, approx_splits = build_bilingual_cues(extract_data["cues"], extract_data["units"], translations, target_lang, source_lang)
 
     unit_of_cue = {span["id"]: unit["id"] for unit in extract_data["units"] for span in unit["spans"]}
     position_of_cue = {cue["id"]: position for position, cue in enumerate(cues, start=1)}
