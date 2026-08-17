@@ -39,6 +39,11 @@ IMDB_PREFIX_PATTERN = re.compile(r"^tt", re.IGNORECASE)
 MIN_CANDIDATE_COUNT = 1
 MAX_CANDIDATE_COUNT = 10
 
+# 简体/繁体开关：与 opensubtitles-bridge 的 CHINESE_VARIANT 保持一致，
+# 繁体支持就绪后一并改为 zh-Hant/zht。
+CHINESE_TAG, CHINESE_CODE = "zh-Hans", "chi"
+ENGLISH_TAG, ENGLISH_CODE = "en", "eng"
+
 SCRIPT_NAME = "source_main"
 
 
@@ -90,6 +95,21 @@ def build_jobs(editions, lang_tags):
     return jobs
 
 
+def build_smart_jobs(editions, original_tag, original_code):
+    is_english_original = original_tag.split("-")[0].lower() == "en"
+    jobs = []
+    for edition_name in editions:
+        jobs.append({
+            "edition": edition_name,
+            "keywords": release_keywords(edition_name),
+            "original_language": {"tag": original_tag, "code": original_code},
+            "english_fallback": None if is_english_original else {"tag": ENGLISH_TAG, "code": ENGLISH_CODE},
+            "sdh_english": is_english_original,
+            "chinese": {"tag": CHINESE_TAG, "code": CHINESE_CODE},
+        })
+    return jobs
+
+
 def main():
     load_repo_vars()
 
@@ -123,19 +143,24 @@ def main():
         return
 
     lang_tags = [t.strip() for t in args.lang.split(",") if t.strip()]
-    if not lang_tags:
-        if entity.get("original_language"):
-            lang_tags = [entity["original_language"]]
-        else:
-            fail("no_resolvable_language")
-            return
-
     editions = [args.edition] if args.edition else discover_editions(workspace_dir)
     if not editions:
         fail("no_editions_found")
         return
 
-    jobs = build_jobs(editions, lang_tags)
+    if lang_tags:
+        jobs = build_jobs(editions, lang_tags)
+    else:
+        original_tag = entity.get("original_language")
+        if not original_tag:
+            fail("no_resolvable_language")
+            return
+        original_code = to_opensubtitles_code(original_tag)
+        if not original_code:
+            fail(f"unsupported_original_language:{original_tag}")
+            return
+        jobs = build_smart_jobs(editions, original_tag, original_code)
+
     if not jobs:
         fail("no_supported_languages")
         return
