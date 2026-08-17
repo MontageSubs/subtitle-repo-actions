@@ -28,7 +28,7 @@ sys.path.insert(0, os.path.join(REPO_ROOT, "utilities", "github"))
 sys.path.insert(0, os.path.join(REPO_ROOT, "utilities", "github", "env"))
 
 from srt_extract import extract, build_glossary_from_markdown
-from google_client import translate, API_KEY_ENV, DEFAULT_BATCH_CHARS, DEFAULT_CONCURRENCY
+from google_client import translate_units, API_KEY_ENV, DEFAULT_BATCH_CHARS, DEFAULT_CONCURRENCY
 from bilingual_merge import merge
 from language_codes import primary_subtag
 from git_ops import setup_git_identity, commit_if_changed
@@ -78,26 +78,21 @@ def translate_source(workspace_dir, edition, src_lang, target_lang, glossary, ap
         log(f"skip: {dest_path} already exists (rerun with --force to overwrite)")
         return None
 
-    extract_data = extract(src_path.read_text(encoding="utf-8-sig"), glossary)
+    extract_data = extract(src_path.read_text(encoding="utf-8-sig"), glossary, source_lang=src_lang)
     if not extract_data["success"]:
         log(f"skip: {src_path} ({extract_data['reason']})")
         return None
 
-    units = extract_data["units"]
-    resolved = {str(u["id"]): u["resolved"] for u in units if u.get("resolved")}
-    translatable = [u for u in units if not u.get("resolved")]
-    translations, skipped = (
-        translate(translatable, primary_subtag(src_lang), google_lang_code(target_lang), api_key,
-                  DEFAULT_BATCH_CHARS, DEFAULT_CONCURRENCY)
-        if translatable else ({}, [])
+    source_google, target_google = primary_subtag(src_lang), google_lang_code(target_lang)
+    translations, skipped = translate_units(
+        extract_data["units"], extract_data["chapters"], extract_data["cues"],
+        source_google, target_google, api_key, DEFAULT_BATCH_CHARS, DEFAULT_CONCURRENCY,
     )
-    translations = {str(k): v for k, v in translations.items()}
-    translations.update(resolved)
     if not translations:
         log(f"skip: {src_path} (translation failed, no output)")
         return None
 
-    merged = merge(extract_data, {"translations": translations})
+    merged = merge(extract_data, {"translations": translations, "source_lang": source_google, "target_lang": target_google})
     dest_path.parent.mkdir(parents=True, exist_ok=True)
     dest_path.write_text(merged["srt"], encoding="utf-8")
     log(f"generated: {dest_path} (missing={merged['missing_count']}, skipped={len(skipped)})")
