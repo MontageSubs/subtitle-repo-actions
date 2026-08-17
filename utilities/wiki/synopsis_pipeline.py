@@ -30,6 +30,8 @@ import llm_core
 
 
 SCRIPT_NAME = "synopsis_pipeline"
+SECTION_RETRY_LIMIT = 3
+DROP_FROM_RETRY = 2
 
 
 def log(message):
@@ -42,12 +44,12 @@ def run(tmdb_result, output_dir, tmdb_token,
         language_priority=None, language_limit=None,
         max_tokens=None, temperature=None, with_glossary=True, debug=False):
     original_language = tmdb_result.get("original_language") or "en"
-    plot_languages = language_priority or wiki_tmdb_fetch.DEFAULT_LANGUAGE_PRIORITY
+    plot_priority = list(language_priority or wiki_tmdb_fetch.DEFAULT_LANGUAGE_PRIORITY)
 
     wiki_result = wiki_tmdb_fetch.fetch(
         imdb_id=tmdb_result["imdb_id"], tmdb_id=tmdb_result["tmdb_id"],
         media_type=tmdb_result["media_type"], original_language=original_language,
-        tmdb_token=tmdb_token, language_priority=plot_languages, language_limit=language_limit,
+        tmdb_token=tmdb_token, language_priority=plot_priority, language_limit=language_limit,
     )
     log(f"stage (wiki): imdb_id={tmdb_result['imdb_id']} tmdb_id={tmdb_result['tmdb_id']} "
         f"wiki_available={wiki_result.get('wiki_available')}")
@@ -55,36 +57,50 @@ def run(tmdb_result, output_dir, tmdb_token,
         log(f"data fetch failed ({wiki_result['reason']})")
         return {"stage": "wiki", **wiki_result}
 
-    messages = prompt_build.build_messages(wiki_result, original_language, plot_languages, language_limit)
-    sent_plot_languages = [lang for lang in prompt_build.resolve_languages(original_language, plot_languages, language_limit)
-                           if lang in (wiki_result.get("plot") or {})]
-    log(f"llm input languages: plot={sent_plot_languages} reception={list(wiki_result.get('reception') or {})} "
-        f"cast={list(wiki_result.get('cast') or {})} infobox={list(wiki_result.get('infobox') or {})}")
-    log(f"stage (llm): {len(messages)} messages assembled, dispatching to llm_core")
-    if debug:
-        prompt_build.debug_dump(messages, language_limit, plot_languages)
-    llm_result = llm_core.complete(
-        messages=messages,
-        max_tokens=max_tokens or prompt_build.DEFAULT_MAX_TOKENS,
-        temperature=prompt_build.DEFAULT_TEMPERATURE if temperature is None else temperature,
-        google_token=llm_core.resolve_google_token(google_token),
-        google_model=llm_core.resolve_google_model(google_model),
-        thinking_budget=llm_core.resolve_google_thinking_budget(thinking_budget),
-        hf_token=llm_core.resolve_hf_token(hf_token),
-        hf_model=llm_core.resolve_hf_model(hf_model),
-        debug=debug,
-    )
-    if not llm_result["success"]:
-        log(f"llm failed ({llm_result['reason']})")
-        return {"stage": "llm", **llm_result}
-
-    log(f"stage (render): provider={llm_result.get('provider')} with_glossary={with_glossary}")
+    droppable = [lang for lang in prompt_build.REDUCIBLE_PLOT_LANGUAGES_ORDER if lang in plot_priority]
     tmdb_url = f"https://www.themoviedb.org/{tmdb_result['media_type']}/{tmdb_result['tmdb_id']}?language=zh-CN"
-    rendered = synopsis_render.render(
-        title_en=tmdb_result["title_en"],
-        title_zh=tmdb_result["title_zh"] or tmdb_result["title_en"],
-        year=tmdb_result["year"], wiki_result=wiki_result, llm_result=llm_result, tmdb_url=tmdb_url,
-        output_dir=output_dir, with_glossary=with_glossary,
-    )
-    log(f"status: {'success' if rendered['success'] else 'render failed (' + str(rendered['reason']) + ')'}")
-    return {"stage": "render", **rendered}
+
+    for retry in range(SECTION_RETRY_LIMIT + 1):
+        if retry >= DROP_FROM_RETRY:
+            if droppable:
+                dropped_lang = droppable.pop(0)
+                plot_priority.remove(dropped_lang)
+                log(f"retry {retry}/{SECTION_RETRY_LIMIT}: dropping plot[{dropped_lang}] to reduce content length")
+            else:
+                log(f"retry {retry}/{SECTION_RETRY_LIMIT}: no further optional language to drop, retrying as-is")
+
+        messages = prompt_build.build_messages(wiki_result, original_language, plot_priority, language_limit)
+        sent_plot_languages = [lang for lang in prompt_build.resolve_languages(original_language, plot_priority, language_limit)
+                               if lang in (wiki_result.get("plot") or {})]
+        log(f"llm input languages: plot={sent_plot_languages} reception={list(wiki_result.get('reception') or {})} "
+            f"cast={list(wiki_result.get('cast') or {})} infobox={list(wiki_result.get('infobox') or {})}")
+        log(f"stage (llm): {len(messages)} messages assembled, dispatching to llm_core"
+            + (f" (retry {retry}/{SECTION_RETRY_LIMIT})" if retry else ""))
+        if debug:
+            prompt_build.debug_dump(messages, language_limit, plot_priority)
+        llm_result = llm_core.complete(
+            messages=messages,
+            max_tokens=max_tokens or prompt_build.DEFAULT_MAX_TOKENS,
+            temperature=prompt_build.DEFAULT_TEMPERATURE if temperature is None else temperature,
+            google_token=llm_core.resolve_google_token(google_token),
+            google_model=llm_core.resolve_google_model(google_model),
+            thinking_budget=llm_core.resolve_google_thinking_budget(thinking_budget),
+            hf_token=llm_core.resolve_hf_token(hf_token),
+            hf_model=llm_core.resolve_hf_model(hf_model),
+            debug=debug,
+        )
+        if not llm_result["success"]:
+            log(f"llm failed ({llm_result['reason']})")
+            return {"stage": "llm", **llm_result}
+
+        log(f"stage (render): provider={llm_result.get('provider')} with_glossary={with_glossary}")
+        rendered = synopsis_render.render(
+            title_en=tmdb_result["title_en"],
+            title_zh=tmdb_result["title_zh"] or tmdb_result["title_en"],
+            year=tmdb_result["year"], wiki_result=wiki_result, llm_result=llm_result, tmdb_url=tmdb_url,
+            output_dir=output_dir, with_glossary=with_glossary,
+        )
+        if rendered["success"] or rendered["reason"] != "malformed_llm_output" or retry == SECTION_RETRY_LIMIT:
+            log(f"status: {'success' if rendered['success'] else 'render failed (' + str(rendered['reason']) + ')'}")
+            return {"stage": "render", **rendered}
+        log(f"render failed (malformed_llm_output: {rendered.get('detail')}), retrying ({retry + 1}/{SECTION_RETRY_LIMIT})")
