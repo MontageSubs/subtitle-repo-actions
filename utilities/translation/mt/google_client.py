@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: google_client.py
-# Version: 2.4.0
+# Version: 2.5.0
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -12,17 +12,19 @@
 #     Batches and translates subtitle units using Google Translate's PA endpoint.
 #     Employs concurrent threading for faster translation, wraps text in HTML
 #     inline anchors to preserve alignment, and handles retries/fallbacks automatically.
-#     For units carrying glossary `term_matches`, builds an inline-name variant
-#     (real target term embedded in the source sentence) and/or a placeholder
-#     variant per unit, picks the better result via an untranslated-residue
-#     diagnostic, restores placeholders locally, and issues a single isolated
-#     retry when the chosen result still looks untranslated.
+#     For units carrying glossary `term_matches`, wraps each matched span in a
+#     translate="no" tag so the provider returns it verbatim inside otherwise
+#     fully translated context, then locally substitutes the fixed target term
+#     into the result, preserving cross-sentence context that a pre-substituted
+#     or placeholder-based send would break. Issues a single isolated retry
+#     when the substituted result still looks untranslated.
 #     使用 Google Translate PA 接口进行字幕单元批量机器翻译。采用并发线程池
 #     加速翻译，通过 HTML 行内标签包裹文本以保留对应关系，并自动处理
-#     请求重试与失败回退。对携带词表命中（term_matches）的单元，按单元自身
-#     的嵌入比例生成"固定译名直接嵌入原文"与/或"占位符"两个版本分别发送，
-#     依据未翻译残留诊断择优采用并在本地回填占位符；若最终结果仍疑似未
-#     翻译，单独重发一次原句作为质量兜底。
+#     请求重试与失败回退。对携带词表命中（term_matches）的单元，将命中片段
+#     包裹为 translate="no" 标签发送，使供应商在完整上下文中原样保留该片段、
+#     正常翻译周围语境，收到结果后在本地将其替换为固定译名——相比预先替换
+#     或占位符方案更好地保留跨句上下文；若替换后结果仍疑似未翻译，单独
+#     重发一次原句作为质量兜底。
 #
 # Features:
 #     - Concurrent HTTP requests via ThreadPoolExecutor.
@@ -40,9 +42,11 @@
 #       units. Units resolving to punctuation-only text where the source had
 #       real content are treated as missing, feeding the existing retry path.
 #     - Robust retry mechanism for failed or partially failed translation batches.
-#     - Per-unit inline-name / placeholder dual variants, chosen by an
-#       untranslated-residue diagnostic (Latin<->CJK word/char counting).
-#     - Single isolated retry (no loop) when the final chosen result still
+#     - Glossary terms sent as translate="no" spans (official untranslatable-
+#       text markup) rather than placeholder tokens or pre-substituted target
+#       text; matched spans are restored to their fixed target term locally
+#       after translation, keeping the sentence intact for the provider.
+#     - Single isolated retry (no loop) when the substituted result still
 #       looks untranslated; kept only if the retry actually differs.
 #     - Cue-level integrity check for multi-cue units (e.g. lyrics carrying
 #       several ⟦cNNNN⟧-marked cues merged into one translation unit): any
@@ -72,8 +76,10 @@
 #       后的响应文本，杜绝供应商在批内错误拆分内容导致的错位。译文剥离标点
 #       后为空、但原文本身有实际内容的单元一律视为缺失，交由既有重试路径处理。
 #     - 针对失败或部分失败请求的健壮重试机制。
-#     - 按单元自身嵌入比例生成嵌入版/占位符版，依未翻译诊断择优并回填。
-#     - 最终结果仍疑似未翻译时单独重发一次（不循环），结果不同才采用。
+#     - 词表命中片段以官方 translate="no" 标签发送（而非占位符或预先替换
+#       为目标语译名），命中片段随句子一同送出、供应商正常翻译周围语境，
+#       收到结果后在本地原样替换回固定译名。
+#     - 替换后结果仍疑似未翻译时单独重发一次（不循环），结果不同才采用。
 #     - 针对多cue合并单元（如歌词，多条⟦cNNNN⟧标记的cue合并进同一翻译单元）
 #       做cue级完整性校验：任一cue标记被供应商吞并，精确定位到该cue而非仅
 #       判断整个unit是否为空。修复按序回退：先复用既有窗口重跑（其自身的
@@ -139,9 +145,7 @@ CUE_MARKER_TEMPLATE = "\u27e6c{:04d}\u27e7"
 CUE_MARKER_PATTERN = re.compile(r"\u27e6c(\d+)\u27e7")
 CONTENT_CHAR_PATTERN = re.compile(r"\w", re.UNICODE)
 
-EMBED_RATIO_THRESHOLD = 0.30
-TERM_PLACEHOLDER_TEMPLATE = "\u27e6T{:02d}\u27e7"
-VARIANT_PRIORITY = ("embedded", "placeholder", "plain")
+NO_TRANSLATE_TEMPLATE = '<span translate="no">{}</span>'
 
 WORD_BASED_SCRIPTS = {"latin", "cyrillic", "arabic", "devanagari", "hebrew", "greek"}
 SCRIPT_CHAR_RANGES = {
@@ -248,7 +252,7 @@ def build_chapter_html(group, indices):
     spans = "".join(
         f'<span id={indices[item["id"]]}>'
         f'{GROUP_MARKER_TEMPLATE.format(indices[item["id"]]) if marker else ""}'
-        f'{escape_html(item["text"])}</span>'
+        f'{item.get("html", escape_html(item["text"]))}</span>'
         for item in group
     )
     return f"<div>{spans}</div>"
@@ -320,10 +324,6 @@ def call_google(batch, source_lang, target_lang, api_key):
     return result
 
 
-def cue_ref(item_id):
-    return str(item_id).split(":", 1)[0]
-
-
 def translate_batch(batch, source_lang, target_lang, api_key):
     items = [item for group in batch for item in group]
     expected_ids = {item["id"] for item in items}
@@ -338,14 +338,14 @@ def translate_batch(batch, source_lang, target_lang, api_key):
         if not missing:
             return result, []
 
-        missing_cues = sorted({cue_ref(i) for i in missing}, key=str)
-        log(f"attempt {attempt}: missing {len(missing)} of {len(items)} units, cues: {', '.join(missing_cues)}")
+        missing_units = sorted({str(i) for i in missing})
+        log(f"attempt {attempt}: missing {len(missing)} of {len(items)} units: {', '.join(missing_units)}")
         if attempt < MAX_ATTEMPTS:
             time.sleep(RETRY_DELAY)
 
     if len(items) > 1:
         by_id = {item["id"]: item for item in items}
-        log(f"isolating {len(missing)} unit(s) still missing, cues: {', '.join(sorted({cue_ref(i) for i in missing}, key=str))}")
+        log(f"isolating {len(missing)} unit(s) still missing: {', '.join(sorted({str(i) for i in missing}))}")
         for uid in sorted(missing, key=str):
             solo_result, _solo_missing = translate_batch([[by_id[uid]]], source_lang, target_lang, api_key)
             if uid in solo_result:
@@ -396,63 +396,36 @@ def is_untranslated(text, source_lang, target_lang):
     return len(SCRIPT_LEAK_PATTERNS[source_script].findall(text)) > 1
 
 
-def apply_term_matches(text, term_matches, variant):
-    pieces, cursor, mapping = [], 0, {}
-    for idx, match in enumerate(term_matches):
-        pieces.append(text[cursor:match["start"]])
-        if variant == "embedded":
-            pieces.append(match["target"])
-        else:
-            placeholder = TERM_PLACEHOLDER_TEMPLATE.format(idx)
-            mapping[placeholder] = match["target"]
-            pieces.append(placeholder)
+def protect_terms_html(text, term_matches):
+    pieces, cursor = [], 0
+    for match in term_matches:
+        pieces.append(escape_html(text[cursor:match["start"]]))
+        pieces.append(NO_TRANSLATE_TEMPLATE.format(escape_html(match["matched"])))
         cursor = match["end"]
-    pieces.append(text[cursor:])
-    return "".join(pieces), mapping
-
-
-def build_variants(unit):
-    text, matches, ratio = unit["text"], unit.get("term_matches") or [], unit.get("embed_ratio", 0.0)
-    if not matches:
-        return {"plain": (text, {})}
-    if ratio > EMBED_RATIO_THRESHOLD:
-        return {"placeholder": apply_term_matches(text, matches, "placeholder")}
-    return {
-        "embedded": apply_term_matches(text, matches, "embedded"),
-        "placeholder": apply_term_matches(text, matches, "placeholder"),
-    }
+    pieces.append(escape_html(text[cursor:]))
+    return "".join(pieces)
 
 
 def flatten_units(units, chapter_of_unit):
     items, chapter_items = [], {}
     for unit in units:
         chapter_id = chapter_of_unit.get(unit["id"])
-        for variant, (text, _mapping) in build_variants(unit).items():
-            item_id = f"{unit['id']}:{variant}"
-            items.append({"id": item_id, "text": text})
-            chapter_items.setdefault(chapter_id, []).append(item_id)
+        items.append({"id": unit["id"], "text": unit["text"], "html": protect_terms_html(unit["text"], unit.get("term_matches") or [])})
+        chapter_items.setdefault(chapter_id, []).append(unit["id"])
     return items, list(chapter_items.values())
 
 
-def restore_placeholders(text, mapping):
-    for placeholder, target in mapping.items():
-        text = text.replace(placeholder, target)
+def apply_term_replacements(text, term_matches, target_lang):
+    if not text or not term_matches:
+        return text
+    boundary = r"\s*" if script_of(target_lang) == "cjk" else r"\b"
+    seen = {}
+    for match in term_matches:
+        seen.setdefault(match["matched"], match["target"])
+    for source_text, target_text in sorted(seen.items(), key=lambda kv: -len(kv[0])):
+        pattern = re.compile(boundary + re.escape(source_text) + boundary)
+        text = pattern.sub(lambda _m, t=target_text: t, text)
     return text
-
-
-def resolve_translation(unit, translations, source_lang, target_lang):
-    variants = build_variants(unit)
-    for variant in VARIANT_PRIORITY:
-        if variant not in variants:
-            continue
-        source_text, mapping = variants[variant]
-        result = translations.get(f"{unit['id']}:{variant}")
-        if result is None:
-            continue
-        if variant == "embedded" and "placeholder" in variants and is_untranslated(result, source_lang, target_lang):
-            continue
-        return restore_placeholders(result, mapping), source_text, mapping
-    return None, None, None
 
 
 def retry_single(text, source_lang, target_lang, api_key):
@@ -574,11 +547,12 @@ def translate_units(units, chapters, cues, source_lang, target_lang, api_key, ba
 
     results = dict(resolved)
     for unit in pending:
-        final_text, source_text, mapping = resolve_translation(unit, translations_raw, source_lang, target_lang)
+        raw_text = translations_raw.get(unit["id"])
+        final_text = apply_term_replacements(raw_text, unit.get("term_matches") or [], target_lang) if raw_text is not None else None
         if final_text is not None and is_untranslated(final_text, source_lang, target_lang):
-            retried = retry_single(source_text, source_lang, target_lang, api_key)
+            retried = retry_single(unit["text"], source_lang, target_lang, api_key)
             if retried:
-                candidate = restore_placeholders(retried, mapping)
+                candidate = apply_term_replacements(retried, unit.get("term_matches") or [], target_lang)
                 if candidate != final_text:
                     log(f"unit {unit['id']}: retry changed result")
                     final_text = candidate
@@ -596,6 +570,8 @@ def translate_units(units, chapters, cues, source_lang, target_lang, api_key, ba
     for uid in sorted(length_suspects | cue_suspects):
         recovered = retry_windowed(units, uid, source_lang, target_lang, api_key, batch_chars)
         if recovered:
+            recovered = {rid: apply_term_replacements(text, unit_by_id[rid].get("term_matches") or [], target_lang)
+                         for rid, text in recovered.items()}
             log(f"windowed retry around unit {uid}: recovered {sorted(recovered)}")
             results.update(recovered)
         else:

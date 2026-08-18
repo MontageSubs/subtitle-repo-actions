@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: srt_extract.py
-# Version: 2.3.0
+# Version: 2.4.0
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -19,13 +19,14 @@
 # Features:
 #     - Parses SRT subtitle structures and normalizes text and timestamps.
 #     - Splits multi-speaker dialogue lines marked with leading dashes ('- ').
-#     - Resolves name stutters and matches terminology against provided glossary.
+#     - Resolves name stutters and matches terminology against provided glossary,
+#       case-insensitively by default (toggle via --case-sensitive-glossary).
 #     - Groups subtitle cues based on punctuation, pause gaps, and quote continuity.
 #     - Units carry natural, unmarked merged text plus a `spans` list (original
 #       per-piece text/timing) so downstream can reconstruct without markers.
 #     - Annotates glossary hits as `term_matches` (position + source + target)
-#       and an `embed_ratio`; actual placeholder-vs-inline-name decision is
-#       deferred to the translation step, which owns batch/context context.
+#       (matched substring position + target); the translation step wraps
+#       the matched span in a no-translate marker to protect it verbatim.
 #     - Groups units into `chapters` (scene/song-level runs) so downstream
 #       batching can send whole scenes as translation context instead of
 #       splitting arbitrarily by character count.
@@ -33,13 +34,14 @@
 # 功能特性：
 #     - 解析 SRT 字幕结构，并对文本和时间戳进行标准化。
 #     - 拆分以前导破折号 ('- ') 标记的多发言者对话行。
-#     - 解决名称结巴问题，并根据提供的术语表匹配术语。
+#     - 解决名称结巴问题，默认按大小写不敏感方式匹配术语表（可用
+#       --case-sensitive-glossary 切换为精确匹配）。
 #     - 根据标点、停顿间隙和引号连续性对字幕句组进行分组。
 #     - 单元包含自然的无标记合并文本及 `spans` 列表（原分段
 #       文本/时间），以便下游在无需标记的情况下进行重建。
 #     - 将术语匹配标注为 `term_matches`（位置 + 原文 + 译文）
-#       及 `embed_ratio`；占位符与行内名称的最终决定将推迟到
-#       翻译步骤，由该步骤管理批处理和上下文。
+#       （匹配子串位置 + 译文）；翻译步骤将命中片段包裹为免翻译
+#       标记以原样保护，不再由本脚本决定嵌入方式。
 #     - 将单元分组为 `chapters`（场景/歌曲级别），以便下游批处理
 #       能将整个场景作为翻译上下文发送，而非简单地按字符数
 #       进行随意拆分。
@@ -114,11 +116,20 @@ SEPARATOR_ROW_PATTERN = re.compile(r"^[\s|:-]+$")
 NAME_SEPARATOR_PATTERN = re.compile(r"[·・]")
 TERM_BOUNDARY_LEFT = r"(?<![A-Za-z0-9])"
 TERM_BOUNDARY_RIGHT = r"(?![A-Za-z0-9])"
-EMBED_RATIO_DEFAULT = 0.0
+
+CASE_SENSITIVE_GLOSSARY = False
 
 
 def log(message):
     print(f"{SCRIPT_NAME}: {message}", file=sys.stderr)
+
+
+def glossary_flags():
+    return 0 if CASE_SENSITIVE_GLOSSARY else re.IGNORECASE
+
+
+def glossary_pattern(term):
+    return re.compile(TERM_BOUNDARY_LEFT + re.escape(term) + TERM_BOUNDARY_RIGHT, glossary_flags())
 
 
 def time_to_ms(value):
@@ -352,7 +363,7 @@ def find_stutter_resolution(text, glossary):
     for source_term, target_term in sorted(glossary.items(), key=lambda kv: -len(kv[0])):
         if not source_term:
             continue
-        pattern = re.compile(TERM_BOUNDARY_LEFT + re.escape(source_term) + TERM_BOUNDARY_RIGHT)
+        pattern = glossary_pattern(source_term)
         match = pattern.search(text)
         if not match:
             continue
@@ -376,7 +387,7 @@ def find_pure_glossary_line(text, glossary, latin_source=True):
     for source_term in sorted(glossary, key=len, reverse=True):
         if not source_term:
             continue
-        pattern = re.compile(TERM_BOUNDARY_LEFT + re.escape(source_term) + TERM_BOUNDARY_RIGHT)
+        pattern = glossary_pattern(source_term)
         if pattern.search(stripped):
             matched_any = True
         stripped = pattern.sub("", stripped)
@@ -386,8 +397,7 @@ def find_pure_glossary_line(text, glossary, latin_source=True):
     for source_term, target_term in sorted(glossary.items(), key=lambda kv: -len(kv[0])):
         if not source_term:
             continue
-        pattern = re.compile(TERM_BOUNDARY_LEFT + re.escape(source_term) + TERM_BOUNDARY_RIGHT)
-        resolved = pattern.sub(target_term, resolved)
+        resolved = glossary_pattern(source_term).sub(target_term, resolved)
     return resolved
 
 
@@ -495,17 +505,13 @@ def match_glossary_terms(text, glossary):
     for source_term, target_term in sorted(glossary.items(), key=lambda kv: -len(kv[0])):
         if not source_term:
             continue
-        pattern = re.compile(TERM_BOUNDARY_LEFT + re.escape(source_term) + TERM_BOUNDARY_RIGHT)
-        for m in pattern.finditer(text):
+        for m in glossary_pattern(source_term).finditer(text):
             if any(a < m.end() and m.start() < b for a, b in claimed):
                 continue
             claimed.append((m.start(), m.end()))
-            matches.append({"start": m.start(), "end": m.end(), "source": source_term, "target": target_term})
+            matches.append({"start": m.start(), "end": m.end(), "matched": m.group(), "target": target_term})
     matches.sort(key=lambda m: m["start"])
-    if not matches or not text:
-        return matches, EMBED_RATIO_DEFAULT
-    embedded_len = len(text) - sum(m["end"] - m["start"] for m in matches) + sum(len(m["target"]) for m in matches)
-    return matches, embedded_len / len(text)
+    return matches
 
 
 def join_group_text(group, is_music_group):
@@ -557,11 +563,10 @@ def build_units(cues, glossary, latin_source=True):
                        "kind": "music" if is_music_segment(s["text"]) else "dialogue"} for s in group]
             marker_merges += sum(1 for s in group if s.get("marker_boundary"))
             if len(group) == 1 and group[0]["resolved"]:
-                units.append({"id": unit_id, "spans": spans, "text": "", "term_matches": [], "embed_ratio": EMBED_RATIO_DEFAULT, "resolved": group[0]["resolved"]})
+                units.append({"id": unit_id, "spans": spans, "text": "", "term_matches": [], "resolved": group[0]["resolved"]})
             else:
                 text = join_group_text(group, is_music_chapter)
-                term_matches, embed_ratio = match_glossary_terms(text, glossary)
-                units.append({"id": unit_id, "spans": spans, "text": text, "term_matches": term_matches, "embed_ratio": embed_ratio, "resolved": None})
+                units.append({"id": unit_id, "spans": spans, "text": text, "term_matches": match_glossary_terms(text, glossary), "resolved": None})
             unit_ids.append(unit_id)
         chapters.append({"id": chapter_index, "kind": raw_chapter["kind"], "unit_ids": unit_ids})
     return units, chapters, marker_merges
@@ -584,10 +589,12 @@ def main():
     parser.add_argument("--source-lang", default="en")
     parser.add_argument("--isolated-merge-max-words", type=int, default=0)
     parser.add_argument("--keep-sdh", action="store_true")
+    parser.add_argument("--case-sensitive-glossary", action="store_true")
     args = parser.parse_args()
 
-    global ISOLATED_MERGE_MAX_WORDS
+    global ISOLATED_MERGE_MAX_WORDS, CASE_SENSITIVE_GLOSSARY
     ISOLATED_MERGE_MAX_WORDS = args.isolated_merge_max_words
+    CASE_SENSITIVE_GLOSSARY = args.case_sensitive_glossary
 
     raw = open(args.input, encoding="utf-8-sig").read() if args.input else sys.stdin.read()
     glossary = build_glossary_from_markdown(open(args.glossary, encoding="utf-8").read()) if args.glossary else {}
