@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: srt_extract.py
-# Version: 2.4.0
+# Version: 2.5.0
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -582,19 +582,21 @@ def extract(content, glossary, strip_sdh_enabled=True, source_lang="en"):
 
 
 def main():
+    global ISOLATED_MERGE_MAX_WORDS, CASE_SENSITIVE_GLOSSARY, SCENE_CHANGE_MS
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", default=None)
     parser.add_argument("--glossary", default=None)
     parser.add_argument("--output", default=None)
     parser.add_argument("--source-lang", default="en")
     parser.add_argument("--isolated-merge-max-words", type=int, default=0)
+    parser.add_argument("--scene-change-ms", type=int, default=SCENE_CHANGE_MS)
     parser.add_argument("--keep-sdh", action="store_true")
     parser.add_argument("--case-sensitive-glossary", action="store_true")
     args = parser.parse_args()
 
-    global ISOLATED_MERGE_MAX_WORDS, CASE_SENSITIVE_GLOSSARY
     ISOLATED_MERGE_MAX_WORDS = args.isolated_merge_max_words
     CASE_SENSITIVE_GLOSSARY = args.case_sensitive_glossary
+    SCENE_CHANGE_MS = args.scene_change_ms
 
     raw = open(args.input, encoding="utf-8-sig").read() if args.input else sys.stdin.read()
     glossary = build_glossary_from_markdown(open(args.glossary, encoding="utf-8").read()) if args.glossary else {}

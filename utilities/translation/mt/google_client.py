@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: google_client.py
-# Version: 2.6.0
+# Version: 2.7.0
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -68,6 +68,12 @@
 #       self-contained line per call carrying a monotonic sequence number
 #       (pairing request/response) and a timestamp, written under a lock via
 #       O_APPEND so concurrent threads can never interleave or lose a line.
+#       The request/response body is stored as native nested JSON (never
+#       re-escaped as a string), and the response entry additionally carries
+#       the HTTP status and headers for diagnosing provider-side behavior
+#       (e.g. locating the detected-language field). Use debug_format.py to
+#       render these logs as an indented, line-per-tag human-readable
+#       transcript.
 #     - Cue-level integrity check for multi-cue units (e.g. lyrics carrying
 #       several ⟦cNNNN⟧-marked cues merged into one translation unit): any
 #       cue marker swallowed by the provider during translation is detected
@@ -83,6 +89,22 @@
 #       batch_chars) are never truncated; they're excluded from batches and
 #       reported as skipped with a clear reason instead of being sent as-is
 #       or cut mid-cue.
+#     - Optional plain-text --context-file: a short paragraph prepended as
+#       its own translatable span at the start of every div sent (batches
+#       and chapter groups alike), purely to prime the NMT engine's
+#       understanding — never extracted back into cue translations, and
+#       never resent during any retry path (a retry exists to fix an error,
+#       and the context could be the cause). Truncated at CONTEXT_MAX_CHARS
+#       (default 300, --context-max-chars) with a warning, Latin truncation
+#       backing off to the nearest word boundary. Verified against the
+#       pinned subtitle source language before use: translated into that
+#       language via a dedicated auto-source call and, after stripping
+#       punctuation/whitespace, compared to the original — an unchanged
+#       result means it was already correct and the original is kept
+#       (preserving its exact wording), a changed result means the
+#       translated version is used instead. When source language is "auto"
+#       and not yet pinned, the very first batch is sent without context
+#       specifically to obtain the pinned language before this check runs.
 #
 # 功能:
 #     - 基于 ThreadPoolExecutor 的并发 HTTP 请求。
@@ -99,7 +121,6 @@
 #     - 词表命中片段以官方 translate="no" 标签发送（而非占位符或预先替换
 #       为目标语译名），命中片段随句子一同送出、供应商正常翻译周围语境，
 #       收到结果后在本地原样替换回固定译名。
-#     - 替换后结果仍疑似未翻译时单独重发一次（不循环），结果不同才采用。
 #     - 支持 auto 源语言：未指定 --source-lang 时首次请求发送 auto，供应商
 #       返回的探测语言从此锁定用于后续所有调用（含全部重试）——短文本重试
 #       上下文太少，auto 逐次探测容易在同形异义词上判断错误。
@@ -112,7 +133,11 @@
 #       的主要安全网。
 #     - Debug 原始请求/响应日志改为仅追加的 JSON Lines，每行自包含、带
 #       单调递增序号（用于请求/响应配对）与时间戳，加锁配合 O_APPEND
-#       写入，确保并发线程之间绝不交错或丢行。
+#       写入，确保并发线程之间绝不交错或丢行。请求/响应体以原生嵌套 JSON
+#       结构存储（不再作为字符串二次转义），响应条目额外记录 HTTP 状态码
+#       与响应头，便于排查供应商侧行为（如定位探测语言字段的实际位置）。
+#       可用 debug_format.py 把这些日志渲染成缩进展开、每标签一行的
+#       人类可读文本。
 #     - 针对多cue合并单元（如歌词，多条⟦cNNNN⟧标记的cue合并进同一翻译单元）
 #       做cue级完整性校验：任一cue标记被供应商吞并，精确定位到该cue而非仅
 #       判断整个unit是否为空。修复按序回退：先复用既有窗口重跑（其自身的
@@ -122,6 +147,16 @@
 #       失败的cue原样保留，不做臆测性改写。
 #     - 单个unit/cue自身文本即超出batch_chars时，绝不截断：该项被排除出
 #       批次，以明确原因计入skipped上报，而非原样发送或从中截断。
+#     - 可选的纯文本 --context-file：一段简短上下文，作为独立可翻译 span
+#       置于每次发送的每个 div 最前面（每批、每个章节 div 均如此），纯粹
+#       用于启发神经引擎理解——绝不提取回 cue 译文，也绝不在任何重试路径
+#       中重发（重试本就是为了排除错误，上下文可能正是错误来源）。按
+#       CONTEXT_MAX_CHARS（默认 300，--context-max-chars 可配）截断并给出
+#       警告，拉丁文截断回退到最近单词边界。使用前会针对已锁定的字幕源
+#       语言做校验：用独立的 auto 源语言调用把上下文翻译成该语言，剥离
+#       标点/空白后与原文比对——结果不变说明原文本就正确，保留原文（不
+#       损失原始措辞）；结果不同则改用翻译后的版本。若源语言为 auto 且
+#       尚未锁定，会先发送不含上下文的首批用于探测锁定语言，再进行该校验。
 #
 # Usage / 用法:
 #     python google_client.py --input extract.json --source-lang en --target-lang zh-CN --output translations.json
@@ -153,7 +188,7 @@ SCRIPT_NAME = "google_client"
 
 ENDPOINT = "https://translate-pa.googleapis.com/v1/translateHtml"
 API_KEY_ENV = "GOOGLE_TRANSLATE_API_KEY"
-DEFAULT_BATCH_CHARS = 3000
+DEFAULT_BATCH_CHARS = 8000
 DEFAULT_CONCURRENCY = 8
 REQUEST_TIMEOUT = 30
 MAX_ATTEMPTS = 3
@@ -183,6 +218,11 @@ class LanguageResolver:
     def is_auto(self):
         return self.requested == "auto"
 
+    @property
+    def pinned(self):
+        with self._lock:
+            return self._detected is not None
+
     def current(self):
         if not self.is_auto:
             return self.requested
@@ -205,6 +245,12 @@ CUE_MARKER_PATTERN = re.compile(r"\u27e6c(\d+)\u27e7")
 CONTENT_CHAR_PATTERN = re.compile(r"\w", re.UNICODE)
 
 NO_TRANSLATE_TEMPLATE = '<span translate="no">{}</span>'
+CONTEXT_MAX_CHARS = 300
+CONTEXT_GROUP_MARKER = "ctx"
+PUNCT_STRIP_PATTERN = re.compile(
+    r"[!\"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~"
+    r"。，、；：？！…—～·「」『』（）〈〉《》【】〔〕“”‘’]"
+)
 
 WORD_BASED_SCRIPTS = {"latin", "cyrillic", "arabic", "devanagari", "hebrew", "greek"}
 SCRIPT_CHAR_RANGES = {
@@ -306,20 +352,26 @@ def build_batches(items, chapter_groups, batch_chars):
     return batches, oversized
 
 
-def build_chapter_html(group, indices):
+def build_chapter_html(group, indices, context_html=None):
     marker = ALIGNMENT_MODE == "marker"
+    prefix = ""
+    if context_html:
+        marker_text = GROUP_MARKER_TEMPLATE.format(CONTEXT_GROUP_MARKER) if marker else ""
+        prefix = f'<span id={CONTEXT_GROUP_MARKER}>{marker_text}{context_html}</span>'
     spans = "".join(
         f'<span id={indices[item["id"]]}>'
         f'{GROUP_MARKER_TEMPLATE.format(indices[item["id"]]) if marker else ""}'
         f'{item.get("html", escape_html(item["text"]))}</span>'
         for item in group
     )
-    return f"<div>{spans}</div>"
+    return f"<div>{prefix}{spans}</div>"
 
 
 def parse_by_spans(html):
     result = {}
     for match in SPAN_PATTERN.finditer(html):
+        if not match.group(1).isdigit():
+            continue
         idx = int(match.group(1))
         text = unescape_html(ITALIC_PATTERN.sub("", match.group(2))).strip()
         result[idx] = f"{result[idx]} {text}" if idx in result else text
@@ -350,11 +402,10 @@ def next_debug_seq():
         return DEBUG_SEQUENCE[0]
 
 
-def debug_log_raw(path, direction, seq, payload_bytes):
+def debug_log_raw(path, entry):
     if not path:
         return
-    body = payload_bytes.decode("utf-8", errors="replace")
-    line = json.dumps({"seq": seq, "ts": time.time(), "direction": direction, "body": body}, ensure_ascii=False) + "\n"
+    line = json.dumps(entry, ensure_ascii=False) + "\n"
     with DEBUG_LOCK:
         fd = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o644)
         try:
@@ -365,7 +416,7 @@ def debug_log_raw(path, direction, seq, payload_bytes):
 
 def extract_detected_lang(payload):
     try:
-        candidate = payload[0][1]
+        candidate = payload[1][0]
     except (IndexError, TypeError, KeyError):
         return None
     return candidate if isinstance(candidate, str) and re.fullmatch(r"[a-zA-Z]{2,3}(-[A-Za-z0-9]+)*", candidate) else None
@@ -373,29 +424,38 @@ def extract_detected_lang(payload):
 
 def post_translate_html(html, lang, target_lang, api_key):
     source_lang = lang.current()
-    body = json.dumps([[[html], source_lang, target_lang], "te"]).encode("utf-8")
+    request_body = [[[html], source_lang, target_lang], "te"]
     seq = next_debug_seq()
-    debug_log_raw(DEBUG_RAW_IN_FILE, "request", seq, body)
+    debug_log_raw(DEBUG_RAW_IN_FILE, {"seq": seq, "ts": time.time(), "direction": "request", "source_lang": source_lang, "target_lang": target_lang, "body": request_body})
 
     request = urllib.request.Request(
         ENDPOINT,
-        data=body,
+        data=json.dumps(request_body).encode("utf-8"),
         headers={"Content-Type": "application/json+protobuf", "X-goog-api-key": api_key, "User-Agent": USER_AGENT},
         method="POST",
     )
     with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT) as response:
         raw_response = response.read()
-        debug_log_raw(DEBUG_RAW_OUT_FILE, "response", seq, raw_response)
-        payload = json.loads(raw_response.decode("utf-8"))
+        status, headers = response.status, dict(response.headers.items())
+        try:
+            payload = json.loads(raw_response.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            payload = None
+        debug_log_raw(DEBUG_RAW_OUT_FILE, {
+            "seq": seq, "ts": time.time(), "direction": "response", "status": status, "headers": headers,
+            "body": payload if payload is not None else raw_response.decode("utf-8", errors="replace"),
+        })
+    if payload is None:
+        raise ValueError(f"non-JSON response (status {status})")
     lang.observe(extract_detected_lang(payload))
     return payload[0][0]
 
 
-def call_google(batch, lang, target_lang, api_key):
+def call_google(batch, lang, target_lang, api_key, context_html=None):
     items = [item for group in batch for item in group]
     indices = {item["id"]: i for i, item in enumerate(items, start=1)}
     id_by_index = {i: item_id for item_id, i in indices.items()}
-    html = "".join(build_chapter_html(group, indices) for group in batch)
+    html = "".join(build_chapter_html(group, indices, context_html) for group in batch)
     translated_html = post_translate_html(html, lang, target_lang, api_key)
     parsed = parse_translated_html(translated_html)
     source_by_id = {item["id"]: item["text"] for item in items}
@@ -409,13 +469,13 @@ def call_google(batch, lang, target_lang, api_key):
     return result
 
 
-def translate_batch(batch, lang, target_lang, api_key):
+def translate_batch(batch, lang, target_lang, api_key, context_html=None):
     items = [item for group in batch for item in group]
     expected_ids = {item["id"] for item in items}
     result, missing = {}, expected_ids
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
-            result = call_google(batch, lang, target_lang, api_key)
+            result = call_google(batch, lang, target_lang, api_key, context_html if attempt == 1 else None)
         except Exception as e:
             log(f"attempt {attempt} failed: {e}")
             result = {}
@@ -439,20 +499,54 @@ def translate_batch(batch, lang, target_lang, api_key):
     return result, sorted(missing, key=str)
 
 
-def translate(items, chapter_groups, lang, target_lang, api_key, batch_chars, concurrency=DEFAULT_CONCURRENCY):
+def normalize_for_comparison(text):
+    return re.sub(r"\s+", "", PUNCT_STRIP_PATTERN.sub("", text or "")).casefold()
+
+
+def build_context(raw_context, subtitle_source_lang, api_key):
+    probe = LanguageResolver("auto")
+    html = f"<div>{escape_html(raw_context)}</div>"
+    try:
+        translated_html = post_translate_html(html, probe, subtitle_source_lang, api_key)
+    except Exception as e:
+        log(f"context language check failed ({e}), using context as provided")
+        return raw_context
+    translated = unescape_html(TAG_PATTERN.sub("", ITALIC_PATTERN.sub("", translated_html))).strip()
+    if normalize_for_comparison(raw_context) == normalize_for_comparison(translated):
+        log("context already in source language, using as provided")
+        return raw_context
+    log(f"context translated into source language ({subtitle_source_lang})")
+    return translated
+
+
+def translate(items, chapter_groups, lang, target_lang, api_key, batch_chars, concurrency=DEFAULT_CONCURRENCY, raw_context=None):
     translations, skipped = {}, []
     batches, oversized = build_batches(items, chapter_groups, batch_chars)
     for item in oversized:
         log(f"unit {item['id']}: {len(item['text'])} chars exceeds batch_chars ({batch_chars}), "
             f"cue-level content cannot be split further, skipping without truncation")
         skipped.append(item["id"])
+    if not batches:
+        return translations, skipped
+
     total_batches = len(batches)
+    remaining = batches
+    context_html = None
+    if raw_context:
+        if lang.is_auto and not lang.pinned:
+            log("context provided with auto source language: sending first batch without context to detect it first")
+            first_result, first_missing = translate_batch(batches[0], lang, target_lang, api_key)
+            translations.update(first_result)
+            skipped.extend(first_missing)
+            remaining = batches[1:]
+        context_html = escape_html(build_context(raw_context, lang.current(), api_key))
+
     start_time = last_report = time.time()
-    completed = 0
+    completed = total_batches - len(remaining)
     progress_lock = threading.Lock()
 
     with ThreadPoolExecutor(max_workers=concurrency) as executor:
-        futures = {executor.submit(translate_batch, batch, lang, target_lang, api_key): batch for batch in batches}
+        futures = {executor.submit(translate_batch, batch, lang, target_lang, api_key, context_html): batch for batch in remaining}
         for future in as_completed(futures):
             result, missing = future.result()
             with progress_lock:
@@ -641,12 +735,12 @@ def retry_isolated_cues(missing_ids, cue_order, cue_text_by_id, lang, target_lan
     }
 
 
-def translate_units(units, chapters, cues, lang, target_lang, api_key, batch_chars, concurrency):
+def translate_units(units, chapters, cues, lang, target_lang, api_key, batch_chars, concurrency, raw_context=None):
     resolved = {unit["id"]: unit["resolved"] for unit in units if unit.get("resolved") is not None}
     pending = [unit for unit in units if unit.get("resolved") is None]
     chapter_of_unit = {uid: chapter["id"] for chapter in chapters for uid in chapter["unit_ids"]}
     items, chapter_groups = flatten_units(pending, chapter_of_unit)
-    translations_raw, _skipped = translate(items, chapter_groups, lang, target_lang, api_key, batch_chars, concurrency) if items else ({}, [])
+    translations_raw, _skipped = translate(items, chapter_groups, lang, target_lang, api_key, batch_chars, concurrency, raw_context) if items else ({}, [])
 
     results = dict(resolved)
     for unit in pending:
@@ -695,6 +789,18 @@ def translate_units(units, chapters, cues, lang, target_lang, api_key, batch_cha
     return translations, skipped
 
 
+def truncate_context(text, max_chars):
+    if len(text) <= max_chars:
+        return text, False
+    cut = text[:max_chars]
+    boundary_ok = not (cut[-1:].isascii() and cut[-1:].isalpha() and text[max_chars:max_chars + 1].isascii() and text[max_chars:max_chars + 1].isalpha())
+    if not boundary_ok:
+        last_space = cut.rfind(" ")
+        if last_space > 0:
+            cut = cut[:last_space]
+    return cut.rstrip(), True
+
+
 def main():
     global DEBUG_MODE, DEBUG_RAW_IN_FILE, DEBUG_RAW_OUT_FILE, ALIGNMENT_MODE
     
@@ -710,6 +816,8 @@ def main():
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--debug-raw-in", default=None)
     parser.add_argument("--debug-raw-out", default=None)
+    parser.add_argument("--context-file", default=None)
+    parser.add_argument("--context-max-chars", type=int, default=CONTEXT_MAX_CHARS)
     args = parser.parse_args()
 
     DEBUG_MODE = args.debug or os.environ.get("DEBUG") == "1"
@@ -723,16 +831,24 @@ def main():
     units = payload.get("units", [])
     chapters = payload.get("chapters", [])
     cues = payload.get("cues", [])
-    lang = LanguageResolver(args.source_lang or payload.get("source_lang") or "auto")
+    requested_lang = (args.source_lang or payload.get("source_lang") or "auto").strip()
+    lang = LanguageResolver("auto" if requested_lang.lower() == "auto" else requested_lang)
     target_lang = args.target_lang or payload.get("target_lang", "zh-CN")
     api_key = args.api_key or os.environ.get(API_KEY_ENV)
+
+    raw_context = None
+    if args.context_file:
+        raw_context = open(args.context_file, encoding="utf-8").read().strip()
+        raw_context, truncated = truncate_context(raw_context, args.context_max_chars)
+        if truncated:
+            log(f"context truncated to {args.context_max_chars} chars (word boundary preserved)")
 
     if not api_key:
         result = {"success": False, "reason": "missing_api_key", "translations": {}, "skipped": [], "source_lang": lang.requested, "target_lang": target_lang}
     elif not units:
         result = {"success": False, "reason": "no_units", "translations": {}, "skipped": [], "source_lang": lang.requested, "target_lang": target_lang}
     else:
-        translations, skipped = translate_units(units, chapters, cues, lang, target_lang, api_key, args.batch_chars, args.concurrency)
+        translations, skipped = translate_units(units, chapters, cues, lang, target_lang, api_key, args.batch_chars, args.concurrency, raw_context)
         result = {
             "success": bool(translations),
             "translations": translations,
