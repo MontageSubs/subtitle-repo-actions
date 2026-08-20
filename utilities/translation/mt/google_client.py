@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: google_client.py
-# Version: 2.8.0
+# Version: 2.9.0
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -96,21 +96,21 @@
 #       never resent during any retry path (a retry exists to fix an error,
 #       and the context could be the cause). Truncated at CONTEXT_MAX_CHARS
 #       (default 300, --context-max-chars) with a warning, Latin truncation
-#       backing off to the nearest word boundary. Verified against the
-#       pinned subtitle source language before use: translated into that
-#       language via a dedicated auto-source call and, after stripping
-#       punctuation/whitespace, compared to the original — an unchanged
-#       result means it was already correct and the original is kept
-#       (preserving its exact wording), a changed result means the
-#       translated version is used instead. When source language is "auto"
-#       and not yet pinned, the very first batch is sent without context
-#       specifically to obtain the pinned language before this check runs
-#       (this probe always uses its own auto-source detection, independent
-#       of whatever --source-lang was given for the subtitle content, since
-#       the context file's language is a separate, unverified fact). Batch
-#       packing reserves room for one context copy per chapter/div so the
-#       real payload (content + repeated context) stays within batch_chars,
-#       rather than letting per-div repetition silently balloon past it.
+#       backing off to the nearest word boundary. Verified entirely locally
+#       before any request is sent — no network round-trip and no need to
+#       wait for a pinned source language: langdetect (a lightweight,
+#       offline n-gram classifier, not a translation call) detects the
+#       context's language and, separately, either the explicit
+#       --source-lang or a local detection over a sample of the actual
+#       subtitle text when source is "auto"; a mismatch drops the context
+#       entirely by default rather than risking confusing the NMT engine
+#       with off-language priming, and the same applies if detection is
+#       inconclusive or the package isn't installed (pip install langdetect
+#       to enable this check; without it, context is silently disabled).
+#       Batch packing reserves room for one context copy per chapter/div so
+#       the real payload (content + repeated context) stays within
+#       batch_chars, rather than letting per-div repetition silently
+#       balloon past it.
 #
 # 功能:
 #     - 基于 ThreadPoolExecutor 的并发 HTTP 请求。
@@ -158,15 +158,16 @@
 #       用于启发神经引擎理解——绝不提取回 cue 译文，也绝不在任何重试路径
 #       中重发（重试本就是为了排除错误，上下文可能正是错误来源）。按
 #       CONTEXT_MAX_CHARS（默认 300，--context-max-chars 可配）截断并给出
-#       警告，拉丁文截断回退到最近单词边界。使用前会针对已锁定的字幕源
-#       语言做校验：用独立的 auto 源语言调用把上下文翻译成该语言，剥离
-#       标点/空白后与原文比对——结果不变说明原文本就正确，保留原文（不
-#       损失原始措辞）；结果不同则改用翻译后的版本。若源语言为 auto 且
-#       尚未锁定，会先发送不含上下文的首批用于探测锁定语言，再进行该校验
-#       （这次探测始终独立用 auto，不受字幕本身 --source-lang 影响——上下文
-#       文件的语言是另一件未经验证的独立事实）。批次打包时会为每个章节/div
-#       预留一份上下文的字符开销，确保"真实内容+重复上下文"的总量始终在
-#       batch_chars 预算内，而不是让按 div 重复的上下文悄悄超出预算。
+#       警告，拉丁文截断回退到最近单词边界。发送前完全在本地完成校验，
+#       不产生任何网络往返、也无需等待语言锁定：用 langdetect（轻量离线
+#       n-gram 分类器，不是翻译调用）分别检测上下文语言，以及——显式指定
+#       --source-lang 时直接用该值，为 auto 时则对实际字幕文本取样做本地
+#       检测；两者不一致时默认直接丢弃上下文，而不是冒险用语言不符的内容
+#       误导神经引擎；检测结果不确定或未安装该库时同样丢弃（`pip install
+#       langdetect` 启用此项检查；未安装则上下文功能自动静默禁用）。批次
+#       打包时会为每个章节/div 预留一份上下文的字符开销，确保"真实内容+
+#       重复上下文"的总量始终在 batch_chars 预算内，而不是让按 div 重复的
+#       上下文悄悄超出预算。
 #
 # Usage / 用法:
 #     python google_client.py --input extract.json --source-lang en --target-lang zh-CN --output translations.json
@@ -258,10 +259,7 @@ CONTENT_CHAR_PATTERN = re.compile(r"\w", re.UNICODE)
 NO_TRANSLATE_TEMPLATE = '<span translate="no">{}</span>'
 CONTEXT_MAX_CHARS = 300
 CONTEXT_GROUP_MARKER = "ctx"
-PUNCT_STRIP_PATTERN = re.compile(
-    r"[!\"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~"
-    r"。，、；：？！…—～·「」『』（）〈〉《》【】〔〕“”‘’]"
-)
+CONTEXT_SAMPLE_CHARS = 500
 
 WORD_BASED_SCRIPTS = {"latin", "cyrillic", "arabic", "devanagari", "hebrew", "greek"}
 SCRIPT_CHAR_RANGES = {
@@ -511,24 +509,53 @@ def translate_batch(batch, lang, target_lang, api_key, context_html=None):
     return result, sorted(missing, key=str)
 
 
-def normalize_for_comparison(text):
-    return re.sub(r"\s+", "", PUNCT_STRIP_PATTERN.sub("", text or "")).casefold()
-
-
-def build_context(raw_context, subtitle_source_lang, api_key):
-    probe = LanguageResolver("auto", label="context")
-    html = f"<div>{escape_html(raw_context)}</div>"
+def detect_language(text):
     try:
-        translated_html = post_translate_html(html, probe, subtitle_source_lang, api_key)
-    except Exception as e:
-        log(f"context language check failed ({e}), using context as provided")
-        return raw_context
-    translated = unescape_html(TAG_PATTERN.sub("", ITALIC_PATTERN.sub("", translated_html))).strip()
-    if normalize_for_comparison(raw_context) == normalize_for_comparison(translated):
-        log("context already in source language, using as provided")
-        return raw_context
-    log(f"context translated into source language ({subtitle_source_lang})")
-    return translated
+        from langdetect import DetectorFactory, detect
+    except ImportError:
+        return None
+    DetectorFactory.seed = 0
+    try:
+        return detect(text)
+    except Exception:
+        return None
+
+
+def primary_subtag(lang_code):
+    return (lang_code or "").split("-")[0].lower()
+
+
+def sample_subtitle_text(units, max_chars=CONTEXT_SAMPLE_CHARS):
+    pieces, total = [], 0
+    for unit in units:
+        text = (unit.get("text") or "").strip()
+        if not text:
+            continue
+        pieces.append(text)
+        total += len(text)
+        if total >= max_chars:
+            break
+    return " ".join(pieces)[:max_chars]
+
+
+def resolve_context_language(raw_context, requested_source_lang, subtitle_sample):
+    if not raw_context:
+        return None
+    context_detected = detect_language(raw_context)
+    if context_detected is None:
+        log("langdetect unavailable or inconclusive on context text, dropping context to be safe "
+            "(pip install langdetect to enable this check)")
+        return None
+    reference = requested_source_lang if requested_source_lang != "auto" else detect_language(subtitle_sample)
+    if reference is None:
+        log("could not determine subtitle source language locally, dropping context to be safe")
+        return None
+    if primary_subtag(context_detected) != primary_subtag(reference):
+        log(f"context language ({context_detected}) does not match subtitle language ({reference}), "
+            f"dropping context")
+        return None
+    log(f"context language ({context_detected}) matches subtitle language, sending as provided")
+    return raw_context
 
 
 def translate(items, chapter_groups, lang, target_lang, api_key, batch_chars, concurrency=DEFAULT_CONCURRENCY, raw_context=None):
@@ -546,23 +573,14 @@ def translate(items, chapter_groups, lang, target_lang, api_key, batch_chars, co
         return translations, skipped
 
     total_batches = len(batches)
-    remaining = batches
-    context_html = None
-    if raw_context:
-        if lang.is_auto and not lang.pinned:
-            log("context provided with auto source language: sending first batch without context to detect it first")
-            first_result, first_missing = translate_batch(batches[0], lang, target_lang, api_key)
-            translations.update(first_result)
-            skipped.extend(first_missing)
-            remaining = batches[1:]
-        context_html = escape_html(build_context(raw_context, lang.current(), api_key))
+    context_html = escape_html(raw_context) if raw_context else None
 
     start_time = last_report = time.time()
-    completed = total_batches - len(remaining)
+    completed = 0
     progress_lock = threading.Lock()
 
     with ThreadPoolExecutor(max_workers=concurrency) as executor:
-        futures = {executor.submit(translate_batch, batch, lang, target_lang, api_key, context_html): batch for batch in remaining}
+        futures = {executor.submit(translate_batch, batch, lang, target_lang, api_key, context_html): batch for batch in batches}
         for future in as_completed(futures):
             result, missing = future.result()
             with progress_lock:
@@ -858,6 +876,7 @@ def main():
         raw_context, truncated = truncate_context(raw_context, args.context_max_chars)
         if truncated:
             log(f"context truncated to {args.context_max_chars} chars (word boundary preserved)")
+        raw_context = resolve_context_language(raw_context, lang.requested, sample_subtitle_text(units))
 
     if not api_key:
         result = {"success": False, "reason": "missing_api_key", "translations": {}, "skipped": [], "source_lang": lang.requested, "target_lang": target_lang}
