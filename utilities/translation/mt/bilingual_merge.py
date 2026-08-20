@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: bilingual_merge.py
-# Version: 2.3.0
+# Version: 2.3.1
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -76,6 +76,19 @@ _jieba_module = None
 _jieba_checked = False
 
 
+def pip_install(package):
+    for extra_args in ([], ["--break-system-packages"]):
+        try:
+            subprocess.check_call(
+                [sys.executable, "-m", "pip", "install", package, *extra_args],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60,
+            )
+            return True
+        except Exception:
+            continue
+    return False
+
+
 def is_chinese_target(target_lang):
     return (target_lang or "").split("-")[0].lower() == "zh"
 
@@ -102,20 +115,18 @@ def ensure_jieba():
     try:
         import jieba
     except ImportError:
+        if not pip_install("jieba"):
+            log("jieba unavailable, falling back to boundary heuristics")
+            return None
         try:
-            subprocess.check_call(
-                [sys.executable, "-m", "pip", "install", "jieba"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=60
-            )
             import jieba
-        except Exception as e:
+        except ImportError as e:
             log(f"jieba unavailable, falling back to boundary heuristics: {e}")
             return None
     jieba.setLogLevel(logging.ERROR)
     _jieba_module = jieba
     return _jieba_module
+
 
 ELLIPSIS_PATTERN = re.compile(r"\.{2,}|…+")
 DASH_ARTIFACT_PATTERN = re.compile(r"—+|-{2,}")

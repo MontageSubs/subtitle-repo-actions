@@ -2,172 +2,55 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: google_client.py
-# Version: 2.9.0
+# Version: 2.10.0
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p)
 # License: MIT License
 # Source: https://github.com/MontageSubs/subtitle-repo-actions/tree/main/utilities/translation/mt/
 #
 # Description / 描述:
-#     Batches and translates subtitle units using Google Translate's PA endpoint.
-#     Employs concurrent threading for faster translation, wraps text in HTML
-#     inline anchors to preserve alignment, and handles retries/fallbacks automatically.
-#     For units carrying glossary `term_matches`, wraps each matched span in a
-#     translate="no" tag so the provider returns it verbatim inside otherwise
-#     fully translated context, then locally substitutes the fixed target term
-#     into the result, preserving cross-sentence context that a pre-substituted
-#     or placeholder-based send would break. Issues a single isolated retry
-#     when the substituted result still looks untranslated.
-#     使用 Google Translate PA 接口进行字幕单元批量机器翻译。采用并发线程池
-#     加速翻译，通过 HTML 行内标签包裹文本以保留对应关系，并自动处理
-#     请求重试与失败回退。对携带词表命中（term_matches）的单元，将命中片段
-#     包裹为 translate="no" 标签发送，使供应商在完整上下文中原样保留该片段、
-#     正常翻译周围语境，收到结果后在本地将其替换为固定译名——相比预先替换
-#     或占位符方案更好地保留跨句上下文；若替换后结果仍疑似未翻译，单独
-#     重发一次原句作为质量兜底。
+#     Batch-translates subtitle units through Google Translate's internal PA
+#     endpoint (translateHtml), built for the volume and reliability demands
+#     of unattended CI runs rather than interactive one-off requests. Units
+#     are grouped by chapter (a scene or song run) into HTML documents, sent
+#     concurrently, and reassembled through a marker-based alignment scheme
+#     that survives the provider occasionally re-splitting or dropping
+#     content. Glossary terms and certain structural markers are protected
+#     from translation via official untranslatable-text markup; a cascading
+#     retry system recovers individual units, context windows, or single
+#     cues whenever a batch comes back incomplete. An optional short
+#     paragraph of context can be prepended to every request to prime the
+#     engine's understanding, verified locally before anything is sent.
+#     通过 Google 翻译内部的 PA 接口（translateHtml）批量翻译字幕单元，
+#     设计目标是无人值守 CI 环境下的吞吐量与可靠性，而非交互式单次请求。
+#     单元按章节（场景/歌曲片段）分组打包成 HTML 文档并发送出，并发处理，
+#     通过基于标记的对齐方案重新拼装结果——即便供应商偶尔对内容重新
+#     拆分或丢弃，该方案依然能正确对应。词表术语与部分结构性标记通过
+#     官方免翻译标记加以保护；批次不完整时，一套级联重试系统会依次
+#     恢复单个单元、上下文窗口或单条 cue。可选携带一段简短上下文随每次
+#     请求前置发送以启发引擎理解，发送前完全在本地完成校验。
 #
 # Features:
-#     - Concurrent HTTP requests via ThreadPoolExecutor.
-#     - Chapter-aware batching: whole chapters (scene/song runs) are packed
-#       into a batch under character limits (DEFAULT_BATCH_CHARS), splitting
-#       by character count only as a fallback for an oversized chapter.
-#     - Protective inline HTML formatting (<span> tags) to isolate units and
-#       map results within a chapter's <div>, keeping context continuous
-#       inside a scene while still signaling a break between scenes.
-#     - Two alignment modes (ALIGNMENT_MODE, switchable via --alignment-mode):
-#       "span" trusts the provider's returned <span id> boundaries; "marker"
-#       (default) additionally prefixes each unit with an ⟦gID⟧ token and
-#       ignores span boundaries on parse, splitting the flattened response
-#       purely on these tokens so mid-batch mis-splitting cannot misalign
-#       units. Units resolving to punctuation-only text where the source had
-#       real content are treated as missing, feeding the existing retry path.
-#     - Robust retry mechanism for failed or partially failed translation batches.
-#     - Glossary terms sent as translate="no" spans (official untranslatable-
-#       text markup) rather than placeholder tokens or pre-substituted target
-#       text; matched spans are restored to their fixed target term locally
-#       after translation, keeping the sentence intact for the provider.
-#     - Single isolated retry (no loop) when the substituted result still
-#       looks untranslated; kept only if the retry actually differs.
-#     - Optional auto source-language detection: when no --source-lang is
-#       given, "auto" is sent on the first call and the provider's detected
-#       language is pinned from that point on for every subsequent call
-#       (including all retries), since short isolated retries are too little
-#       context for auto-detect to stay reliable across calls.
-#     - Glossary terms and in-text cue markers are sent as translate="no"
-#       spans; group/unit markers and the isolated-cue-retry marker stay
-#       plain text (empirically more reliable at those positions than
-#       protected spans; wrapping them caused deterministic, reproducible
-#       per-unit drops against the real provider in testing). Touching or
-#       overlapping protected spans within a unit's text are merged into one
-#       span before sending, so two translate="no" tags are never placed
-#       back-to-back with a zero-character gap between them — that adjacency
-#       pattern was the confirmed root cause of those drops. The existing
-#       missing-marker detection and windowed/isolated retries remain the
-#       primary safety net for whatever protection doesn't catch.
-#     - Debug raw request/response logging is append-only JSON Lines, one
-#       self-contained line per call carrying a monotonic sequence number
-#       (pairing request/response) and a timestamp, written under a lock via
-#       O_APPEND so concurrent threads can never interleave or lose a line.
-#       The request/response body is stored as native nested JSON (never
-#       re-escaped as a string), and the response entry additionally carries
-#       the HTTP status and headers for diagnosing provider-side behavior
-#       (e.g. locating the detected-language field). Use debug_format.py to
-#       render these logs as an indented, line-per-tag human-readable
-#       transcript.
-#     - Cue-level integrity check for multi-cue units (e.g. lyrics carrying
-#       several ⟦cNNNN⟧-marked cues merged into one translation unit): any
-#       cue marker swallowed by the provider during translation is detected
-#       individually, not just whole-unit emptiness. Recovery cascades from
-#       the existing windowed retry (unit-boundary markers now use a
-#       separate ⟦uN⟧ namespace so they never collide with cues' own ⟦cNNNN⟧
-#       markers) to a block-isolated fallback: the missing cue plus its 5
-#       neighbors on each side are each wrapped in an independent <div>,
-#       bypassing normal span-based batching so the provider cannot fuse
-#       them; recovered cues are spliced back in, unrecovered ones are left
-#       untouched rather than guessed at.
-#     - Oversized atomic items (a single unit/cue whose text alone exceeds
-#       batch_chars) are never truncated; they're excluded from batches and
-#       reported as skipped with a clear reason instead of being sent as-is
-#       or cut mid-cue.
-#     - Optional plain-text --context-file: a short paragraph prepended as
-#       its own translatable span at the start of every div sent (batches
-#       and chapter groups alike), purely to prime the NMT engine's
-#       understanding — never extracted back into cue translations, and
-#       never resent during any retry path (a retry exists to fix an error,
-#       and the context could be the cause). Truncated at CONTEXT_MAX_CHARS
-#       (default 300, --context-max-chars) with a warning, Latin truncation
-#       backing off to the nearest word boundary. Verified entirely locally
-#       before any request is sent — no network round-trip and no need to
-#       wait for a pinned source language: langdetect (a lightweight,
-#       offline n-gram classifier, not a translation call) detects the
-#       context's language and, separately, either the explicit
-#       --source-lang or a local detection over a sample of the actual
-#       subtitle text when source is "auto"; a mismatch drops the context
-#       entirely by default rather than risking confusing the NMT engine
-#       with off-language priming, and the same applies if detection is
-#       inconclusive or the package isn't installed (pip install langdetect
-#       to enable this check; without it, context is silently disabled).
-#       Batch packing reserves room for one context copy per chapter/div so
-#       the real payload (content + repeated context) stays within
-#       batch_chars, rather than letting per-div repetition silently
-#       balloon past it.
+#     - Concurrent, chapter-aware batching; oversized units are skipped, not truncated.
+#     - Marker-based alignment survives the provider re-splitting or dropping content.
+#     - Glossary terms and cue markers sent as translate="no", restored locally after.
+#     - Retry cascade recovers missing units, then context windows, then single cues.
+#     - Auto-detects and pins the source language so retries don't re-guess.
+#     - Optional --context-file primes translation, verified locally via langdetect.
+#     - Debug logging as JSON Lines, readable via debug_format.py.
 #
 # 功能:
-#     - 基于 ThreadPoolExecutor 的并发 HTTP 请求。
-#     - 章节感知分批：整章节（场景/歌曲片段）在字符数限制内打包进同一批
-#       （DEFAULT_BATCH_CHARS），仅当单个章节超限时才按字符数兜底拆分。
-#     - 使用 HTML 行内 <span> 标签在章节 <div> 内保护并隔离单元、确保对应
-#       关系，令场景内上下文连续，同时场景间仍有边界信号。
-#     - 两种对齐模式（ALIGNMENT_MODE，可通过 --alignment-mode 切换）：
-#       "span" 信任供应商返回的 <span id> 边界；"marker"（默认）额外为每个
-#       单元前置 ⟦gID⟧ 标记，解析时完全无视 span 边界，仅按该标记切分展平
-#       后的响应文本，杜绝供应商在批内错误拆分内容导致的错位。译文剥离标点
-#       后为空、但原文本身有实际内容的单元一律视为缺失，交由既有重试路径处理。
-#     - 针对失败或部分失败请求的健壮重试机制。
-#     - 词表命中片段以官方 translate="no" 标签发送（而非占位符或预先替换
-#       为目标语译名），命中片段随句子一同送出、供应商正常翻译周围语境，
-#       收到结果后在本地原样替换回固定译名。
-#     - 支持 auto 源语言：未指定 --source-lang 时首次请求发送 auto，供应商
-#       返回的探测语言从此锁定用于后续所有调用（含全部重试）——短文本重试
-#       上下文太少，auto 逐次探测容易在同形异义词上判断错误。
-#     - 词表术语与嵌在正文中的 cue 标记以 translate="no" 发送；group/unit
-#       标记及独立 cue 重试用的标记保持纯文本——实测这些位置纯文本本就
-#       可靠，包裹后反而在真实供应商上造成确定性、可复现的逐单元丢失。
-#       单元文本内相接触/重叠的保护区间会先合并为一个 span 再发送，杜绝
-#       两个 translate="no" 标签零间隔背靠背出现——这正是此次丢失问题
-#       的确认根因。既有的标记缺失检测与窗口/隔离重试仍是未被保护部分
-#       的主要安全网。
-#     - Debug 原始请求/响应日志改为仅追加的 JSON Lines，每行自包含、带
-#       单调递增序号（用于请求/响应配对）与时间戳，加锁配合 O_APPEND
-#       写入，确保并发线程之间绝不交错或丢行。请求/响应体以原生嵌套 JSON
-#       结构存储（不再作为字符串二次转义），响应条目额外记录 HTTP 状态码
-#       与响应头，便于排查供应商侧行为（如定位探测语言字段的实际位置）。
-#       可用 debug_format.py 把这些日志渲染成缩进展开、每标签一行的
-#       人类可读文本。
-#     - 针对多cue合并单元（如歌词，多条⟦cNNNN⟧标记的cue合并进同一翻译单元）
-#       做cue级完整性校验：任一cue标记被供应商吞并，精确定位到该cue而非仅
-#       判断整个unit是否为空。修复按序回退：先复用既有窗口重跑（其自身的
-#       unit边界标记已改用独立的⟦uN⟧命名空间，不再与cue自带的⟦cNNNN⟧标记
-#       冲突）；仍缺失则对问题cue及前后各5条分别包裹独立<div>发送，绕开
-#       span共享批处理以避免供应商融合它们；回收成功的cue原位拼回，回收
-#       失败的cue原样保留，不做臆测性改写。
-#     - 单个unit/cue自身文本即超出batch_chars时，绝不截断：该项被排除出
-#       批次，以明确原因计入skipped上报，而非原样发送或从中截断。
-#     - 可选的纯文本 --context-file：一段简短上下文，作为独立可翻译 span
-#       置于每次发送的每个 div 最前面（每批、每个章节 div 均如此），纯粹
-#       用于启发神经引擎理解——绝不提取回 cue 译文，也绝不在任何重试路径
-#       中重发（重试本就是为了排除错误，上下文可能正是错误来源）。按
-#       CONTEXT_MAX_CHARS（默认 300，--context-max-chars 可配）截断并给出
-#       警告，拉丁文截断回退到最近单词边界。发送前完全在本地完成校验，
-#       不产生任何网络往返、也无需等待语言锁定：用 langdetect（轻量离线
-#       n-gram 分类器，不是翻译调用）分别检测上下文语言，以及——显式指定
-#       --source-lang 时直接用该值，为 auto 时则对实际字幕文本取样做本地
-#       检测；两者不一致时默认直接丢弃上下文，而不是冒险用语言不符的内容
-#       误导神经引擎；检测结果不确定或未安装该库时同样丢弃（`pip install
-#       langdetect` 启用此项检查；未安装则上下文功能自动静默禁用）。批次
-#       打包时会为每个章节/div 预留一份上下文的字符开销，确保"真实内容+
-#       重复上下文"的总量始终在 batch_chars 预算内，而不是让按 div 重复的
-#       上下文悄悄超出预算。
+#     - 并发、章节感知分批；超长单元直接跳过，绝不截断。
+#     - 基于标记的对齐，即使供应商拆错或丢内容也不会错位。
+#     - 词表与 cue 标记以 translate="no" 发送、原样保留，之后本地替换回译名。
+#     - 重试级联：先恢复缺失单元，再带上下文窗口重发，最后隔离重发单条 cue。
+#     - 首次调用自动探测并锁定源语言，避免短文本重试反复误判。
+#     - 可选 --context-file 携带上下文，发送前用 langdetect 本地校验语言。
+#     - Debug 日志为 JSON Lines 格式，可用 debug_format.py 渲染可读。
+#
+# Dependencies / 依赖:
+#     - langdetect (pip install langdetect), optional, auto-installed on first use.
+#     - langdetect（pip install langdetect），可选，首次用到时自动安装。
 #
 # Usage / 用法:
 #     python google_client.py --input extract.json --source-lang en --target-lang zh-CN --output translations.json
@@ -189,6 +72,7 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 import threading
 import time
@@ -291,6 +175,44 @@ LANGUAGE_SCRIPTS = {
 
 def log(message):
     print(f"{SCRIPT_NAME}: {message}", file=sys.stderr)
+
+
+def pip_install(package):
+    for extra_args in ([], ["--break-system-packages"]):
+        try:
+            subprocess.check_call(
+                [sys.executable, "-m", "pip", "install", package, *extra_args],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60,
+            )
+            return True
+        except Exception:
+            continue
+    return False
+
+
+_LANGDETECT_MODULE = None
+_LANGDETECT_CHECKED = False
+
+
+def ensure_langdetect():
+    global _LANGDETECT_MODULE, _LANGDETECT_CHECKED
+    if _LANGDETECT_CHECKED:
+        return _LANGDETECT_MODULE
+    _LANGDETECT_CHECKED = True
+    try:
+        import langdetect
+    except ImportError:
+        if not pip_install("langdetect"):
+            log("langdetect unavailable, context language check disabled")
+            return None
+        try:
+            import langdetect
+        except ImportError as e:
+            log(f"langdetect unavailable, context language check disabled: {e}")
+            return None
+    langdetect.DetectorFactory.seed = 0
+    _LANGDETECT_MODULE = langdetect
+    return _LANGDETECT_MODULE
 
 
 def escape_html(text):
@@ -510,13 +432,11 @@ def translate_batch(batch, lang, target_lang, api_key, context_html=None):
 
 
 def detect_language(text):
-    try:
-        from langdetect import DetectorFactory, detect
-    except ImportError:
+    langdetect = ensure_langdetect()
+    if langdetect is None:
         return None
-    DetectorFactory.seed = 0
     try:
-        return detect(text)
+        return langdetect.detect(text)
     except Exception:
         return None
 
@@ -837,7 +757,6 @@ def truncate_context(text, max_chars):
 
 def main():
     global DEBUG_MODE, DEBUG_RAW_IN_FILE, DEBUG_RAW_OUT_FILE, ALIGNMENT_MODE
-    
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", default=None)
     parser.add_argument("--output", default=None)

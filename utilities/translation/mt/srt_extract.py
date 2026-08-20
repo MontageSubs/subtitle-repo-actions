@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: srt_extract.py
-# Version: 2.5.0
+# Version: 2.5.1
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -24,12 +24,14 @@
 #     - Groups subtitle cues based on punctuation, pause gaps, and quote continuity.
 #     - Units carry natural, unmarked merged text plus a `spans` list (original
 #       per-piece text/timing) so downstream can reconstruct without markers.
-#     - Annotates glossary hits as `term_matches` (position + source + target)
-#       (matched substring position + target); the translation step wraps
-#       the matched span in a no-translate marker to protect it verbatim.
+#     - Annotates glossary hits as `term_matches` (matched substring
+#       position + target); the translation step wraps the matched span in
+#       a no-translate marker to protect it verbatim.
 #     - Groups units into `chapters` (scene/song-level runs) so downstream
 #       batching can send whole scenes as translation context instead of
 #       splitting arbitrarily by character count.
+#     - Scene-change gap threshold (SCENE_CHANGE_MS, default 30000)
+#       configurable via --scene-change-ms.
 #
 # 功能特性：
 #     - 解析 SRT 字幕结构，并对文本和时间戳进行标准化。
@@ -39,12 +41,13 @@
 #     - 根据标点、停顿间隙和引号连续性对字幕句组进行分组。
 #     - 单元包含自然的无标记合并文本及 `spans` 列表（原分段
 #       文本/时间），以便下游在无需标记的情况下进行重建。
-#     - 将术语匹配标注为 `term_matches`（位置 + 原文 + 译文）
-#       （匹配子串位置 + 译文）；翻译步骤将命中片段包裹为免翻译
-#       标记以原样保护，不再由本脚本决定嵌入方式。
+#     - 将术语匹配标注为 `term_matches`（匹配子串位置 + 译文）；翻译步骤
+#       将命中片段包裹为免翻译标记以原样保护。
 #     - 将单元分组为 `chapters`（场景/歌曲级别），以便下游批处理
 #       能将整个场景作为翻译上下文发送，而非简单地按字符数
 #       进行随意拆分。
+#     - 场景切换判定的间隔阈值（SCENE_CHANGE_MS，默认 30000）可通过
+#       --scene-change-ms 配置。
 #
 # Usage / 用法:
 #     python srt_extract.py --input en.srt --glossary GLOSSARY.md --output extract.json
