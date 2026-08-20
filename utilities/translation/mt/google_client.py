@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: google_client.py
-# Version: 2.7.0
+# Version: 2.8.0
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -104,7 +104,13 @@
 #       (preserving its exact wording), a changed result means the
 #       translated version is used instead. When source language is "auto"
 #       and not yet pinned, the very first batch is sent without context
-#       specifically to obtain the pinned language before this check runs.
+#       specifically to obtain the pinned language before this check runs
+#       (this probe always uses its own auto-source detection, independent
+#       of whatever --source-lang was given for the subtitle content, since
+#       the context file's language is a separate, unverified fact). Batch
+#       packing reserves room for one context copy per chapter/div so the
+#       real payload (content + repeated context) stays within batch_chars,
+#       rather than letting per-div repetition silently balloon past it.
 #
 # 功能:
 #     - 基于 ThreadPoolExecutor 的并发 HTTP 请求。
@@ -156,7 +162,11 @@
 #       语言做校验：用独立的 auto 源语言调用把上下文翻译成该语言，剥离
 #       标点/空白后与原文比对——结果不变说明原文本就正确，保留原文（不
 #       损失原始措辞）；结果不同则改用翻译后的版本。若源语言为 auto 且
-#       尚未锁定，会先发送不含上下文的首批用于探测锁定语言，再进行该校验。
+#       尚未锁定，会先发送不含上下文的首批用于探测锁定语言，再进行该校验
+#       （这次探测始终独立用 auto，不受字幕本身 --source-lang 影响——上下文
+#       文件的语言是另一件未经验证的独立事实）。批次打包时会为每个章节/div
+#       预留一份上下文的字符开销，确保"真实内容+重复上下文"的总量始终在
+#       batch_chars 预算内，而不是让按 div 重复的上下文悄悄超出预算。
 #
 # Usage / 用法:
 #     python google_client.py --input extract.json --source-lang en --target-lang zh-CN --output translations.json
@@ -209,8 +219,9 @@ DEBUG_SEQUENCE = [0]
 
 
 class LanguageResolver:
-    def __init__(self, requested):
+    def __init__(self, requested, label="source"):
         self.requested = requested
+        self.label = label
         self._detected = None
         self._lock = threading.Lock()
 
@@ -235,7 +246,7 @@ class LanguageResolver:
         with self._lock:
             if self._detected is None:
                 self._detected = detected
-                log(f"auto-detected source language: {detected} (pinned for subsequent calls)")
+                log(f"auto-detected {self.label} language: {detected} (pinned for subsequent calls)")
 
 ALIGNMENT_MODE = "marker"
 GROUP_MARKER_TEMPLATE = "\u27e6g{}\u27e7"
@@ -304,14 +315,15 @@ def within_budget(text, limit):
     return False
 
 
-def split_oversized_chapter(items, batch_chars):
+def split_oversized_chapter(items, batch_chars, context_chars=0):
+    limit = max(batch_chars - context_chars, 1)
     pieces, piece, piece_chars, oversized = [], [], 0, []
     for item in items:
         item_chars = len(item["text"])
-        if item_chars > batch_chars:
+        if item_chars > limit:
             oversized.append(item)
             continue
-        if piece and piece_chars + item_chars > batch_chars:
+        if piece and piece_chars + item_chars > limit:
             pieces.append(piece)
             piece, piece_chars = [], 0
         piece.append(item)
@@ -321,7 +333,7 @@ def split_oversized_chapter(items, batch_chars):
     return pieces, oversized
 
 
-def build_batches(items, chapter_groups, batch_chars):
+def build_batches(items, chapter_groups, batch_chars, context_chars=0):
     by_id = {item["id"]: item for item in items}
     batches, oversized = [], []
     current, current_chars = [], 0
@@ -336,10 +348,10 @@ def build_batches(items, chapter_groups, batch_chars):
         group_items = [by_id[i] for i in group if i in by_id]
         if not group_items:
             continue
-        group_chars = sum(len(item["text"]) for item in group_items)
+        group_chars = sum(len(item["text"]) for item in group_items) + context_chars
         if group_chars > batch_chars:
             flush()
-            pieces, group_oversized = split_oversized_chapter(group_items, batch_chars)
+            pieces, group_oversized = split_oversized_chapter(group_items, batch_chars, context_chars)
             batches.extend([piece] for piece in pieces)
             oversized.extend(group_oversized)
         elif current_chars + group_chars > batch_chars:
@@ -504,7 +516,7 @@ def normalize_for_comparison(text):
 
 
 def build_context(raw_context, subtitle_source_lang, api_key):
-    probe = LanguageResolver("auto")
+    probe = LanguageResolver("auto", label="context")
     html = f"<div>{escape_html(raw_context)}</div>"
     try:
         translated_html = post_translate_html(html, probe, subtitle_source_lang, api_key)
@@ -521,7 +533,11 @@ def build_context(raw_context, subtitle_source_lang, api_key):
 
 def translate(items, chapter_groups, lang, target_lang, api_key, batch_chars, concurrency=DEFAULT_CONCURRENCY, raw_context=None):
     translations, skipped = {}, []
-    batches, oversized = build_batches(items, chapter_groups, batch_chars)
+    context_reserve = len(raw_context) if raw_context else 0
+    if context_reserve and context_reserve * 2 > batch_chars:
+        log(f"warning: context ({context_reserve} chars) is large relative to batch_chars ({batch_chars}), "
+            f"batches will pack very few chapters per div")
+    batches, oversized = build_batches(items, chapter_groups, batch_chars, context_reserve)
     for item in oversized:
         log(f"unit {item['id']}: {len(item['text'])} chars exceeds batch_chars ({batch_chars}), "
             f"cue-level content cannot be split further, skipping without truncation")
