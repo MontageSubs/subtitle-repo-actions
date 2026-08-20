@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: bilingual_merge.py
-# Version: 2.3.1
+# Version: 2.3.2
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -193,18 +193,12 @@ MUSIC_NOTE_PATTERN = re.compile(f"[{MUSIC_NOTE_CHARS}]")
 MUSIC_NOTE_LEADING_GAP_PATTERN = re.compile(f"(?<=\\S)([{MUSIC_NOTE_CHARS}])")
 MUSIC_NOTE_TRAILING_GAP_PATTERN = re.compile(f"([{MUSIC_NOTE_CHARS}])(?=\\S)")
 MUSIC_INTERIOR_NOTE_PATTERN = re.compile(f"(?<!^)[{MUSIC_NOTE_CHARS}](?!$)")
-SOURCE_LEADING_TAG_PATTERN = re.compile(r"^(?:<[^>]+>)*\s*")
 POSITION_TOP_TAG = "{\\an7}"
 
 
 def fix_music_spacing(text):
     text = MUSIC_NOTE_LEADING_GAP_PATTERN.sub(r" \1", text)
     return MUSIC_NOTE_TRAILING_GAP_PATTERN.sub(r"\1 ", text)
-
-
-def source_is_music(text):
-    stripped = SOURCE_LEADING_TAG_PATTERN.sub("", text)
-    return bool(stripped) and stripped[0] in MUSIC_NOTE_CHARS
 
 
 def format_music_line(text):
@@ -497,15 +491,14 @@ def enforce_quote_closure(parts, translated_text, target_lang):
 
 
 def split_by_full_markers(translated_text, spans):
-    expected_ids = {span["id"] for span in spans}
     chunks = MARKER_PATTERN.split(translated_text)
     if len(chunks) != 1 + 2 * len(spans) or chunks[0].strip():
         return None
     found_ids = [int(g) for g in chunks[1::2]]
-    if set(found_ids) != expected_ids or len(found_ids) != len(set(found_ids)):
+    expected_ids = [span["id"] for span in spans]
+    if found_ids != expected_ids:
         return None
-    by_id = dict(zip(found_ids, chunks[2::2]))
-    return [by_id[span["id"]].strip() for span in spans]
+    return [chunk.strip() for chunk in chunks[2::2]]
 
 
 def split_by_markers(translated_text, spans, protected=(), target_lang=None, source_lang=None):
@@ -598,12 +591,20 @@ def determine_dash_style(cues):
 DASH_REPLACE_PATTERN = re.compile(r"(^|\s)-\s*")
 
 
+def compute_cue_music_flags(units):
+    kinds_by_cue = {}
+    for unit in units:
+        for span in unit["spans"]:
+            kinds_by_cue.setdefault(span["id"], []).append(span.get("kind") == "music")
+    return {cue_id: bool(kinds) and all(kinds) for cue_id, kinds in kinds_by_cue.items()}
+
+
 def build_bilingual_cues(cues, units, translations, target_lang, source_lang=None):
     cue_segments = {}
     approx_splits = []
     glossary_terms = collect_glossary_terms(units)
     dash_style = determine_dash_style(cues)
-    cue_text_by_id = {cue["id"]: cue["text"] for cue in cues}
+    cue_all_music = compute_cue_music_flags(units)
 
     for unit in units:
         spans = unit["spans"]
@@ -619,7 +620,7 @@ def build_bilingual_cues(cues, units, translations, target_lang, source_lang=Non
             approx_splits.append({"unit_id": unit["id"], "cues": [span["id"] for span in spans], "method": method})
         for span, part in zip(spans, parts):
             part = normalize_translation(part, target_lang)
-            if span.get("kind") == "music" and not source_is_music(cue_text_by_id.get(span["id"], "")):
+            if span.get("kind") == "music" and not cue_all_music.get(span["id"], False):
                 part = format_music_line(part)
             cue_segments.setdefault(span["id"], []).append((span.get("dash_index", 0), part))
 
@@ -636,7 +637,7 @@ def build_bilingual_cues(cues, units, translations, target_lang, source_lang=Non
         if translation:
             translation = DASH_REPLACE_PATTERN.sub(rf"\1{dash_style}", translation)
             translation = normalize_exclaim_question(translation)
-            if source_is_music(cue["text"]):
+            if cue_all_music.get(cue["id"], False):
                 translation = POSITION_TOP_TAG + format_music_line(translation)
             else:
                 translation = restore_quote_markers(translation, cue["text"], target_lang)
