@@ -294,17 +294,26 @@ def classify_boundary(text):
     return None
 
 
-def resolve_anchor_cuts(text, boundary_types, protected):
-    indices_by_type = {}
-    for i, boundary in enumerate(boundary_types):
-        if boundary:
-            indices_by_type.setdefault(boundary, []).append(i)
+def count_boundary_occurrences(text, boundary):
+    return sum(1 for _ in BOUNDARY_SEARCH_PATTERNS[boundary].finditer(text))
+
+
+def resolve_anchor_cuts(text, spans, boundary_types, protected):
+    candidates_by_type = {}
+    consumed_by_type = {}
     anchors = {}
-    for boundary, indices in indices_by_type.items():
-        candidates = [m.end() for m in BOUNDARY_SEARCH_PATTERNS[boundary].finditer(text)
-                      if not inside_protected_span(m.end(), protected) and not is_leading_punct_run(text, m.start())]
-        if len(candidates) == len(indices):
-            anchors.update(zip(indices, candidates))
+    for i, boundary in enumerate(boundary_types):
+        if not boundary:
+            continue
+        if boundary not in candidates_by_type:
+            candidates_by_type[boundary] = [m.end() for m in BOUNDARY_SEARCH_PATTERNS[boundary].finditer(text)
+                                             if not inside_protected_span(m.end(), protected) and not is_leading_punct_run(text, m.start())]
+        candidates = candidates_by_type[boundary]
+        consumed = consumed_by_type.get(boundary, 0)
+        need = count_boundary_occurrences(spans[i]["text"], boundary)
+        if need > 0 and consumed + need - 1 < len(candidates):
+            anchors[i] = candidates[consumed + need - 1]
+        consumed_by_type[boundary] = consumed + need
     return anchors
 
 
@@ -400,7 +409,7 @@ def enforce_punctuation_placement(parts):
 
 def split_by_boundary(translated_text, spans, protected=(), target_lang=None, source_lang=None):
     boundary_types = [classify_boundary(span["text"]) for span in spans[:-1]]
-    anchors = resolve_anchor_cuts(translated_text, boundary_types, protected) \
+    anchors = resolve_anchor_cuts(translated_text, spans, boundary_types, protected) \
         if punctuation_anchors_enabled(source_lang, target_lang) else {}
     lengths = [effective_length(span["text"]) for span in spans]
     total = sum(lengths) or 1
