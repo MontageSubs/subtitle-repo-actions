@@ -64,9 +64,85 @@
 #     130  interrupted by Ctrl+C / 被 Ctrl+C 中断
 # ============================================================================
 import argparse
+import codecs
 import json
 import re
+import subprocess
 import sys
+
+BOM_SIGNATURES = [
+    ("utf-32-le", codecs.BOM_UTF32_LE), ("utf-32-be", codecs.BOM_UTF32_BE),
+    ("utf-8-sig", codecs.BOM_UTF8), ("utf-16-le", codecs.BOM_UTF16_LE), ("utf-16-be", codecs.BOM_UTF16_BE),
+]
+FALLBACK_ENCODINGS = ["cp1252", "gb18030", "big5", "shift_jis", "euc-kr", "iso-8859-1"]
+
+_CHARSET_NORMALIZER_CHECKED = False
+_CHARSET_NORMALIZER_MODULE = None
+
+
+def pip_install(package):
+    for extra_args in ([], ["--break-system-packages"]):
+        try:
+            subprocess.check_call(
+                [sys.executable, "-m", "pip", "install", package, *extra_args],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60,
+            )
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def ensure_charset_normalizer():
+    global _CHARSET_NORMALIZER_CHECKED, _CHARSET_NORMALIZER_MODULE
+    if _CHARSET_NORMALIZER_CHECKED:
+        return _CHARSET_NORMALIZER_MODULE
+    _CHARSET_NORMALIZER_CHECKED = True
+    try:
+        import charset_normalizer
+    except ImportError:
+        if not pip_install("charset-normalizer"):
+            log("charset_normalizer unavailable, falling back to a fixed encoding guess list")
+            return None
+        try:
+            import charset_normalizer
+        except ImportError as e:
+            log(f"charset_normalizer unavailable, falling back to a fixed encoding guess list: {e}")
+            return None
+    _CHARSET_NORMALIZER_MODULE = charset_normalizer
+    return _CHARSET_NORMALIZER_MODULE
+
+
+def detect_newline_style(text):
+    if "\r\n" in text:
+        return "crlf"
+    if "\r" in text:
+        return "cr"
+    return "lf"
+
+
+def decode_srt_bytes(raw_bytes):
+    for encoding, signature in BOM_SIGNATURES:
+        if raw_bytes.startswith(signature):
+            return raw_bytes[len(signature):].decode(encoding.replace("-sig", "")), encoding, True
+
+    try:
+        return raw_bytes.decode("utf-8"), "utf-8", False
+    except UnicodeDecodeError:
+        pass
+
+    charset_normalizer = ensure_charset_normalizer()
+    if charset_normalizer is not None:
+        best = charset_normalizer.from_bytes(raw_bytes).best()
+        if best is not None:
+            return str(best), best.encoding, False
+
+    for encoding in FALLBACK_ENCODINGS:
+        try:
+            return raw_bytes.decode(encoding), encoding, False
+        except UnicodeDecodeError:
+            continue
+    return raw_bytes.decode("utf-8", errors="replace"), "utf-8", False
 
 SCRIPT_NAME = "srt_extract"
 
@@ -74,7 +150,8 @@ TIME_LINE_PATTERN = re.compile(r"(\d{2}:\d{2}:\d{2}[,.]\d{3})\s*-->\s*(\d{2}:\d{
 TAG_PATTERN = re.compile(r"<[^>]+>|\{[^}]*\}")
 WHITESPACE_PATTERN = re.compile(r"\s+")
 TERMINAL_PUNCT_PATTERN = re.compile(r"[.!?。！？][’”\"')\]」』】）]*\s*$")
-TRAILING_CONTINUATION_PATTERN = re.compile(r"(\.{2,}|-{2,}|…)\s*$")
+TRAILING_ELLIPSIS_PATTERN = re.compile(r"(\.{2,}|…)\s*$")
+TRAILING_CUTOFF_PATTERN = re.compile(r"-{2,}\s*$")
 DIALOGUE_DASH_PATTERN = re.compile(r"(?:^|(?<=\s))-(?!-)\s?")
 STUTTER_WORD_PATTERN = re.compile(r"(?<![A-Za-z])([A-Za-z])-\1(?![A-Za-z])", re.IGNORECASE)
 STUTTER_PREFIX_PATTERN = re.compile(r"(?<![A-Za-z])([A-Za-z])-(?=\1[a-z])", re.IGNORECASE)
@@ -297,8 +374,10 @@ def split_dialogue(text):
 
 
 def has_terminal_punct(text):
-    if TRAILING_CONTINUATION_PATTERN.search(text):
+    if TRAILING_ELLIPSIS_PATTERN.search(text):
         return False
+    if TRAILING_CUTOFF_PATTERN.search(text):
+        return True
     return bool(TERMINAL_PUNCT_PATTERN.search(text))
 
 
@@ -601,10 +680,17 @@ def main():
     CASE_SENSITIVE_GLOSSARY = args.case_sensitive_glossary
     SCENE_CHANGE_MS = args.scene_change_ms
 
-    raw = open(args.input, encoding="utf-8-sig").read() if args.input else sys.stdin.read()
+    if args.input:
+        raw_bytes = open(args.input, "rb").read()
+    else:
+        raw_bytes = sys.stdin.buffer.read()
+    raw, detected_encoding, has_bom = decode_srt_bytes(raw_bytes)
+    source_format = {"encoding": detected_encoding, "bom": has_bom, "newline": detect_newline_style(raw)}
+    log(f"input decoded as {detected_encoding}{' with BOM' if has_bom else ''}, newline style: {source_format['newline']}")
     glossary = build_glossary_from_markdown(open(args.glossary, encoding="utf-8").read()) if args.glossary else {}
 
     result = extract(raw, glossary, strip_sdh_enabled=not args.keep_sdh, source_lang=args.source_lang)
+    result["source_format"] = source_format
     sdh_note = ""
     if not args.keep_sdh:
         stats = result["sdh_removed"]

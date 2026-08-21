@@ -288,11 +288,11 @@ def build_chapter_html(group, indices, context_html=None):
     marker = ALIGNMENT_MODE == "marker"
     prefix = ""
     if context_html:
-        marker_text = GROUP_MARKER_TEMPLATE.format(CONTEXT_GROUP_MARKER) if marker else ""
+        marker_text = NO_TRANSLATE_TEMPLATE.format(GROUP_MARKER_TEMPLATE.format(CONTEXT_GROUP_MARKER)) if marker else ""
         prefix = f'<span id={CONTEXT_GROUP_MARKER}>{marker_text}{context_html}</span>'
     spans = "".join(
         f'<span id={indices[item["id"]]}>'
-        f'{GROUP_MARKER_TEMPLATE.format(indices[item["id"]]) if marker else ""}'
+        f'{NO_TRANSLATE_TEMPLATE.format(GROUP_MARKER_TEMPLATE.format(indices[item["id"]])) if marker else ""}'
         f'{item.get("html", escape_html(item["text"]))}</span>'
         for item in group
     )
@@ -614,7 +614,7 @@ def retry_windowed(units, suspect_id, lang, target_lang, api_key, batch_chars):
     for unit in window[1:]:
         text_pieces.append(f" {UNIT_MARKER_TEMPLATE.format(unit['id'])} ")
         text_pieces.append(unit["text"])
-        html_pieces.append(escape_html(f" {UNIT_MARKER_TEMPLATE.format(unit['id'])} "))
+        html_pieces.append(f" {NO_TRANSLATE_TEMPLATE.format(UNIT_MARKER_TEMPLATE.format(unit['id']))} ")
         html_pieces.append(protect_content_html(unit["text"], unit.get("term_matches") or []))
     windowed_text = "".join(text_pieces)
     if not within_budget(windowed_text, batch_chars):
@@ -660,7 +660,7 @@ def patch_missing_cues(text, expected_ids, recovered):
 
 def build_isolated_divs(cue_ids, cue_text_by_id):
     return "".join(
-        f"<div>{CUE_MARKER_TEMPLATE.format(cid)} {escape_html(cue_text_by_id[cid])}</div>"
+        f"<div>{NO_TRANSLATE_TEMPLATE.format(CUE_MARKER_TEMPLATE.format(cid))} {escape_html(cue_text_by_id[cid])}</div>"
         for cid in cue_ids if cid in cue_text_by_id
     )
 

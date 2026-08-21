@@ -658,6 +658,35 @@ def format_srt_time(value):
     return value.replace(".", ",")
 
 
+def resolve_output_encoding(requested, source_format):
+    if requested and requested != "same":
+        return requested, False
+    return source_format.get("encoding", "utf-8"), source_format.get("bom", False)
+
+
+def apply_newline_style(text, newline):
+    if newline == "crlf":
+        return text.replace("\n", "\r\n")
+    if newline == "cr":
+        return text.replace("\n", "\r")
+    return text
+
+
+def encode_output_text(text, encoding, bom):
+    base = encoding.replace("-sig", "").lower()
+    try:
+        if bom and base == "utf-8":
+            return text.encode("utf-8-sig"), "utf-8-sig"
+        if bom and base.startswith("utf-16"):
+            return text.encode("utf-16"), "utf-16"
+        if bom and base.startswith("utf-32"):
+            return text.encode("utf-32"), "utf-32"
+        return text.encode(base), base
+    except (LookupError, UnicodeEncodeError) as e:
+        log(f"cannot encode output as {encoding} ({e}), falling back to utf-8")
+        return text.encode("utf-8"), "utf-8"
+
+
 def render_srt(cues):
     blocks = []
     for position, cue in enumerate(cues, start=1):
@@ -706,6 +735,8 @@ def main():
     parser.add_argument("--extract", required=True)
     parser.add_argument("--translations", required=True)
     parser.add_argument("--output", default=None)
+    parser.add_argument("--output-encoding", default=None,
+                         help="'same' (default: inherit source_format recorded by srt_extract.py) or an explicit codec name such as utf-8")
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
 
@@ -718,8 +749,13 @@ def main():
     log(f"status: ok (cues={len(extract_data['cues'])}, missing={result['missing_count']}, approx_splits={len(result['approx_splits'])})")
 
     if args.output:
-        with open(args.output, "w", encoding="utf-8") as f:
-            f.write(result["srt"])
+        source_format = extract_data.get("source_format") or {}
+        resolved_encoding, use_bom = resolve_output_encoding(args.output_encoding, source_format)
+        newline = source_format.get("newline", "lf")
+        srt_bytes, actual_encoding = encode_output_text(apply_newline_style(result["srt"], newline), resolved_encoding, use_bom)
+        log(f"output written as {actual_encoding}{' with BOM' if use_bom else ''}, newline style: {newline}")
+        with open(args.output, "wb") as f:
+            f.write(srt_bytes)
         with open(f"{args.output}.meta.json", "w", encoding="utf-8") as f:
             json.dump({"approx_splits": result["approx_splits"], "missing_count": result["missing_count"]}, f, ensure_ascii=False)
     else:
