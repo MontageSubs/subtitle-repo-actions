@@ -295,7 +295,7 @@ def classify_boundary(text):
 
 
 def count_boundary_occurrences(text, boundary):
-    return sum(1 for _ in BOUNDARY_SEARCH_PATTERNS[boundary].finditer(text))
+    return sum(1 for m in BOUNDARY_SEARCH_PATTERNS[boundary].finditer(text) if m.start() > 0)
 
 
 def resolve_anchor_cuts(text, spans, boundary_types, protected):
