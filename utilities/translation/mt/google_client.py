@@ -4,7 +4,7 @@
 # Name: google_client.py
 # Version: 2.11.1
 # Organization: MontageSubs (蒙太奇字幕社区)
-# Contributors: Meow P (小p)
+# Contributors: Meow P (小p), Joey
 # License: MIT License
 # Source: https://github.com/MontageSubs/subtitle-repo-actions/tree/main/utilities/translation/mt/
 #

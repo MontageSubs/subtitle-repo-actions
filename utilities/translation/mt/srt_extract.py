@@ -2,9 +2,9 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: srt_extract.py
-# Version: 2.5.1
+# Version: 2.5.2
 # Organization: MontageSubs (蒙太奇字幕社区)
-# Contributors: Meow P (小p)
+# Contributors: Meow P (小p), Joey
 # License: MIT License
 # Source: https://github.com/MontageSubs/subtitle-repo-actions/utilities/translation/mt/
 #
