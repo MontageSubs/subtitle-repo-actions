@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: bilingual_merge.py
-# Version: 2.4.2
+# Version: 2.5.0
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -294,10 +294,6 @@ def classify_boundary(text):
     return None
 
 
-def count_boundary_occurrences(text, boundary):
-    return sum(1 for m in BOUNDARY_SEARCH_PATTERNS[boundary].finditer(text) if m.start() > 0)
-
-
 def resolve_marker_anchors(text, spans):
     positions = {}
     for m in MARKER_PATTERN.finditer(text):
@@ -306,9 +302,41 @@ def resolve_marker_anchors(text, spans):
             if spans[i + 1].get("boundary") == "marker" and spans[i + 1]["id"] in positions}
 
 
-def resolve_anchor_cuts(text, spans, boundary_types, protected):
+def compute_expected_positions(translated_text, spans):
+    lengths = [effective_length(span["text"]) for span in spans]
+    total = sum(lengths) or 1
+    weights = [0.0] * len(translated_text)
+    for m in LATIN_WORD_PATTERN.finditer(translated_text):
+        w = 2.5 / (m.end() - m.start())
+        for i in range(m.start(), m.end()):
+            weights[i] = w
+    for m in DIGIT_PATTERN.finditer(translated_text):
+        weights[m.start()] = 0.5
+    for m in OTHER_WORD_PATTERN.finditer(translated_text):
+        weights[m.start()] = 1.0
+    for m in PUNCT_WEIGHT_PATTERN.finditer(translated_text):
+        weights[m.start()] = 0.5
+    total_weight = sum(weights)
+    cumulative, expected = 0, []
+    for length in lengths[:-1]:
+        cumulative += length
+        target_ratio = cumulative / total
+        if total_weight > 0:
+            target_weight, curr, pos = total_weight * target_ratio, 0, len(translated_text)
+            for j, w in enumerate(weights):
+                curr += w
+                if curr >= target_weight:
+                    pos = j
+                    break
+        else:
+            pos = len(translated_text) * target_ratio
+        expected.append(pos)
+    return expected
+
+
+def resolve_anchor_cuts(text, spans, boundary_types, protected, expected):
     candidates_by_type = {}
-    consumed_by_type = {}
+    used = set()
     anchors = {}
     for i, boundary in enumerate(boundary_types):
         if not boundary:
@@ -316,12 +344,12 @@ def resolve_anchor_cuts(text, spans, boundary_types, protected):
         if boundary not in candidates_by_type:
             candidates_by_type[boundary] = [m.end() for m in BOUNDARY_SEARCH_PATTERNS[boundary].finditer(text)
                                              if not inside_protected_span(m.end(), protected) and not is_leading_punct_run(text, m.start())]
-        candidates = candidates_by_type[boundary]
-        consumed = consumed_by_type.get(boundary, 0)
-        need = count_boundary_occurrences(spans[i]["text"], boundary)
-        if need > 0 and consumed + need - 1 < len(candidates):
-            anchors[i] = candidates[consumed + need - 1]
-        consumed_by_type[boundary] = consumed + need
+        available = [c for c in candidates_by_type[boundary] if c not in used]
+        if not available:
+            continue
+        cut = min(available, key=lambda pos: abs(pos - expected[i]))
+        anchors[i] = cut
+        used.add(cut)
     return anchors
 
 
@@ -427,50 +455,21 @@ def enforce_punctuation_placement(parts):
 
 def split_by_boundary(translated_text, spans, protected=(), target_lang=None, source_lang=None):
     boundary_types = [classify_boundary(span["text"]) for span in spans[:-1]]
-    anchors = resolve_anchor_cuts(translated_text, spans, boundary_types, protected) \
+    expected_positions = compute_expected_positions(translated_text, spans)
+    anchors = resolve_anchor_cuts(translated_text, spans, boundary_types, protected, expected_positions) \
         if punctuation_anchors_enabled(source_lang, target_lang) else {}
     marker_anchors = resolve_marker_anchors(translated_text, spans)
     anchors.update(marker_anchors)
-    lengths = [effective_length(span["text"]) for span in spans]
-    total = sum(lengths) or 1
-    
-    weights = [0.0] * len(translated_text)
-    for m in LATIN_WORD_PATTERN.finditer(translated_text):
-        w = 2.5 / (m.end() - m.start())
-        for i in range(m.start(), m.end()):
-            weights[i] = w
-    for m in DIGIT_PATTERN.finditer(translated_text):
-        weights[m.start()] = 0.5
-    for m in OTHER_WORD_PATTERN.finditer(translated_text):
-        weights[m.start()] = 1.0
-    for m in PUNCT_WEIGHT_PATTERN.finditer(translated_text):
-        weights[m.start()] = 0.5
-        
-    total_weight = sum(weights)
-    span_count = len(spans)
-    cursor, cumulative, parts, tags = 0, 0, [], []
-    
-    for i, (length, boundary) in enumerate(zip(lengths[:-1], boundary_types)):
-        cumulative += length
-        target_ratio = cumulative / total
-        if total_weight > 0:
-            target_weight = total_weight * target_ratio
-            curr = 0
-            expected = len(translated_text)
-            for j, w in enumerate(weights):
-                curr += w
-                if curr >= target_weight:
-                    expected = j
-                    break
-        else:
-            expected = len(translated_text) * target_ratio
-            
-        max_cut = len(translated_text) - (span_count - 1 - i)
+    cursor, parts, tags = 0, [], []
+
+    for i, boundary in enumerate(boundary_types):
+        expected = expected_positions[i]
+        max_cut = len(translated_text) - (len(spans) - 1 - i)
         cut, tag = resolve_cut(translated_text, cursor, expected, boundary, max_cut, protected, target_lang, anchors.get(i))
         tags.append("marker" if marker_anchors.get(i) == cut else tag)
         parts.append(translated_text[cursor:cut].strip())
         cursor = cut
-        
+
     parts.append(translated_text[cursor:].strip())
     if "marker" in tags:
         method = "marker_boundary" if all(t in (None, "marker") for t in tags) else "mixed_boundary"
