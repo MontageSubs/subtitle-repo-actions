@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: google_client.py
-# Version: 2.11.1
+# Version: 2.12.0
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -228,6 +228,15 @@ def unescape_html(text):
 
 def has_content(text):
     return bool(text) and bool(CONTENT_CHAR_PATTERN.search(text))
+
+
+def has_translatable_content(text, term_matches):
+    cursor, residue = 0, []
+    for match in sorted(term_matches or [], key=lambda m: m["start"]):
+        residue.append(text[cursor:match["start"]])
+        cursor = match["end"]
+    residue.append(text[cursor:])
+    return has_content("".join(residue))
 
 
 def wrap_marker(text):
@@ -598,6 +607,33 @@ def protect_content_html(text, term_matches):
     return "".join(pieces)
 
 
+def cue_term_matches_for_unit(unit):
+    spans = unit.get("spans") or []
+    term_matches = unit.get("term_matches") or []
+    if len(spans) <= 1:
+        return {span["id"]: term_matches for span in spans}
+    text, cursor, result = unit["text"], 0, {}
+    for span in spans:
+        pos = text.find(span["text"], cursor)
+        if pos == -1:
+            result[span["id"]] = []
+            continue
+        start, end = pos, pos + len(span["text"])
+        cursor = end
+        result[span["id"]] = [
+            {**match, "start": match["start"] - start, "end": match["end"] - start}
+            for match in term_matches if start <= match["start"] and match["end"] <= end
+        ]
+    return result
+
+
+def build_cue_term_matches(units):
+    result = {}
+    for unit in units:
+        result.update(cue_term_matches_for_unit(unit))
+    return result
+
+
 def flatten_units(units, chapter_of_unit):
     items, chapter_items = [], {}
     for unit in units:
@@ -714,21 +750,21 @@ def patch_missing_cues(text, expected_ids, recovered):
     return " ".join(f"{CUE_MARKER_TEMPLATE.format(cid)} {chunks[cid]}" for cid in expected_ids if cid in chunks)
 
 
-def build_isolated_divs(cue_ids, cue_text_by_id):
+def build_isolated_divs(cue_ids, cue_text_by_id, cue_term_matches):
     return "".join(
-        f"<div>{wrap_marker(CUE_MARKER_TEMPLATE.format(cid))} {escape_html(cue_text_by_id[cid])}</div>"
+        f"<div>{wrap_marker(CUE_MARKER_TEMPLATE.format(cid))} {protect_content_html(cue_text_by_id[cid], cue_term_matches.get(cid) or [])}</div>"
         for cid in cue_ids if cid in cue_text_by_id
     )
 
 
-def retry_isolated_cues(missing_ids, cue_order, cue_text_by_id, lang, target_lang, api_key, batch_chars):
+def retry_isolated_cues(missing_ids, cue_order, cue_text_by_id, cue_term_matches, lang, target_lang, api_key, batch_chars):
     position = {cid: i for i, cid in enumerate(cue_order)}
     positions = sorted(position[cid] for cid in missing_ids if cid in position)
     if not positions:
         return {}
     lo = max(0, positions[0] - ISOLATED_CUE_RADIUS)
     hi = min(len(cue_order) - 1, positions[-1] + ISOLATED_CUE_RADIUS)
-    html = build_isolated_divs(cue_order[lo:hi + 1], cue_text_by_id)
+    html = build_isolated_divs(cue_order[lo:hi + 1], cue_text_by_id, cue_term_matches)
     if not within_budget(html, batch_chars):
         return {}
     try:
@@ -739,7 +775,8 @@ def retry_isolated_cues(missing_ids, cue_order, cue_text_by_id, lang, target_lan
     flat = unescape_html(TAG_PATTERN.sub("", translated_html))
     recovered = split_cue_chunks(flat)
     return {
-        cid: text for cid, text in recovered.items()
+        cid: apply_term_replacements(text, cue_term_matches.get(cid) or [], target_lang)
+        for cid, text in recovered.items()
         if cid in missing_ids and has_content(text)
         and is_length_plausible(cue_text_by_id.get(cid, ""), text)
     }
@@ -773,6 +810,7 @@ def translate_units(units, chapters, cues, lang, target_lang, api_key, batch_cha
                     if text is not None and missing_cue_ids(unit_by_id[uid], text)}
     cue_order = [c["id"] for c in cues]
     cue_text_by_id = {c["id"]: c["text"] for c in cues}
+    cue_term_matches = build_cue_term_matches(units)
 
     for uid in sorted(length_suspects | cue_suspects):
         recovered = retry_windowed(units, uid, lang, target_lang, api_key, batch_chars)
@@ -787,7 +825,17 @@ def translate_units(units, chapters, cues, lang, target_lang, api_key, batch_cha
         remaining = missing_cue_ids(unit_by_id[uid], results[uid])
         if not remaining:
             continue
-        recovered_cues = retry_isolated_cues(remaining, cue_order, cue_text_by_id, lang, target_lang, api_key, batch_chars)
+        trivial = [cid for cid in remaining
+                   if not has_translatable_content(cue_text_by_id.get(cid, ""), cue_term_matches.get(cid))]
+        if trivial:
+            filled = {cid: apply_term_replacements(cue_text_by_id[cid], cue_term_matches.get(cid) or [], target_lang)
+                      for cid in trivial}
+            results[uid] = patch_missing_cues(results[uid], expected_cue_ids(unit_by_id[uid]), filled)
+            log(f"unit {uid}: cues {trivial} have no translatable content beyond glossary terms, filled without retry")
+            remaining = [cid for cid in remaining if cid not in trivial]
+        if not remaining:
+            continue
+        recovered_cues = retry_isolated_cues(remaining, cue_order, cue_text_by_id, cue_term_matches, lang, target_lang, api_key, batch_chars)
         if recovered_cues:
             results[uid] = patch_missing_cues(results[uid], expected_cue_ids(unit_by_id[uid]), recovered_cues)
             log(f"isolated cue retry for unit {uid}: recovered cues {sorted(recovered_cues)}")
