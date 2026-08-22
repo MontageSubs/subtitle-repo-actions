@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: bilingual_merge.py
-# Version: 2.4.0
+# Version: 2.4.1
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -326,15 +326,18 @@ def resolve_anchor_cuts(text, spans, boundary_types, protected):
 
 
 CLOSING_TAIL_CHARS = "'\"”’)\\]}》」』】〕＞〉»›"
-GENERAL_PUNCT_SEARCH_PATTERN = re.compile(r"[，,、；;。.!?！？：:…]+[" + CLOSING_TAIL_CHARS + r"]*")
+GENERAL_STRONG_PUNCT_PATTERN = re.compile(r"[，,、；;。.!?！？：:]+[" + CLOSING_TAIL_CHARS + r"]*")
+GENERAL_WEAK_PUNCT_PATTERN = re.compile(r"(?:\.{2,}|—+|…+)[" + CLOSING_TAIL_CHARS + r"]*")
 LEFT_CUT_PATTERN = re.compile(r"[“「『（([{＜〈《【〔„‚«‹¿¡]")
 BOOK_TITLE_PATTERN = re.compile(r"《[^《》]*》")
 EMBEDDED_QUOTE_PATTERN = re.compile(r"“[^“”]*”")
 EMBEDDED_QUOTE_MAX_CHARS = 16
 ORIGINAL_PUNCT_TOLERANCE = {"trail_off": 0.60, "comma": 0.20, "period": 0.20, "colon": 0.20}
 INFERRED_PUNCT_TOLERANCE = 0.15
+INFERRED_WEAK_PUNCT_TOLERANCE = 0.06
 INFERRED_MIN_SHARE = 0.5
-PUNCT_PROXIMITY_CHARS = 4
+PUNCT_PROXIMITY_CHARS = 8
+PUNCT_PROXIMITY_CHARS_WEAK = 3
 
 
 def is_leading_punct_run(text, match_start):
@@ -387,14 +390,21 @@ def resolve_cut(text, cursor, expected, boundary, max_cut, protected=(), target_
             cut = min(candidates, key=lambda pos: abs(pos - expected))
             if abs(cut - expected) <= max(ORIGINAL_PUNCT_TOLERANCE.get(boundary, 0.20) * chunk, PUNCT_PROXIMITY_CHARS):
                 return cut, "original"
-    inferred = [m.end() for m in GENERAL_PUNCT_SEARCH_PATTERN.finditer(text, cursor)
-                if cursor < m.end() < ceiling and not inside_protected_span(m.end(), protected)
-                and not is_leading_punct_run(text, m.start())]
-    inferred += [m.start() for m in LEFT_CUT_PATTERN.finditer(text, cursor)
-                 if cursor < m.start() < ceiling and not inside_protected_span(m.start(), protected)]
-    if inferred:
-        cut = min(inferred, key=lambda pos: abs(pos - expected))
+    strong = [m.end() for m in GENERAL_STRONG_PUNCT_PATTERN.finditer(text, cursor)
+              if cursor < m.end() < ceiling and not inside_protected_span(m.end(), protected)
+              and not is_leading_punct_run(text, m.start())]
+    strong += [m.start() for m in LEFT_CUT_PATTERN.finditer(text, cursor)
+               if cursor < m.start() < ceiling and not inside_protected_span(m.start(), protected)]
+    if strong:
+        cut = min(strong, key=lambda pos: abs(pos - expected))
         if abs(cut - expected) <= max(INFERRED_PUNCT_TOLERANCE * chunk, PUNCT_PROXIMITY_CHARS):
+            return cut, "inferred"
+    weak = [m.end() for m in GENERAL_WEAK_PUNCT_PATTERN.finditer(text, cursor)
+            if cursor < m.end() < ceiling and not inside_protected_span(m.end(), protected)
+            and not is_leading_punct_run(text, m.start())]
+    if weak:
+        cut = min(weak, key=lambda pos: abs(pos - expected))
+        if abs(cut - expected) <= max(INFERRED_WEAK_PUNCT_TOLERANCE * chunk, PUNCT_PROXIMITY_CHARS_WEAK):
             return cut, "inferred"
     boundaries = [b for b in (bd + cursor for bd in word_boundaries(text[cursor:], target_lang))
                   if cursor < b < ceiling and not inside_protected_span(b, protected)]
