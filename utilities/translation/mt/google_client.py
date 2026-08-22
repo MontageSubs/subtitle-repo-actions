@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: google_client.py
-# Version: 2.10.0
+# Version: 2.11.0
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -33,7 +33,8 @@
 # Features:
 #     - Concurrent, chapter-aware batching; oversized units are skipped, not truncated.
 #     - Marker-based alignment survives the provider re-splitting or dropping content.
-#     - Glossary terms and cue markers sent as translate="no", restored locally after.
+#     - Glossary terms sent as translate="no", restored locally after.
+#     - Alignment markers sent unwrapped by default (--wrap-markers to opt back in).
 #     - Retry cascade recovers missing units, then context windows, then single cues.
 #     - Auto-detects and pins the source language so retries don't re-guess.
 #     - Optional --context-file primes translation, verified locally via langdetect.
@@ -42,7 +43,8 @@
 # 功能:
 #     - 并发、章节感知分批；超长单元直接跳过，绝不截断。
 #     - 基于标记的对齐，即使供应商拆错或丢内容也不会错位。
-#     - 词表与 cue 标记以 translate="no" 发送、原样保留，之后本地替换回译名。
+#     - 词表以 translate="no" 发送、原样保留，之后本地替换回译名。
+#     - 对齐标记默认不包裹 translate="no"（可用 --wrap-markers 恢复包裹）。
 #     - 重试级联：先恢复缺失单元，再带上下文窗口重发，最后隔离重发单条 cue。
 #     - 首次调用自动探测并锁定源语言，避免短文本重试反复误判。
 #     - 可选 --context-file 携带上下文，发送前用 langdetect 本地校验语言。
@@ -90,7 +92,6 @@ MAX_ATTEMPTS = 3
 RETRY_DELAY = 3
 PROGRESS_INTERVAL = 20
 
-SPAN_PATTERN = re.compile(r'<span[^>]*id=["\']?([a-zA-Z0-9:]+)["\']?[^>]*>(.*?)</span>', re.DOTALL | re.IGNORECASE)
 ITALIC_PATTERN = re.compile(r"<i>.*?</i>", re.DOTALL)
 TAG_PATTERN = re.compile(r"<[^>]+>")
 USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -141,6 +142,7 @@ CUE_MARKER_PATTERN = re.compile(r"\u27e6c(\d+)\u27e7")
 CONTENT_CHAR_PATTERN = re.compile(r"\w", re.UNICODE)
 
 NO_TRANSLATE_TEMPLATE = '<span translate="no">{}</span>'
+WRAP_MARKERS = False
 CONTEXT_MAX_CHARS = 300
 CONTEXT_GROUP_MARKER = "ctx"
 CONTEXT_SAMPLE_CHARS = 500
@@ -228,6 +230,10 @@ def has_content(text):
     return bool(text) and bool(CONTENT_CHAR_PATTERN.search(text))
 
 
+def wrap_marker(text):
+    return NO_TRANSLATE_TEMPLATE.format(text) if WRAP_MARKERS else text
+
+
 def within_budget(text, limit):
     if len(text) <= limit:
         return True
@@ -288,44 +294,81 @@ def build_chapter_html(group, indices, context_html=None):
     marker = ALIGNMENT_MODE == "marker"
     prefix = ""
     if context_html:
-        marker_text = NO_TRANSLATE_TEMPLATE.format(GROUP_MARKER_TEMPLATE.format(CONTEXT_GROUP_MARKER)) if marker else ""
+        marker_text = wrap_marker(GROUP_MARKER_TEMPLATE.format(CONTEXT_GROUP_MARKER)) if marker else ""
         prefix = f'<span id={CONTEXT_GROUP_MARKER}>{marker_text}{context_html}</span>'
     spans = "".join(
         f'<span id={indices[item["id"]]}>'
-        f'{NO_TRANSLATE_TEMPLATE.format(GROUP_MARKER_TEMPLATE.format(indices[item["id"]])) if marker else ""}'
-        f'{item.get("html", escape_html(item["text"]))}</span>'
+        f'{wrap_marker(GROUP_MARKER_TEMPLATE.format(indices[item["id"]])) if marker else ""}'
+        f'{item.get("html", escape_html(item["text"]))}'
+        f'</span>'
         for item in group
     )
     return f"<div>{prefix}{spans}</div>"
 
 
-def parse_by_spans(html):
-    result = {}
-    for match in SPAN_PATTERN.finditer(html):
-        if not match.group(1).isdigit():
+SPAN_OPEN_PATTERN = re.compile(r'<span[^>]*\bid=["\']?([a-zA-Z0-9:]+)["\']?[^>]*>')
+
+
+def split_by_marker(flat_text, pattern):
+    parts = pattern.split(flat_text)
+    result, seen = {}, set()
+    for i in range(1, len(parts), 2):
+        key = parts[i]
+        if key in seen:
+            result.pop(key, None)
             continue
-        idx = int(match.group(1))
-        text = unescape_html(ITALIC_PATTERN.sub("", match.group(2))).strip()
+        seen.add(key)
+        text = parts[i + 1].strip()
+        if text:
+            result[key] = text
+    return result
+
+
+def parse_by_spans(html):
+    opens = [(m.end(), m.group(1)) for m in SPAN_OPEN_PATTERN.finditer(html) if m.group(1).isdigit()]
+    result = {}
+    for i, (end, idx_str) in enumerate(opens):
+        idx = int(idx_str)
+        chunk_end = opens[i + 1][0] if i + 1 < len(opens) else len(html)
+        raw = html[end:chunk_end]
+        text = unescape_html(TAG_PATTERN.sub("", ITALIC_PATTERN.sub("", raw))).strip()
+        text = " ".join(GROUP_MARKER_PATTERN.sub("", text).split())
+        if not text:
+            continue
         result[idx] = f"{result[idx]} {text}" if idx in result else text
     return result
 
 
 def parse_by_markers(html):
     flat = unescape_html(TAG_PATTERN.sub("", ITALIC_PATTERN.sub("", html)))
-    parts = GROUP_MARKER_PATTERN.split(flat)
-    result = {}
-    for i in range(1, len(parts), 2):
-        if parts[i].isdigit():
-            result[int(parts[i])] = parts[i + 1].strip()
-    return result
+    return {int(key): text for key, text in split_by_marker(flat, GROUP_MARKER_PATTERN).items() if key.isdigit()}
+
+
+MARKER_OVERREACH_RATIO = 1.3
+
+
+def choose_candidate(span_text, marker_text):
+    if marker_text is None:
+        return span_text
+    if span_text is None:
+        return marker_text
+    span_len = content_length(span_text)
+    if span_len and content_length(marker_text) / span_len > MARKER_OVERREACH_RATIO:
+        return span_text
+    return marker_text
 
 
 def parse_translated_html(html):
-    result = parse_by_markers(html) if ALIGNMENT_MODE == "marker" else parse_by_spans(html)
-    if DEBUG_MODE and not result:
-        with DEBUG_LOCK:
-            log(f"debug: parse_translated_html found NO matching blocks in HTML. Head: {html[:200]}")
-    return result
+    span_result = parse_by_spans(html)
+    marker_result = parse_by_markers(html) if ALIGNMENT_MODE == "marker" else {}
+    if DEBUG_MODE:
+        fallback_only = sorted(idx for idx in span_result if idx not in marker_result)
+        if fallback_only and ALIGNMENT_MODE == "marker":
+            log(f"debug: {len(fallback_only)} unit(s) recovered via span fallback (marker unreliable): {fallback_only}")
+        if not span_result and not marker_result:
+            with DEBUG_LOCK:
+                log(f"debug: parse_translated_html found NO matching blocks in HTML. Head: {html[:200]}")
+    return span_result, marker_result
 
 
 def next_debug_seq():
@@ -389,14 +432,16 @@ def call_google(batch, lang, target_lang, api_key, context_html=None):
     id_by_index = {i: item_id for item_id, i in indices.items()}
     html = "".join(build_chapter_html(group, indices, context_html) for group in batch)
     translated_html = post_translate_html(html, lang, target_lang, api_key)
-    parsed = parse_translated_html(translated_html)
+    span_result, marker_result = parse_translated_html(translated_html)
     source_by_id = {item["id"]: item["text"] for item in items}
     result = {}
-    for idx, text in parsed.items():
+    for idx in span_result.keys() | marker_result.keys():
         item_id = id_by_index.get(idx)
         if item_id is None:
             continue
-        if has_content(text) or not has_content(source_by_id.get(item_id, "")):
+        source_text = source_by_id.get(item_id, "")
+        text = choose_candidate(span_result.get(idx), marker_result.get(idx))
+        if has_content(text) or not has_content(source_text):
             result[item_id] = text
     return result
 
@@ -530,12 +575,12 @@ def is_untranslated(text, source_lang, target_lang):
 
 
 def build_protected_spans(text, term_matches):
-    spans = [{"start": m.start(), "end": m.end()} for m in CUE_MARKER_PATTERN.finditer(text)]
-    spans.extend({"start": m["start"], "end": m["end"]} for m in term_matches)
+    spans = [{"start": m.start(), "end": m.end(), "wrap": WRAP_MARKERS} for m in CUE_MARKER_PATTERN.finditer(text)]
+    spans.extend({"start": m["start"], "end": m["end"], "wrap": True} for m in term_matches)
     spans.sort(key=lambda s: s["start"])
     merged = []
     for span in spans:
-        if merged and span["start"] <= merged[-1]["end"]:
+        if merged and span["start"] <= merged[-1]["end"] and span["wrap"] == merged[-1]["wrap"]:
             merged[-1]["end"] = max(merged[-1]["end"], span["end"])
         else:
             merged.append(dict(span))
@@ -546,7 +591,8 @@ def protect_content_html(text, term_matches):
     pieces, cursor = [], 0
     for span in build_protected_spans(text, term_matches):
         pieces.append(escape_html(text[cursor:span["start"]]))
-        pieces.append(NO_TRANSLATE_TEMPLATE.format(escape_html(text[span["start"]:span["end"]])))
+        piece = escape_html(text[span["start"]:span["end"]])
+        pieces.append(NO_TRANSLATE_TEMPLATE.format(piece) if span["wrap"] else piece)
         cursor = span["end"]
     pieces.append(escape_html(text[cursor:]))
     return "".join(pieces)
@@ -614,7 +660,7 @@ def retry_windowed(units, suspect_id, lang, target_lang, api_key, batch_chars):
     for unit in window[1:]:
         text_pieces.append(f" {UNIT_MARKER_TEMPLATE.format(unit['id'])} ")
         text_pieces.append(unit["text"])
-        html_pieces.append(f" {NO_TRANSLATE_TEMPLATE.format(UNIT_MARKER_TEMPLATE.format(unit['id']))} ")
+        html_pieces.append(f" {wrap_marker(UNIT_MARKER_TEMPLATE.format(unit['id']))} ")
         html_pieces.append(protect_content_html(unit["text"], unit.get("term_matches") or []))
     windowed_text = "".join(text_pieces)
     if not within_budget(windowed_text, batch_chars):
@@ -624,13 +670,15 @@ def retry_windowed(units, suspect_id, lang, target_lang, api_key, batch_chars):
     response = result.get("window")
     if response is None:
         return {}
-    expected_ids = [unit["id"] for unit in window[1:]]
-    found_ids = [int(g) for g in UNIT_MARKER_PATTERN.findall(response)]
-    if found_ids != expected_ids:
-        return {}
-    chunks = UNIT_MARKER_PATTERN.split(response)[0::2]
+    lead = UNIT_MARKER_PATTERN.split(response, maxsplit=1)[0].strip()
+    chunks = {window[0]["id"]: lead} if lead else {}
+    chunks.update({int(k): v for k, v in split_by_marker(response, UNIT_MARKER_PATTERN).items() if k.isdigit()})
     keep_ids = {unit["id"] for unit in units[max(0, i - WINDOW_KEEP_RADIUS):i + WINDOW_KEEP_RADIUS + 1]}
-    return {unit["id"]: chunk.strip() for unit, chunk in zip(window, chunks) if unit["id"] in keep_ids}
+    unit_by_id = {unit["id"]: unit for unit in window}
+    return {
+        uid: text for uid, text in chunks.items()
+        if uid in keep_ids and is_length_plausible(unit_by_id[uid]["text"], text)
+    }
 
 
 def expected_cue_ids(unit):
@@ -639,7 +687,15 @@ def expected_cue_ids(unit):
 
 def split_cue_chunks(text):
     parts = CUE_MARKER_PATTERN.split(text or "")
-    return {int(parts[i]): parts[i + 1].strip() for i in range(1, len(parts), 2)}
+    result, seen = {}, set()
+    for i in range(1, len(parts), 2):
+        cid = int(parts[i])
+        if cid in seen:
+            result.pop(cid, None)
+            continue
+        seen.add(cid)
+        result[cid] = parts[i + 1].strip()
+    return result
 
 
 def missing_cue_ids(unit, text):
@@ -660,7 +716,7 @@ def patch_missing_cues(text, expected_ids, recovered):
 
 def build_isolated_divs(cue_ids, cue_text_by_id):
     return "".join(
-        f"<div>{NO_TRANSLATE_TEMPLATE.format(CUE_MARKER_TEMPLATE.format(cid))} {escape_html(cue_text_by_id[cid])}</div>"
+        f"<div>{wrap_marker(CUE_MARKER_TEMPLATE.format(cid))} {escape_html(cue_text_by_id[cid])}</div>"
         for cid in cue_ids if cid in cue_text_by_id
     )
 
@@ -756,7 +812,7 @@ def truncate_context(text, max_chars):
 
 
 def main():
-    global DEBUG_MODE, DEBUG_RAW_IN_FILE, DEBUG_RAW_OUT_FILE, ALIGNMENT_MODE
+    global DEBUG_MODE, DEBUG_RAW_IN_FILE, DEBUG_RAW_OUT_FILE, ALIGNMENT_MODE, WRAP_MARKERS
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", default=None)
     parser.add_argument("--output", default=None)
@@ -766,6 +822,7 @@ def main():
     parser.add_argument("--concurrency", type=int, default=DEFAULT_CONCURRENCY)
     parser.add_argument("--api-key", default=None)
     parser.add_argument("--alignment-mode", choices=["span", "marker"], default=None)
+    parser.add_argument("--wrap-markers", action="store_true")
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--debug-raw-in", default=None)
     parser.add_argument("--debug-raw-out", default=None)
@@ -778,6 +835,7 @@ def main():
     DEBUG_RAW_OUT_FILE = args.debug_raw_out
     if args.alignment_mode:
         ALIGNMENT_MODE = args.alignment_mode
+    WRAP_MARKERS = args.wrap_markers
 
     raw = open(args.input, encoding="utf-8").read() if args.input else sys.stdin.read()
     payload = json.loads(raw)

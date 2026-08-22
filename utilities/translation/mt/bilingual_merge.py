@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: bilingual_merge.py
-# Version: 2.3.2
+# Version: 2.4.0
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p)
 # License: MIT License
@@ -298,6 +298,14 @@ def count_boundary_occurrences(text, boundary):
     return sum(1 for m in BOUNDARY_SEARCH_PATTERNS[boundary].finditer(text) if m.start() > 0)
 
 
+def resolve_marker_anchors(text, spans):
+    positions = {}
+    for m in MARKER_PATTERN.finditer(text):
+        positions.setdefault(int(m.group(1)), m.start())
+    return {i: positions[spans[i + 1]["id"]] for i in range(len(spans) - 1)
+            if spans[i + 1].get("boundary") == "marker" and spans[i + 1]["id"] in positions}
+
+
 def resolve_anchor_cuts(text, spans, boundary_types, protected):
     candidates_by_type = {}
     consumed_by_type = {}
@@ -411,6 +419,8 @@ def split_by_boundary(translated_text, spans, protected=(), target_lang=None, so
     boundary_types = [classify_boundary(span["text"]) for span in spans[:-1]]
     anchors = resolve_anchor_cuts(translated_text, spans, boundary_types, protected) \
         if punctuation_anchors_enabled(source_lang, target_lang) else {}
+    marker_anchors = resolve_marker_anchors(translated_text, spans)
+    anchors.update(marker_anchors)
     lengths = [effective_length(span["text"]) for span in spans]
     total = sum(lengths) or 1
     
@@ -447,12 +457,14 @@ def split_by_boundary(translated_text, spans, protected=(), target_lang=None, so
             
         max_cut = len(translated_text) - (span_count - 1 - i)
         cut, tag = resolve_cut(translated_text, cursor, expected, boundary, max_cut, protected, target_lang, anchors.get(i))
-        tags.append(tag)
+        tags.append("marker" if marker_anchors.get(i) == cut else tag)
         parts.append(translated_text[cursor:cut].strip())
         cursor = cut
         
     parts.append(translated_text[cursor:].strip())
-    if "original" in tags:
+    if "marker" in tags:
+        method = "marker_boundary" if all(t in (None, "marker") for t in tags) else "mixed_boundary"
+    elif "original" in tags:
         method = "original_boundary"
     elif "inferred" in tags:
         method = "inferred_punctuation"
@@ -499,52 +511,11 @@ def enforce_quote_closure(parts, translated_text, target_lang):
     return closed
 
 
-def split_by_full_markers(translated_text, spans):
-    chunks = MARKER_PATTERN.split(translated_text)
-    if len(chunks) != 1 + 2 * len(spans) or chunks[0].strip():
-        return None
-    found_ids = [int(g) for g in chunks[1::2]]
-    expected_ids = [span["id"] for span in spans]
-    if found_ids != expected_ids:
-        return None
-    return [chunk.strip() for chunk in chunks[2::2]]
-
-
-def split_by_markers(translated_text, spans, protected=(), target_lang=None, source_lang=None):
-    if spans and all(span.get("boundary") == "marker" for span in spans):
-        return split_by_full_markers(translated_text, spans)
-    expected_ids = [span["id"] for span in spans[1:] if span.get("boundary") == "marker"]
-    if not expected_ids:
-        return None
-    found_ids = [int(g) for g in MARKER_PATTERN.findall(translated_text)]
-    if found_ids != expected_ids:
-        return None
-    cut_indices = [i for i, span in enumerate(spans[1:], start=1) if span.get("boundary") == "marker"]
-    text_chunks = MARKER_PATTERN.split(translated_text)[0::2]
-    parts, cursor = [], 0
-    for chunk_index, cut in enumerate(cut_indices):
-        sub_spans = spans[cursor:cut]
-        sub_text = text_chunks[chunk_index]
-        sub_parts = [sub_text.strip()] if len(sub_spans) == 1 else split_by_boundary(sub_text, sub_spans, protected, target_lang, source_lang)[0]
-        parts.extend(sub_parts)
-        cursor = cut
-    sub_spans = spans[cursor:]
-    sub_text = text_chunks[-1]
-    parts.extend([sub_text.strip()] if len(sub_spans) == 1 else split_by_boundary(sub_text, sub_spans, protected, target_lang, source_lang)[0])
-    return parts
-
-
 def split_translation(translated_text, spans, protected=(), target_lang=None, source_lang=None):
     if len(spans) == 1:
         parts, method = [translated_text.strip()], "single"
     else:
-        parts = split_by_markers(translated_text, spans, protected, target_lang, source_lang)
-        if parts is not None:
-            method = "marker_boundary"
-        else:
-            parts, method = split_by_boundary(translated_text, spans, protected, target_lang, source_lang)
-            if any(span.get("boundary") == "marker" for span in spans):
-                method = "marker_mismatch"
+        parts, method = split_by_boundary(translated_text, spans, protected, target_lang, source_lang)
     parts = [RESIDUAL_MARKER_PATTERN.sub(" ", p).strip() for p in parts]
     parts = enforce_punctuation_placement(parts)
     parts = repair_empty_parts(parts, spans, protected, target_lang, source_lang)
@@ -625,7 +596,7 @@ def build_bilingual_cues(cues, units, translations, target_lang, source_lang=Non
         translated = strip_unsourced_brackets("".join(span["text"] for span in spans), translated)
         protected = find_protected_spans(translated, glossary_terms, target_lang)
         parts, method = split_translation(translated, spans, protected, target_lang, source_lang)
-        if method not in ("single", "original_boundary", "inferred_punctuation", "marker_boundary"):
+        if method not in ("single", "original_boundary", "inferred_punctuation", "marker_boundary", "mixed_boundary"):
             approx_splits.append({"unit_id": unit["id"], "cues": [span["id"] for span in spans], "method": method})
         for span, part in zip(spans, parts):
             part = normalize_translation(part, target_lang)
