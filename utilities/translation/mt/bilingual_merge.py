@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: bilingual_merge.py
-# Version: 2.5.0
+#  Version: 2.6.0
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -91,6 +91,24 @@ def pip_install(package):
 
 def is_chinese_target(target_lang):
     return (target_lang or "").split("-")[0].lower() == "zh"
+
+
+READING_SPEED_LIMITS = {"cjk": {"cps": 9, "max_chars_per_line": 16}, "default": {"cps": 17, "max_chars_per_line": 42}}
+
+
+def parse_srt_timestamp_ms(value):
+    hms, _, millis = value.replace(",", ".").partition(".")
+    hours, minutes, seconds = (int(part) for part in hms.split(":"))
+    return ((hours * 60 + minutes) * 60 + seconds) * 1000 + int((millis or "0").ljust(3, "0")[:3])
+
+
+def evaluate_reading_speed(text, duration_ms, target_lang):
+    limits = READING_SPEED_LIMITS["cjk" if is_chinese_target(target_lang) else "default"]
+    lines = [line for line in text.split("\n") if line]
+    longest_line = max((effective_length(line) for line in lines), default=0)
+    duration_seconds = max(duration_ms / 1000, 0.001)
+    cps = effective_length(text.replace("\n", " ")) / duration_seconds
+    return {"cps": cps, "over_cps": cps > limits["cps"], "over_length": longest_line > limits["max_chars_per_line"]}
 
 
 LATIN_PUNCT_SOURCE_LANGS = {
@@ -591,6 +609,7 @@ def compute_cue_music_flags(units):
 def build_bilingual_cues(cues, units, translations, target_lang, source_lang=None):
     cue_segments = {}
     approx_splits = []
+    quality_warnings = []
     glossary_terms = collect_glossary_terms(units)
     dash_style = determine_dash_style(cues)
     cue_all_music = compute_cue_music_flags(units)
@@ -630,8 +649,12 @@ def build_bilingual_cues(cues, units, translations, target_lang, source_lang=Non
                 translation = POSITION_TOP_TAG + format_music_line(translation)
             else:
                 translation = restore_quote_markers(translation, cue["text"], target_lang)
+            duration_ms = parse_srt_timestamp_ms(cue["end"]) - parse_srt_timestamp_ms(cue["start"])
+            metrics = evaluate_reading_speed(translation, duration_ms, target_lang)
+            if metrics["over_cps"] or metrics["over_length"]:
+                quality_warnings.append({"cue_id": cue["id"], **metrics})
         results.append({**cue, "translation": translation})
-    return results, approx_splits
+    return results, approx_splits, quality_warnings
 
 
 def format_srt_time(value):
@@ -687,18 +710,17 @@ def merge(extract_data, translate_data):
     source_lang = translate_data.get("source_lang", "")
     translations = translate_data.get("translations", {})
     register_glossary_terms(collect_glossary_terms(extract_data["units"]), target_lang)
-    cues, approx_splits = build_bilingual_cues(extract_data["cues"], extract_data["units"], translations, target_lang, source_lang)
+    cues, approx_splits, quality_warnings = build_bilingual_cues(extract_data["cues"], extract_data["units"], translations, target_lang, source_lang)
 
-    unit_of_cue = {span["id"]: unit["id"] for unit in extract_data["units"] for span in unit["spans"]}
     position_of_cue = {cue["id"]: position for position, cue in enumerate(cues, start=1)}
     missing_cues = [cue["id"] for cue in cues if cue.get("translation") is None]
 
     if DEBUG_MODE:
         for split in approx_splits:
             positions = [position_of_cue[cid] for cid in split["cues"]]
-            log(f"approximate split: unit {split['unit_id']} / cues {split['cues']} / srt #{positions} via {split['method']}")
+            log(f"approximate split: cues {split['cues']} / srt #{positions} via {split['method']}")
         for cid in missing_cues:
-            log(f"missing translation: cue {cid} / unit {unit_of_cue.get(cid)} / srt #{position_of_cue[cid]}")
+            log(f"missing translation: cue {cid} / srt #{position_of_cue[cid]}")
 
     return {
         "success": True,
@@ -706,6 +728,7 @@ def merge(extract_data, translate_data):
         "approx_splits": approx_splits,
         "missing_count": len(missing_cues),
         "missing_cues": missing_cues,
+        "quality_warnings": quality_warnings,
     }
 
 
@@ -726,7 +749,8 @@ def main():
     translate_data = json.load(open(args.translations, encoding="utf-8"))
 
     result = merge(extract_data, translate_data)
-    log(f"status: ok (cues={len(extract_data['cues'])}, missing={result['missing_count']}, approx_splits={len(result['approx_splits'])})")
+    log(f"status: ok (cues={len(extract_data['cues'])}, missing={result['missing_count']}, "
+        f"approx_splits={len(result['approx_splits'])}, quality_warnings={len(result['quality_warnings'])})")
 
     if args.output:
         source_format = extract_data.get("source_format") or {}
@@ -737,7 +761,8 @@ def main():
         with open(args.output, "wb") as f:
             f.write(srt_bytes)
         with open(f"{args.output}.meta.json", "w", encoding="utf-8") as f:
-            json.dump({"approx_splits": result["approx_splits"], "missing_count": result["missing_count"]}, f, ensure_ascii=False)
+            json.dump({"approx_splits": result["approx_splits"], "missing_count": result["missing_count"],
+                       "quality_warnings": result["quality_warnings"]}, f, ensure_ascii=False)
     else:
         print(result["srt"])
 

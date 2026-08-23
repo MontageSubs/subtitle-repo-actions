@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: google_client.py
-# Version: 2.12.0
+# Version: 2.13.0
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -455,7 +455,7 @@ def call_google(batch, lang, target_lang, api_key, context_html=None):
     return result
 
 
-def translate_batch(batch, lang, target_lang, api_key, context_html=None):
+def translate_batch(batch, lang, target_lang, api_key, context_html=None, cue_ids_by_id=None):
     items = [item for group in batch for item in group]
     expected_ids = {item["id"] for item in items}
     result, missing = {}, expected_ids
@@ -469,16 +469,15 @@ def translate_batch(batch, lang, target_lang, api_key, context_html=None):
         if not missing:
             return result, []
 
-        missing_units = sorted({str(i) for i in missing})
-        log(f"attempt {attempt}: missing {len(missing)} of {len(items)} units: {', '.join(missing_units)}")
+        log(f"attempt {attempt}: missing {len(missing)} of {len(items)} units -> {describe_ids(missing, cue_ids_by_id)}")
         if attempt < MAX_ATTEMPTS:
             time.sleep(RETRY_DELAY)
 
     if len(items) > 1:
         by_id = {item["id"]: item for item in items}
-        log(f"isolating {len(missing)} unit(s) still missing: {', '.join(sorted({str(i) for i in missing}))}")
+        log(f"isolating {len(missing)} unit(s) still missing -> {describe_ids(missing, cue_ids_by_id)}")
         for uid in sorted(missing, key=str):
-            solo_result, _solo_missing = translate_batch([[by_id[uid]]], lang, target_lang, api_key)
+            solo_result, _solo_missing = translate_batch([[by_id[uid]]], lang, target_lang, api_key, cue_ids_by_id=cue_ids_by_id)
             if uid in solo_result:
                 result[uid] = solo_result[uid]
         missing = expected_ids - result.keys()
@@ -532,7 +531,7 @@ def resolve_context_language(raw_context, requested_source_lang, subtitle_sample
     return raw_context
 
 
-def translate(items, chapter_groups, lang, target_lang, api_key, batch_chars, concurrency=DEFAULT_CONCURRENCY, raw_context=None):
+def translate(items, chapter_groups, lang, target_lang, api_key, batch_chars, concurrency=DEFAULT_CONCURRENCY, raw_context=None, cue_ids_by_id=None):
     translations, skipped = {}, []
     context_reserve = len(raw_context) if raw_context else 0
     if context_reserve and context_reserve * 2 > batch_chars:
@@ -540,7 +539,7 @@ def translate(items, chapter_groups, lang, target_lang, api_key, batch_chars, co
             f"batches will pack very few chapters per div")
     batches, oversized = build_batches(items, chapter_groups, batch_chars, context_reserve)
     for item in oversized:
-        log(f"unit {item['id']}: {len(item['text'])} chars exceeds batch_chars ({batch_chars}), "
+        log(f"cues {(cue_ids_by_id or {}).get(item['id'], [item['id']])}: {len(item['text'])} chars exceeds batch_chars ({batch_chars}), "
             f"cue-level content cannot be split further, skipping without truncation")
         skipped.append(item["id"])
     if not batches:
@@ -554,7 +553,7 @@ def translate(items, chapter_groups, lang, target_lang, api_key, batch_chars, co
     progress_lock = threading.Lock()
 
     with ThreadPoolExecutor(max_workers=concurrency) as executor:
-        futures = {executor.submit(translate_batch, batch, lang, target_lang, api_key, context_html): batch for batch in batches}
+        futures = {executor.submit(translate_batch, batch, lang, target_lang, api_key, context_html, cue_ids_by_id): batch for batch in batches}
         for future in as_completed(futures):
             result, missing = future.result()
             with progress_lock:
@@ -635,12 +634,22 @@ def build_cue_term_matches(units):
 
 
 def flatten_units(units, chapter_of_unit):
-    items, chapter_items = [], {}
+    items, chapter_items, cue_ids_by_id = [], {}, {}
     for unit in units:
         chapter_id = chapter_of_unit.get(unit["id"])
         items.append({"id": unit["id"], "text": unit["text"], "html": protect_content_html(unit["text"], unit.get("term_matches") or [])})
         chapter_items.setdefault(chapter_id, []).append(unit["id"])
-    return items, list(chapter_items.values())
+        cue_ids_by_id[unit["id"]] = [span["id"] for span in unit.get("spans") or []]
+    return items, list(chapter_items.values()), cue_ids_by_id
+
+
+def describe_ids(ids, cue_ids_by_id):
+    cue_ids_by_id = cue_ids_by_id or {}
+    parts = []
+    for i in sorted(ids, key=str):
+        cues = cue_ids_by_id.get(i)
+        parts.append(f"cues {cues}" if cues else str(i))
+    return "; ".join(parts)
 
 
 def apply_term_replacements(text, term_matches, target_lang):
@@ -786,8 +795,8 @@ def translate_units(units, chapters, cues, lang, target_lang, api_key, batch_cha
     resolved = {unit["id"]: unit["resolved"] for unit in units if unit.get("resolved") is not None}
     pending = [unit for unit in units if unit.get("resolved") is None]
     chapter_of_unit = {uid: chapter["id"] for chapter in chapters for uid in chapter["unit_ids"]}
-    items, chapter_groups = flatten_units(pending, chapter_of_unit)
-    translations_raw, _skipped = translate(items, chapter_groups, lang, target_lang, api_key, batch_chars, concurrency, raw_context) if items else ({}, [])
+    items, chapter_groups, cue_ids_by_id = flatten_units(pending, chapter_of_unit)
+    translations_raw, _skipped = translate(items, chapter_groups, lang, target_lang, api_key, batch_chars, concurrency, raw_context, cue_ids_by_id) if items else ({}, [])
 
     results = dict(resolved)
     for unit in pending:
@@ -798,7 +807,7 @@ def translate_units(units, chapters, cues, lang, target_lang, api_key, batch_cha
             if retried:
                 candidate = apply_term_replacements(retried, unit.get("term_matches") or [], target_lang)
                 if candidate != final_text:
-                    log(f"unit {unit['id']}: retry changed result")
+                    log(f"cues {cue_ids_by_id.get(unit['id'], [unit['id']])}: retry changed result")
                     final_text = candidate
         results[unit["id"]] = final_text
 
@@ -813,14 +822,16 @@ def translate_units(units, chapters, cues, lang, target_lang, api_key, batch_cha
     cue_term_matches = build_cue_term_matches(units)
 
     for uid in sorted(length_suspects | cue_suspects):
+        unit_cues = [span["id"] for span in unit_by_id[uid].get("spans") or []]
         recovered = retry_windowed(units, uid, lang, target_lang, api_key, batch_chars)
         if recovered:
             recovered = {rid: apply_term_replacements(text, unit_by_id[rid].get("term_matches") or [], target_lang)
                          for rid, text in recovered.items()}
-            log(f"windowed retry around unit {uid}: recovered {sorted(recovered)}")
+            recovered_cues_all = sorted({cid for rid in recovered for cid in cue_ids_by_id.get(rid, [rid])})
+            log(f"windowed retry around cues {unit_cues}: recovered cues {recovered_cues_all}")
             results.update(recovered)
         else:
-            log(f"windowed retry around unit {uid}: markers did not align, left as-is")
+            log(f"windowed retry around cues {unit_cues}: markers did not align, left as-is")
 
         remaining = missing_cue_ids(unit_by_id[uid], results[uid])
         if not remaining:
@@ -831,16 +842,16 @@ def translate_units(units, chapters, cues, lang, target_lang, api_key, batch_cha
             filled = {cid: apply_term_replacements(cue_text_by_id[cid], cue_term_matches.get(cid) or [], target_lang)
                       for cid in trivial}
             results[uid] = patch_missing_cues(results[uid], expected_cue_ids(unit_by_id[uid]), filled)
-            log(f"unit {uid}: cues {trivial} have no translatable content beyond glossary terms, filled without retry")
+            log(f"cues {trivial} have no translatable content beyond glossary terms, filled without retry")
             remaining = [cid for cid in remaining if cid not in trivial]
         if not remaining:
             continue
         recovered_cues = retry_isolated_cues(remaining, cue_order, cue_text_by_id, cue_term_matches, lang, target_lang, api_key, batch_chars)
         if recovered_cues:
             results[uid] = patch_missing_cues(results[uid], expected_cue_ids(unit_by_id[uid]), recovered_cues)
-            log(f"isolated cue retry for unit {uid}: recovered cues {sorted(recovered_cues)}")
+            log(f"isolated cue retry: recovered cues {sorted(recovered_cues)}")
         else:
-            log(f"isolated cue retry for unit {uid}: cues {remaining} still missing, left as-is")
+            log(f"isolated cue retry: cues {remaining} still missing, left as-is")
 
     skipped = [uid for uid, text in results.items() if text is None]
     translations = {str(uid): text for uid, text in results.items() if text is not None}
