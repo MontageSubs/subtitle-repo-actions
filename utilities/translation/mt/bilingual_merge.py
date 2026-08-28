@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: bilingual_merge.py
-# Version: 2.6.5
+#  Version: 2.7.0
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -237,20 +237,6 @@ def rectify_translation_quotes(translated_text, original_text, target_lang):
     translated_text = re.sub(r'^(\s*)' + close_q, r'\1' + rep_open, translated_text)
     
     return translated_text
-
-
-def restore_quote_markers(translation, source_text, target_lang):
-    quotes = target_quote_pair(target_lang)
-    if not quotes or not translation:
-        return translation
-    open_q, close_q = quotes
-    open_count = translation.count(open_q)
-    close_count = translation.count(close_q)
-    if open_count > close_count:
-        translation = translation + close_q * (open_count - close_count)
-    elif close_count > open_count:
-        translation = open_q * (close_count - open_count) + translation
-    return translation
 
 
 def space_after_ellipsis(match):
@@ -653,8 +639,6 @@ def build_bilingual_cues(cues, units, translations, target_lang, source_lang=Non
             translation = normalize_exclaim_question(translation)
             if cue_all_music.get(cue["id"], False):
                 translation = POSITION_TOP_TAG + format_music_line(translation)
-            else:
-                translation = restore_quote_markers(translation, cue["text"], target_lang)
         results.append({**cue, "translation": translation})
     return results, approx_splits
 
