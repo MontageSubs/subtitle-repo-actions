@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: microsoft_client.py
-# Version: 1.1
+# Version: 1.2
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -10,25 +10,26 @@
 #
 # Description / 描述:
 #     Batch-translates subtitle units through Microsoft Edge Translation
-#     endpoint. Units are formatted with natural spacing and unique Unicode
-#     markers (⟦m1⟧, ⟦m2⟧) instead of isolating HTML tags, preserving full
-#     inter-sentence narrative context for accurate coreference and pronoun
-#     resolution. HTML styling tags (<b>, <i>) are safely escaped to custom
-#     markers (⟦b⟧...⟦/b⟧, ⟦i⟧...⟦/i⟧) before transmission and restored
-#     losslessly upon completion. Glossary terms are protected via native
-#     <mstrans:dictionary> definitions. Features a cascading retry pipeline
-#     (Missing Units -> Windowed Context Retry -> Isolated Cue Retry) with
-#     automatic source language pinning.
-#     通过 Microsoft Edge 翻译接口批量翻译字幕单元。单元间采用自然空格与
-#     唯一 Unicode 标记（⟦m1⟧, ⟦m2⟧）连接，取代造成上下文割裂的 HTML 标签，
-#     完整保留跨句段落语境，从而实现精准的代词指代与连贯翻译。原始文本中的
-#     样式标签（<b>, <i>）在发送前安全转义为自定义闭合标记（⟦b⟧...⟦/b⟧, ⟦i⟧...⟦/i⟧），
-#     并在翻译完成后无损还原。词表术语通过原生 <mstrans:dictionary> 标签保护。
-#     内置多级级联重试系统（缺失单元重试 -> 滑动窗口上下文重试 -> 孤立 Cue 重试）
-#     并支持源语言自动检测与锁定。
+#     endpoint. Units are formatted with zero-space compact stitching and unique
+#     Unicode markers (⟦m1⟧, ⟦m2⟧) instead of isolating HTML tags or spaces,
+#     preserving full inter-sentence narrative context for accurate coreference
+#     and pronoun resolution. HTML styling tags (<b>, <i>) are safely escaped
+#     to custom markers (⟦b⟧...⟦/b⟧, ⟦i⟧...⟦/i⟧) before transmission and
+#     restored losslessly upon completion. Glossary terms are protected via
+#     native <mstrans:dictionary> definitions. Features a cascading retry
+#     pipeline (Missing Units -> Windowed Context Retry -> Isolated Cue Retry)
+#     with automatic source language pinning.
+#     通过 Microsoft Edge 翻译接口批量翻译字幕单元。单元间采用无空格紧凑拼接
+#     与唯一 Unicode 标记（⟦m1⟧, ⟦m2⟧）连接，取代造成上下文割裂的 HTML 标签或
+#     断句空格，完整保留跨句段落语境，从而实现精准的代词指代与连贯翻译。原始
+#     文本中的样式标签（<b>, <i>）在发送前安全转义为自定义闭合标记
+#     （⟦b⟧...⟦/b⟧, ⟦i⟧...⟦/i⟧），并在翻译完成后无损还原。词表术语通过原生
+#     <mstrans:dictionary> 标签保护。内置多级级联重试系统（缺失单元重试 ->
+#     滑动窗口上下文重试 -> 孤立 Cue 重试）并支持源语言自动检测与锁定。
 #
 # Features:
-#     - Natural spacing and marker scheme (⟦m1⟧, ⟦m2⟧) for contextual translation.
+#     - Multi-segment payload support (--array-size): Send multiple 8k segments in a single POST array.
+#     - Zero-space compact marker scheme (⟦m1⟧, ⟦m2⟧) for contextual translation.
 #     - Lossless formatting tag escape (<b>/<i> to ⟦b⟧/⟦i⟧) preserving character offsets.
 #     - Native glossary protection using <mstrans:dictionary> definitions.
 #     - Cascading retry pipeline: Missing Units -> Windowed Context -> Isolated Cues.
@@ -36,7 +37,8 @@
 #     - Strips extraneous whitespace on JSON serialization.
 #
 # 功能:
-#     - 自然空格与 Unicode 标记体系（⟦m1⟧, ⟦m2⟧），完美传递跨句上下文。
+#     - 多段 Payload 数组特性（--array-size）：单次 POST 请求可同时传输多段满额 8000 字符文本。
+#     - 无空格紧凑 Unicode 标记体系（⟦m1⟧, ⟦m2⟧），完美传递跨句上下文。
 #     - 样式标签（<b>/<i> 到 ⟦b⟧/⟦i⟧）无损转义，保持术语偏移量绝对精准。
 #     - 基于 <mstrans:dictionary> 原生词典标签的术语与人名保护。
 #     - 级联重试流：缺失单元重试 -> 滑动窗口上下文重试 -> 孤立 Cue 重试。
@@ -63,12 +65,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 SCRIPT_NAME = "microsoft_client"
 ENDPOINT = "https://edge.microsoft.com/translate/translatetext"
-DEFAULT_BATCH_CHARS = 8000
-DEFAULT_CONCURRENCY = 4
+DEFAULT_BATCH_CHARS = 4000
+DEFAULT_ARRAY_SIZE = 1
+DEFAULT_CONCURRENCY = 20
 REQUEST_TIMEOUT = 30
 MAX_ATTEMPTS = 3
 RETRY_DELAY = 3
-PROGRESS_INTERVAL = 20
 LENGTH_RATIO_MIN = 0.15
 LENGTH_RATIO_MAX = 6.0
 
@@ -88,16 +90,16 @@ CUE_MARKER_TEMPLATE = "\u27e6c{:04d}\u27e7"
 CUE_MARKER_PATTERN = re.compile(r"\u27e6c(\d+)\u27e7")
 
 FORMAT_TAG_ESCAPE_PATTERNS = [
-    (re.compile(r"\s*<b\b[^>]*>\s*", re.IGNORECASE), "\u27e6b\u27e7 "),
-    (re.compile(r"\s*</b>\s*", re.IGNORECASE), "\u27e6/b\u27e7 "),
-    (re.compile(r"\s*<i\b[^>]*>\s*", re.IGNORECASE), "\u27e6i\u27e7 "),
-    (re.compile(r"\s*</i>\s*", re.IGNORECASE), "\u27e6/i\u27e7 "),
+    (re.compile(r"\s*<b\b[^>]*>\s*", re.IGNORECASE), "\u27e6b\u27e7"),
+    (re.compile(r"\s*</b>\s*", re.IGNORECASE), "\u27e6/b\u27e7"),
+    (re.compile(r"\s*<i\b[^>]*>\s*", re.IGNORECASE), "\u27e6i\u27e7"),
+    (re.compile(r"\s*</i>\s*", re.IGNORECASE), "\u27e6/i\u27e7"),
 ]
 FORMAT_TAG_RESTORE_PATTERNS = [
-    (re.compile(r"\u27e6\s*b\s*\u27e7\s*", re.IGNORECASE), "<b>"),
-    (re.compile(r"\s*\u27e6\s*/\s*b\s*\u27e7\s*", re.IGNORECASE), "</b>"),
-    (re.compile(r"\u27e6\s*i\s*\u27e7\s*", re.IGNORECASE), "<i>"),
-    (re.compile(r"\s*\u27e6\s*/\s*i\s*\u27e7\s*", re.IGNORECASE), "</i>"),
+    (re.compile(r"\u27e6\s*b\s*\u27e7", re.IGNORECASE), "<b>"),
+    (re.compile(r"\u27e6\s*/\s*b\s*\u27e7", re.IGNORECASE), "</b>"),
+    (re.compile(r"\u27e6\s*i\s*\u27e7", re.IGNORECASE), "<i>"),
+    (re.compile(r"\u27e6\s*/\s*i\s*\u27e7", re.IGNORECASE), "</i>"),
 ]
 
 def escape_formatting_tags(text):
@@ -348,17 +350,17 @@ def split_oversized(items, limit):
         pieces.append(piece)
     return pieces, oversized
 
-def build_batches(items, chapter_groups, batch_chars, context_chars=0):
+def build_segment_groups(items, chapter_groups, segment_chars):
     by_id = {item["id"]: item for item in items}
-    batches, oversized = [], []
+    segments, oversized = [], []
     current, current_chars = [], 0
 
     def flush():
         nonlocal current, current_chars
-        if current: batches.append(current)
+        if current: segments.append(current)
         current, current_chars = [], 0
 
-    limit = max(batch_chars - context_chars, 1)
+    limit = max(segment_chars, 100)
 
     for group in chapter_groups:
         group_items = [by_id[i] for i in group if i in by_id]
@@ -367,7 +369,7 @@ def build_batches(items, chapter_groups, batch_chars, context_chars=0):
         if group_chars > limit:
             flush()
             pieces, group_oversized = split_oversized(group_items, limit)
-            batches.extend([piece] for piece in pieces)
+            segments.extend([piece] for piece in pieces)
             oversized.extend(group_oversized)
         elif current_chars + group_chars > limit:
             flush()
@@ -376,7 +378,14 @@ def build_batches(items, chapter_groups, batch_chars, context_chars=0):
             current.append(group_items)
             current_chars += group_chars
     flush()
-    return batches, oversized
+    return segments, oversized
+
+def build_requests(segments, array_size):
+    requests = []
+    chunk_size = max(array_size, 1)
+    for i in range(0, len(segments), chunk_size):
+        requests.append(segments[i:i + chunk_size])
+    return requests
 
 def call_microsoft_api(request_texts, source_lang, target_lang):
     params = f"to={urllib.parse.quote(target_lang)}&isEnterpriseClient=false"
@@ -435,18 +444,21 @@ def parse_translated_html(html, marker_pattern):
     return inner_result
 
 def translate_batch(batch, lang, target_lang, context_html=None):
-    items = [item for group in batch for item in group]
-    expected_ids = {item["id"] for item in items}
+    all_items = [item for segment in batch for group in segment for item in group]
+    expected_ids = {item["id"] for item in all_items}
     
     result, missing = {}, expected_ids
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
             payload = []
-            for group in batch:
-                chapter_str = "".join(f"{wrap_marker(GROUP_MARKER_TEMPLATE.format(item['id']))} {item.get('html', escape_html(item['text']))}" for item in group)
-                if context_html and attempt == 1:
-                    chapter_str = f"{context_html}{chapter_str}"
-                payload.append(chapter_str)
+            for seg_idx, segment in enumerate(batch):
+                segment_str = "".join(
+                    "".join(f"{wrap_marker(GROUP_MARKER_TEMPLATE.format(item['id']))}{item.get('html', escape_html(item['text']))}" for item in group)
+                    for group in segment
+                )
+                if context_html and attempt == 1 and seg_idx == 0:
+                    segment_str = f"{context_html}{segment_str}"
+                payload.append(segment_str)
 
             resp = call_microsoft_api(payload, lang.current(), target_lang)
             if resp and isinstance(resp, list):
@@ -469,10 +481,10 @@ def translate_batch(batch, lang, target_lang, context_html=None):
         if missing and attempt < MAX_ATTEMPTS:
             time.sleep(RETRY_DELAY)
 
-    if len(items) > 1 and missing:
-        by_id = {item["id"]: item for item in items}
+    if len(all_items) > 1 and missing:
+        by_id = {item["id"]: item for item in all_items}
         for uid in sorted(missing):
-            solo_res, _ = translate_batch([[by_id[uid]]], lang, target_lang)
+            solo_res, _ = translate_batch([[[by_id[uid]]]], lang, target_lang)
             if uid in solo_res:
                 result[uid] = solo_res[uid]
         missing = expected_ids - result.keys()
@@ -507,7 +519,7 @@ def missing_cue_ids(unit, text):
 def retry_single(text, term_matches, lang, target_lang):
     if not text or not text.strip(): return None
     item = {"id": 1, "text": text, "html": protect_content_html(text, term_matches or [])}
-    res, _ = translate_batch([[item]], lang, target_lang)
+    res, _ = translate_batch([[[item]]], lang, target_lang)
     return res.get(1)
 
 def retry_windowed(units, suspect_id, lang, target_lang, batch_chars):
@@ -517,7 +529,7 @@ def retry_windowed(units, suspect_id, lang, target_lang, batch_chars):
     if len(window) < 2: return {}
     
     windowed_text = "".join(
-        f"{wrap_marker(UNIT_MARKER_TEMPLATE.format(unit['id']))} {protect_content_html(unit['text'], unit.get('term_matches') or [])}"
+        f"{wrap_marker(UNIT_MARKER_TEMPLATE.format(unit['id']))}{protect_content_html(unit['text'], unit.get('term_matches') or [])}"
         for unit in window
     )
     if len(windowed_text) > batch_chars: return {}
@@ -544,7 +556,7 @@ def patch_missing_cues(text, expected_ids, recovered):
     if not recovered: return text
     chunks = split_cue_chunks(text)
     chunks.update(recovered)
-    return "".join(f"{CUE_MARKER_TEMPLATE.format(cid)} {chunks[cid]}" for cid in expected_ids if cid in chunks)
+    return "".join(f"{CUE_MARKER_TEMPLATE.format(cid)}{chunks[cid]}" for cid in expected_ids if cid in chunks)
 
 def retry_isolated_cues(missing_ids, cue_order, cue_text_by_id, cue_term_matches, lang, target_lang, batch_chars):
     position = {cid: i for i, cid in enumerate(cue_order)}
@@ -554,7 +566,7 @@ def retry_isolated_cues(missing_ids, cue_order, cue_text_by_id, cue_term_matches
     hi = min(len(cue_order) - 1, positions[-1] + 5)
 
     html = "".join(
-        f"{wrap_marker(CUE_MARKER_TEMPLATE.format(cid))} {protect_content_html(cue_text_by_id[cid], cue_term_matches.get(cid) or [])}"
+        f"{wrap_marker(CUE_MARKER_TEMPLATE.format(cid))}{protect_content_html(cue_text_by_id[cid], cue_term_matches.get(cid) or [])}"
         for cid in cue_order[lo:hi + 1] if cid in cue_text_by_id
     )
     if len(html) > batch_chars: return {}
@@ -608,7 +620,7 @@ def has_translatable_content(text, term_matches):
     residue.append(text[cursor:])
     return has_content("".join(residue))
 
-def translate_units(units, chapters, cues, lang, target_lang, batch_chars, concurrency, raw_context=None):
+def translate_units(units, chapters, cues, lang, target_lang, batch_chars, concurrency, raw_context=None, array_size=1):
     resolved = {unit["id"]: unit["resolved"] for unit in units if unit.get("resolved") is not None}
     pending = [unit for unit in units if unit.get("resolved") is None]
     chapter_of_unit = {uid: chapter["id"] for chapter in chapters for uid in chapter["unit_ids"]}
@@ -620,16 +632,13 @@ def translate_units(units, chapters, cues, lang, target_lang, batch_chars, concu
         items.append({"id": unit["id"], "text": unit["text"], "html": html_text})
         chapter_groups.setdefault(cid, []).append(unit["id"])
         
-    context_reserve = len(raw_context) if raw_context else 0
-    if context_reserve and context_reserve * 2 > batch_chars:
-        log(f"warning: context ({context_reserve} chars) is large relative to batch_chars ({batch_chars})")
-        
-    batches, oversized = build_batches(items, list(chapter_groups.values()), batch_chars, context_reserve)
+    segments, oversized = build_segment_groups(items, list(chapter_groups.values()), batch_chars)
+    batches = build_requests(segments, array_size)
     translations_raw, skipped = {}, [item["id"] for item in oversized]
     
     total_batches = len(batches)
     completed = 0
-    start_time = last_report = time.time()
+    start_time = time.time()
     progress_lock = threading.Lock()
     
     context_html = escape_html(raw_context) if raw_context else None
@@ -643,9 +652,7 @@ def translate_units(units, chapters, cues, lang, target_lang, batch_chars, concu
                 skipped.extend(miss)
                 completed += 1
                 now = time.time()
-                if now - last_report >= PROGRESS_INTERVAL or completed == total_batches:
-                    log(f"progress: {len(translations_raw)}/{len(items)} units (batch {completed}/{total_batches}, {now - start_time:.0f}s elapsed)")
-                    last_report = now
+                log(f"progress: {len(translations_raw)}/{len(items)} units (batch {completed}/{total_batches}, {now - start_time:.1f}s elapsed)")
                     
     results = dict(resolved)
     for unit in pending:
@@ -705,6 +712,7 @@ def main():
     parser.add_argument("--source-lang", default=None)
     parser.add_argument("--target-lang", default=None)
     parser.add_argument("--batch-chars", type=int, default=DEFAULT_BATCH_CHARS)
+    parser.add_argument("--array-size", type=int, default=DEFAULT_ARRAY_SIZE)
     parser.add_argument("--concurrency", type=int, default=DEFAULT_CONCURRENCY)
     parser.add_argument("--alignment-mode", choices=["span", "marker"], default="span")
     parser.add_argument("--wrap-markers", action="store_true")
@@ -742,7 +750,7 @@ def main():
     if not units:
         result = {"success": False, "reason": "no_units", "translations": {}, "skipped": []}
     else:
-        translations, skipped = translate_units(units, chapters, cues, lang_resolver, target_lang, args.batch_chars, args.concurrency, raw_context)
+        translations, skipped = translate_units(units, chapters, cues, lang_resolver, target_lang, args.batch_chars, args.concurrency, raw_context, args.array_size)
         result = {
             "success": bool(translations),
             "translations": translations,
