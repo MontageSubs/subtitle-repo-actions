@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: microsoft_client.py
-# Version: 1.0
+# Version: 1.1
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -88,16 +88,16 @@ CUE_MARKER_TEMPLATE = "\u27e6c{:04d}\u27e7"
 CUE_MARKER_PATTERN = re.compile(r"\u27e6c(\d+)\u27e7")
 
 FORMAT_TAG_ESCAPE_PATTERNS = [
-    (re.compile(r"<b\b[^>]*>", re.IGNORECASE), "\u27e6b\u27e7"),
-    (re.compile(r"</b>", re.IGNORECASE), "\u27e6/b\u27e7"),
-    (re.compile(r"<i\b[^>]*>", re.IGNORECASE), "\u27e6i\u27e7"),
-    (re.compile(r"</i>", re.IGNORECASE), "\u27e6/i\u27e7"),
+    (re.compile(r"\s*<b\b[^>]*>\s*", re.IGNORECASE), "\u27e6b\u27e7 "),
+    (re.compile(r"\s*</b>\s*", re.IGNORECASE), "\u27e6/b\u27e7 "),
+    (re.compile(r"\s*<i\b[^>]*>\s*", re.IGNORECASE), "\u27e6i\u27e7 "),
+    (re.compile(r"\s*</i>\s*", re.IGNORECASE), "\u27e6/i\u27e7 "),
 ]
 FORMAT_TAG_RESTORE_PATTERNS = [
-    (re.compile(r"\u27e6\s*b\s*\u27e7", re.IGNORECASE), "<b>"),
-    (re.compile(r"\u27e6\s*/\s*b\s*\u27e7", re.IGNORECASE), "</b>"),
-    (re.compile(r"\u27e6\s*i\s*\u27e7", re.IGNORECASE), "<i>"),
-    (re.compile(r"\u27e6\s*/\s*i\s*\u27e7", re.IGNORECASE), "</i>"),
+    (re.compile(r"\u27e6\s*b\s*\u27e7\s*", re.IGNORECASE), "<b>"),
+    (re.compile(r"\s*\u27e6\s*/\s*b\s*\u27e7\s*", re.IGNORECASE), "</b>"),
+    (re.compile(r"\u27e6\s*i\s*\u27e7\s*", re.IGNORECASE), "<i>"),
+    (re.compile(r"\s*\u27e6\s*/\s*i\s*\u27e7\s*", re.IGNORECASE), "</i>"),
 ]
 
 def escape_formatting_tags(text):
@@ -443,9 +443,9 @@ def translate_batch(batch, lang, target_lang, context_html=None):
         try:
             payload = []
             for group in batch:
-                chapter_str = " ".join(f"{wrap_marker(GROUP_MARKER_TEMPLATE.format(item['id']))} {item.get('html', escape_html(item['text']))}" for item in group)
+                chapter_str = "".join(f"{wrap_marker(GROUP_MARKER_TEMPLATE.format(item['id']))} {item.get('html', escape_html(item['text']))}" for item in group)
                 if context_html and attempt == 1:
-                    chapter_str = f"{context_html} {chapter_str}"
+                    chapter_str = f"{context_html}{chapter_str}"
                 payload.append(chapter_str)
 
             resp = call_microsoft_api(payload, lang.current(), target_lang)
@@ -516,12 +516,10 @@ def retry_windowed(units, suspect_id, lang, target_lang, batch_chars):
     window = units[max(0, i - 20):i + 21]
     if len(window) < 2: return {}
     
-    html_pieces = [protect_content_html(window[0]["text"], window[0].get("term_matches") or [])]
-    for unit in window[1:]:
-        html_pieces.append(f" {wrap_marker(UNIT_MARKER_TEMPLATE.format(unit['id']))} ")
-        html_pieces.append(protect_content_html(unit["text"], unit.get("term_matches") or []))
-        
-    windowed_text = "".join(html_pieces)
+    windowed_text = "".join(
+        f"{wrap_marker(UNIT_MARKER_TEMPLATE.format(unit['id']))} {protect_content_html(unit['text'], unit.get('term_matches') or [])}"
+        for unit in window
+    )
     if len(windowed_text) > batch_chars: return {}
 
     payload = [windowed_text]
@@ -546,7 +544,7 @@ def patch_missing_cues(text, expected_ids, recovered):
     if not recovered: return text
     chunks = split_cue_chunks(text)
     chunks.update(recovered)
-    return " ".join(f"{CUE_MARKER_TEMPLATE.format(cid)} {chunks[cid]}" for cid in expected_ids if cid in chunks)
+    return "".join(f"{CUE_MARKER_TEMPLATE.format(cid)} {chunks[cid]}" for cid in expected_ids if cid in chunks)
 
 def retry_isolated_cues(missing_ids, cue_order, cue_text_by_id, cue_term_matches, lang, target_lang, batch_chars):
     position = {cid: i for i, cid in enumerate(cue_order)}
@@ -555,7 +553,7 @@ def retry_isolated_cues(missing_ids, cue_order, cue_text_by_id, cue_term_matches
     lo = max(0, positions[0] - 5)
     hi = min(len(cue_order) - 1, positions[-1] + 5)
 
-    html = " ".join(
+    html = "".join(
         f"{wrap_marker(CUE_MARKER_TEMPLATE.format(cid))} {protect_content_html(cue_text_by_id[cid], cue_term_matches.get(cid) or [])}"
         for cid in cue_order[lo:hi + 1] if cid in cue_text_by_id
     )
