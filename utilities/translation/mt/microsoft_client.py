@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: microsoft_client.py
-# Version: 1.3
+# Version: 1.3.1
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -105,24 +105,51 @@ CUE_MARKER_PATTERN = re.compile(r"\u27e6c(\d+)\u27e7", re.IGNORECASE)
 
 ANY_MARKER_PATTERN = re.compile(r"\u27e6[a-zA-Z](\d+)\u27e7")
 CORRUPT_MARKER_PATTERN = re.compile(r"\\+[^\u27e6\u27e7]{0,6}?(\d{1,6})\u27e7")
-CORRUPT_MARKER_SIGNATURE = re.compile(r"\\+[^\u27e6\u27e7]{0,6}?\d{1,6}\u27e7")
+UNCLOSED_MARKER_SIGNATURE = r"\u27e6[a-zA-Z]\d{1,6}(?!\u27e7)"
+CORRUPT_MARKER_SIGNATURE = re.compile(
+    r"\\+[^\u27e6\u27e7]{0,6}?\d{1,6}\u27e7|" + UNCLOSED_MARKER_SIGNATURE
+)
+MARKER_BRACKET_PATTERN = re.compile(r"[\u27e6\u27e7]")
+
+def has_marker_leak(original_text, translated_text):
+    original_count = len(MARKER_BRACKET_PATTERN.findall(original_text or ""))
+    translated_count = len(MARKER_BRACKET_PATTERN.findall(translated_text or ""))
+    return translated_count > original_count
+
+def repair_unclosed_marker(text, prefix_char, pending):
+    if not pending:
+        return text
+    pattern = re.compile(rf"\u27e6{prefix_char}(\d+)(?!\u27e7)", re.IGNORECASE)
+
+    def replace(m):
+        cid = int(m.group(1))
+        if cid not in pending:
+            return m.group(0)
+        pending.discard(cid)
+        return f"{m.group(0)}\u27e7"
+
+    return pattern.sub(replace, text)
 
 def repair_corrupt_markers(text, prefix_char, expected_ids):
     if not text or not expected_ids:
         return text
     seen = {int(m.group(1)) for m in ANY_MARKER_PATTERN.finditer(text)}
-    pending = [cid for cid in expected_ids if cid not in seen]
+    pending = {cid for cid in expected_ids if cid not in seen}
+    if not pending:
+        return text
+
+    text = repair_unclosed_marker(text, prefix_char, pending)
     if not pending:
         return text
 
     pieces, cursor, changed = [], 0, False
     for m in CORRUPT_MARKER_PATTERN.finditer(text):
         digits = m.group(1)
-        candidates = [cid for cid in pending if cid not in seen and str(cid).endswith(digits)]
+        candidates = [cid for cid in pending if str(cid).endswith(digits)]
         if len(candidates) != 1:
             continue
         cid = candidates[0]
-        seen.add(cid)
+        pending.discard(cid)
         pieces.append(text[cursor:m.start()])
         pieces.append(f"\u27e6{prefix_char}{cid}\u27e7")
         cursor = m.end()
@@ -377,10 +404,13 @@ def protect_content_html(text, term_matches):
 def apply_term_replacements(text, term_matches, target_lang):
     return text
 
+def item_wire_chars(item):
+    return len(GROUP_MARKER_TEMPLATE.format(item["id"])) + len(item.get("html", item["text"]))
+
 def split_oversized(items, limit):
     pieces, piece, piece_chars, oversized = [], [], 0, []
     for item in items:
-        item_chars = len(item["text"])
+        item_chars = item_wire_chars(item)
         if item_chars > limit:
             oversized.append(item)
             continue
@@ -408,7 +438,7 @@ def build_segment_groups(items, chapter_groups, segment_chars):
     for group in chapter_groups:
         group_items = [by_id[i] for i in group if i in by_id]
         if not group_items: continue
-        group_chars = sum(len(item["text"]) for item in group_items)
+        group_chars = sum(item_wire_chars(item) for item in group_items)
         if group_chars > limit:
             flush()
             pieces, group_oversized = split_oversized(group_items, limit)
@@ -481,6 +511,9 @@ def split_by_marker(flat_text, pattern):
         if text: result[key] = text
     return result
 
+def extract_marker_free_response(html):
+    return restore_formatting_tags(unescape_html(TAG_PATTERN.sub("", html)).strip())
+
 def parse_translated_html(html, marker_pattern, prefix_char=None, expected_ids=None):
     flat = unescape_html(TAG_PATTERN.sub("", html))
     if prefix_char and expected_ids:
@@ -496,6 +529,7 @@ def translate_batch(batch, lang, target_lang, context_html=None):
     expected_ids = {item["id"] for item in all_items}
     
     result, missing = {}, expected_ids
+    previous_missing_signature = None
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
             payload, segment_ids_list = [], []
@@ -526,6 +560,11 @@ def translate_batch(batch, lang, target_lang, context_html=None):
             missing = expected_ids - result.keys()
             if not missing:
                 return result, []
+            missing_signature = tuple(sorted(missing))
+            if missing_signature == previous_missing_signature:
+                log(f"attempt {attempt}: identical unresolved set {missing_signature}, giving up on whole-batch resend and falling back to solo retry")
+                break
+            previous_missing_signature = missing_signature
         except Exception as e:
             log(f"attempt {attempt} failed: {e}")
             
@@ -538,15 +577,15 @@ def translate_batch(batch, lang, target_lang, context_html=None):
         for i in range(0, len(missing_items), SOLO_RETRY_ARRAY_SIZE):
             chunk = missing_items[i:i + SOLO_RETRY_ARRAY_SIZE]
             try:
-                payload = [f"{GROUP_MARKER_TEMPLATE.format(item['id'])}{item.get('html', escape_html(item['text']))}" for item in chunk]
+                payload = [item.get("html", escape_html(item["text"])) for item in chunk]
                 resp = call_microsoft_api(payload, lang.current(), target_lang)
                 for entry_idx, item in enumerate(chunk):
                     if entry_idx >= len(resp) or not resp[entry_idx].get("translations"):
                         continue
                     entry_text = resp[entry_idx]["translations"][0]["text"]
-                    marker_res = parse_translated_html(entry_text, GROUP_MARKER_PATTERN, "m", [item["id"]])
-                    if item["id"] in marker_res:
-                        result[item["id"]] = marker_res[item["id"]]
+                    text = extract_marker_free_response(entry_text)
+                    if text:
+                        result[item["id"]] = text
             except Exception as e:
                 log(f"solo-array retry failed: {e}")
         missing = expected_ids - result.keys()
@@ -636,8 +675,9 @@ def retry_isolated_cues_at_radius(missing_ids, cue_order, cue_text_by_id, cue_te
     hi = min(len(cue_order) - 1, positions[-1] + radius)
 
     sent_ids = [cid for cid in cue_order[lo:hi + 1] if cid in cue_text_by_id]
+    is_solo = len(sent_ids) == 1
     html = "".join(
-        f"{wrap_marker(CUE_MARKER_TEMPLATE.format(cid))}{protect_content_html(cue_text_by_id[cid], cue_term_matches.get(cid) or [])}"
+        f"{'' if is_solo else wrap_marker(CUE_MARKER_TEMPLATE.format(cid))}{protect_content_html(cue_text_by_id[cid], cue_term_matches.get(cid) or [])}"
         for cid in sent_ids
     )
     if len(html) > batch_chars: return {}
@@ -647,7 +687,8 @@ def retry_isolated_cues_at_radius(missing_ids, cue_order, cue_text_by_id, cue_te
         if not resp or not resp[0].get("translations"): return {}
         translated_html = resp[0]["translations"][0]["text"]
 
-        marker_res = parse_translated_html(translated_html, CUE_MARKER_PATTERN, "c", sent_ids)
+        marker_res = {sent_ids[0]: extract_marker_free_response(translated_html)} if is_solo \
+            else parse_translated_html(translated_html, CUE_MARKER_PATTERN, "c", sent_ids)
         recovered = {}
         for cid in missing_ids:
             cand = marker_res.get(cid)
@@ -751,13 +792,27 @@ def translate_units(units, chapters, cues, lang, target_lang, batch_chars, concu
                         if text is not None and has_content(unit_by_id[uid]["text"])
                         and (not has_content(text) or not is_length_plausible(unit_by_id[uid]["text"], text))}
     cue_suspects = {uid for uid, text in results.items()
-                    if text is not None and (missing_cue_ids(unit_by_id[uid], text) or CORRUPT_MARKER_SIGNATURE.search(text))}
-    
+                    if text is not None and (missing_cue_ids(unit_by_id[uid], text) or CORRUPT_MARKER_SIGNATURE.search(text)
+                                              or has_marker_leak(unit_by_id[uid]["text"], text))}
+
     cue_order = [c["id"] for c in cues]
     cue_text_by_id = {c["id"]: c["text"] for c in cues}
     cue_term_matches = build_cue_term_matches(units)
 
-    for uid in sorted(length_suspects | cue_suspects):
+    unit_order = [u["id"] for u in units]
+    unit_position = {uid: i for i, uid in enumerate(unit_order)}
+    primary_suspects = length_suspects | cue_suspects
+    all_suspects = set(primary_suspects)
+    for uid in cue_suspects:
+        pos = unit_position.get(uid)
+        if pos is None or pos == 0:
+            continue
+        preceding_id = unit_order[pos - 1]
+        if preceding_id not in primary_suspects:
+            all_suspects.add(preceding_id)
+            log(f"unit {preceding_id}: adjacent to corrupt-marker unit {uid}, adding to retry as a precaution against bleed-through")
+
+    for uid in sorted(all_suspects):
         recovered = retry_windowed(units, uid, lang, target_lang, batch_chars)
         if recovered:
             recovered = {rid: apply_term_replacements(text, unit_by_id[rid].get("term_matches") or [], target_lang)
