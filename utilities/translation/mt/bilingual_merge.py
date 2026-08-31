@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: bilingual_merge.py
-# Version: 2.7.2
+# Version: 2.7.3
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -157,15 +157,15 @@ NO_LINE_START_CHARS = set("”」』）)]}＞〉》】〕»›、，,。.！!？
 BOUNDARY_ORDER = ("trail_off", "comma", "period", "colon")
 BOUNDARY_CLASSIFY_PATTERNS = {
     "trail_off": re.compile(r"(\.{2,}|-{2,}|—+|…+)\s*$"),
-    "comma": re.compile(r"[,，]\s*$"),
+    "comma": re.compile(r"[,，、]\s*$"),
     "period": re.compile(r"[.!?！？]['\"”’)\]]*\s*$"),
     "colon": re.compile(r"[:：]\s*$"),
 }
 BOUNDARY_SEARCH_PATTERNS = {
-    "trail_off": re.compile(r"\.{2,}|-{2,}|—+|…+"),
-    "comma": re.compile(r"[,，、；;]+"),
-    "period": re.compile(r"[.。!?！？]+['\"”’)\]]*"),
-    "colon": re.compile(r"[:：]+"),
+    "trail_off": (re.compile(r"\.{2,}|-{2,}|—+|…+"),),
+    "comma": (re.compile(r"[,，；;]+"), re.compile(r"、+")),
+    "period": (re.compile(r"[.。!?！？]+['\"”’)\]]*"),),
+    "colon": (re.compile(r"[:：]+"),),
 }
 MARKER_PATTERN = re.compile(r"\u27e6c(\d+)\u27e7")
 RESIDUAL_MARKER_PATTERN = re.compile(r"\s*\u27e6[^\u27e6\u27e7]*\u27e7\s*")
@@ -369,12 +369,21 @@ def resolve_anchor_cuts(text, spans, boundary_types, protected, expected):
         if not boundary:
             continue
         if boundary not in candidates_by_type:
-            candidates_by_type[boundary] = [m.end() for m in BOUNDARY_SEARCH_PATTERNS[boundary].finditer(text)
-                                             if not inside_protected_span(m.end(), protected) and not is_leading_punct_run(text, m.start())]
-        available = [c for c in candidates_by_type[boundary] if c not in used]
-        if not available:
+            candidates_by_type[boundary] = [
+                [m.end() for m in pattern.finditer(text)
+                 if not inside_protected_span(m.end(), protected) and not is_leading_punct_run(text, m.start())]
+                for pattern in BOUNDARY_SEARCH_PATTERNS[boundary]
+            ]
+        chunk = expected[i] - (expected[i - 1] if i > 0 else 0)
+        tolerance = max(ORIGINAL_PUNCT_TOLERANCE.get(boundary, 0.20) * chunk, PUNCT_PROXIMITY_CHARS)
+        cut = None
+        for tier in candidates_by_type[boundary]:
+            available = [c for c in tier if c not in used and abs(c - expected[i]) <= tolerance]
+            if available:
+                cut = min(available, key=lambda pos: abs(pos - expected[i]))
+                break
+        if cut is None:
             continue
-        cut = min(available, key=lambda pos: abs(pos - expected[i]))
         anchors[i] = cut
         used.add(cut)
     return anchors
@@ -387,7 +396,7 @@ LEFT_CUT_PATTERN = re.compile(r"[“「『（([{＜〈《【〔„‚«‹¿¡]"
 BOOK_TITLE_PATTERN = re.compile(r"《[^《》]*》")
 EMBEDDED_QUOTE_PATTERN = re.compile(r"“[^“”]*”")
 EMBEDDED_QUOTE_MAX_CHARS = 16
-ORIGINAL_PUNCT_TOLERANCE = {"trail_off": 0.60, "comma": 0.20, "period": 0.20, "colon": 0.20}
+ORIGINAL_PUNCT_TOLERANCE = {"trail_off": 0.60, "comma": 0.30, "period": 0.25, "colon": 0.25}
 INFERRED_PUNCT_TOLERANCE = 0.15
 INFERRED_WEAK_PUNCT_TOLERANCE = 0.06
 INFERRED_MIN_SHARE = 0.5
@@ -438,13 +447,16 @@ def resolve_cut(text, cursor, expected, boundary, max_cut, protected=(), target_
         return anchor, "original"
     chunk = max(expected - cursor, 0)
     if boundary:
-        candidates = [m.end() for m in BOUNDARY_SEARCH_PATTERNS[boundary].finditer(text, cursor)
-                      if cursor < m.end() < ceiling and not inside_protected_span(m.end(), protected)
-                      and not is_leading_punct_run(text, m.start())]
-        if candidates:
-            cut = min(candidates, key=lambda pos: abs(pos - expected))
-            if abs(cut - expected) <= max(ORIGINAL_PUNCT_TOLERANCE.get(boundary, 0.20) * chunk, PUNCT_PROXIMITY_CHARS):
-                return cut, "original"
+        cut = None
+        for pattern in BOUNDARY_SEARCH_PATTERNS[boundary]:
+            candidates = [m.end() for m in pattern.finditer(text, cursor)
+                          if cursor < m.end() < ceiling and not inside_protected_span(m.end(), protected)
+                          and not is_leading_punct_run(text, m.start())]
+            if candidates:
+                cut = min(candidates, key=lambda pos: abs(pos - expected))
+                break
+        if cut is not None and abs(cut - expected) <= max(ORIGINAL_PUNCT_TOLERANCE.get(boundary, 0.20) * chunk, PUNCT_PROXIMITY_CHARS):
+            return cut, "original"
     strong = [m.end() for m in GENERAL_STRONG_PUNCT_PATTERN.finditer(text, cursor)
               if cursor < m.end() < ceiling and not inside_protected_span(m.end(), protected)
               and not is_leading_punct_run(text, m.start())]

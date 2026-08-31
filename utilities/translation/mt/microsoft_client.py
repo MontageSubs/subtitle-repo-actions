@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: microsoft_client.py
-# Version: 1.4
+# Version: 1.5
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -37,7 +37,7 @@
 #       repeating an identical oversized request.
 #     - Case-insensitive marker matching and heuristic repair of truncated/malformed markers
 #       (e.g. missing opening bracket) via suffix-matching against still-pending marker ids.
-#     - Packed Network Payload: Generates payloads for all retry radii simultaneously and packs 
+#     - Packed Network Payload: Generates payloads for all retry radii simultaneously and packs
 #       them efficiently into bulk array requests. Network operations are executed concurrently
 #       (up to MAX_CONCURRENCY) and reassembled out-of-order, drastically reducing wall-clock latency.
 #     - Automatic source language detection and pinning across retries.
@@ -101,7 +101,7 @@ def has_marker_leak(original_text, translated_text):
 def repair_corrupt_markers(text, prefix_char, expected_ids):
     if not text or not expected_ids:
         return text
-        
+
     valid_pattern = re.compile(rf"\u27e6{prefix_char}(\d+)\u27e7")
     seen = {int(m.group(1)) for m in valid_pattern.finditer(text)}
     pending = {cid for cid in expected_ids if cid not in seen}
@@ -113,15 +113,15 @@ def repair_corrupt_markers(text, prefix_char, expected_ids):
         cid = int(num_str)
         if cid in pending:
             corrupt_chars = "\u27e6\u27e7\\\ufffd[]{}<> " + prefix_char.lower() + prefix_char.upper()
-            
+
             clean_before = before
             while clean_before and clean_before[-1] in corrupt_chars:
                 clean_before = clean_before[:-1]
-                
+
             clean_after = after
             while clean_after and clean_after[0] in corrupt_chars:
                 clean_after = clean_after[1:]
-                
+
             is_marker = False
             before_str = before.strip().lower()
             if before_str.endswith(prefix_char.lower()):
@@ -129,7 +129,7 @@ def repair_corrupt_markers(text, prefix_char, expected_ids):
             else:
                 if any(ch in before + after for ch in "\u27e6\u27e7\\\ufffd[]{}<>"):
                     is_marker = True
-                    
+
             if is_marker:
                 pending.discard(cid)
                 return f"{clean_before}\u27e6{prefix_char}{cid}\u27e7{clean_after}"
@@ -137,7 +137,7 @@ def repair_corrupt_markers(text, prefix_char, expected_ids):
 
     pattern = re.compile(r"([^\d\s]*\s*)(\d+)(\s*[^\d\s]*)")
     text = pattern.sub(replacer, text)
-    
+
     if pending:
         empty_pattern = re.compile(rf"(?:[\u27e6\\\ufffd]{{1,3}}{prefix_char}[\u27e7\\\ufffd]{{1,3}}|[\u27e6\u27e7\\\ufffd]{{2,4}})", re.IGNORECASE)
         empty_matches = list(empty_pattern.finditer(text))
@@ -148,7 +148,7 @@ def repair_corrupt_markers(text, prefix_char, expected_ids):
                     return f"\u27e6{prefix_char}{pending_list.pop(0)}\u27e7"
                 return m.group(0)
             text = empty_pattern.sub(empty_replacer, text)
-            
+
     return text
 
 FORMAT_TAG_ESCAPE_PATTERNS = [
@@ -362,7 +362,7 @@ def is_untranslated(text, source_lang, target_lang):
     sl = script_of(source_lang)
     tl = script_of(target_lang)
     if not sl or not tl or sl == tl: return False
-    return len(SCRIPT_LEAK_PATTERNS[sl].findall(text)) > 1
+    return len(SCRIPT_LEAK_PATTERNS[sl].findall(text)) >= 1
 
 NOISE_CATEGORY_PREFIXES = ("P", "N")
 
@@ -378,7 +378,7 @@ def is_leaked_untranslated(original, translated, source_lang, target_lang):
     norm_orig = normalize_for_equality(original)
     if not norm_orig:
         return False
-        
+
     sl, tl = script_of(source_lang), script_of(target_lang)
     if sl == "latin" and tl == "cjk":
         pass
@@ -387,7 +387,7 @@ def is_leaked_untranslated(original, translated, source_lang, target_lang):
     else:
         if word_count(original) < 2:
             return False
-            
+
     return norm_orig == normalize_for_equality(translated)
 
 def unit_cue_ids(unit):
@@ -498,7 +498,7 @@ def call_microsoft_api(request_texts, source_lang, target_lang):
     if source_lang:
         params = f"from={urllib.parse.quote(source_lang)}&{params}"
     url = f"{ENDPOINT}?{params}"
-    
+
     seq = next_debug_seq()
     debug_log_raw(DEBUG_RAW_IN_FILE, {"seq": seq, "ts": time.time(), "direction": "request", "source_lang": source_lang, "target_lang": target_lang, "body": request_texts})
 
@@ -516,7 +516,7 @@ def call_microsoft_api(request_texts, source_lang, target_lang):
         status = response.status
         headers = dict(response.headers.items())
         raw = response.read().decode("utf-8")
-        
+
         try:
             payload = json.loads(raw)
         except Exception:
@@ -526,7 +526,7 @@ def call_microsoft_api(request_texts, source_lang, target_lang):
             "seq": seq, "ts": time.time(), "direction": "response", "status": status, "headers": headers,
             "body": payload if payload is not None else raw
         })
-        
+
         if status != 200:
             raise ValueError(f"HTTP {status}: {raw}")
         return payload
@@ -577,7 +577,7 @@ def run_packed_jobs(payloads, max_chars_per_request, lang, target_lang, concurre
     if not payloads:
         return results
     chunks = pack_by_chars(payloads, max_chars_per_request)
-    
+
     def process_chunk(indices):
         chunk_payloads = [payloads[i] for i in indices]
         try:
@@ -593,7 +593,7 @@ def run_packed_jobs(payloads, max_chars_per_request, lang, target_lang, concurre
         futures = [executor.submit(process_chunk, indices) for indices in chunks]
         for future in as_completed(futures):
             future.result()
-            
+
     return results
 
 def translate_batch(batch, lang, target_lang, context_html=None):
@@ -662,7 +662,7 @@ def retry_windowed_all(units, suspect_ids, lang, target_lang, batch_chars, concu
     index = {u["id"]: i for i, u in enumerate(units)}
     unit_by_id = {u["id"]: u for u in units}
     jobs = []
-    
+
     for suspect_id in suspect_ids:
         if suspect_id not in index:
             continue
@@ -671,7 +671,7 @@ def retry_windowed_all(units, suspect_ids, lang, target_lang, batch_chars, concu
             window = units[max(0, i - radius):i + radius + 1]
             if len(window) < 1:
                 continue
-            
+
             is_solo = (len(window) == 1)
             payload = "".join(
                 f"{'' if is_solo else wrap_marker(UNIT_MARKER_TEMPLATE.format(unit['id']))}{protect_content_html(unit['text'], unit.get('term_matches') or [])}"
@@ -679,10 +679,10 @@ def retry_windowed_all(units, suspect_ids, lang, target_lang, batch_chars, concu
             )
             if len(payload) > batch_chars:
                 continue
-            
+
             keep_radius = min(2, radius)
             keep_ids = {u["id"] for u in units[max(0, i - keep_radius):i + keep_radius + 1]}
-            
+
             jobs.append({
                 "suspect_id": suspect_id,
                 "radius": radius,
@@ -691,27 +691,27 @@ def retry_windowed_all(units, suspect_ids, lang, target_lang, batch_chars, concu
                 "keep_ids": keep_ids,
                 "is_solo": is_solo
             })
-            
+
     if not jobs:
         return {}
-        
+
     payloads = [job["payload"] for job in jobs]
     html_results = run_packed_jobs(payloads, batch_chars, lang, target_lang, concurrency)
-    
+
     results_by_suspect = {}
     for job, html in zip(jobs, html_results):
         if not html:
             continue
-            
+
         if job["is_solo"]:
             marker_res = {str(job["window_ids"][0]): extract_marker_free_response(html)}
         else:
             marker_res = parse_translated_html(html, UNIT_MARKER_PATTERN, "u", job["window_ids"])
-        
+
         if strict_marker and job["radius"] > 0:
             if any(kid not in marker_res for kid in job["keep_ids"]):
                 continue
-                
+
         job_recovered = {}
         for uid_str, text_raw in marker_res.items():
             uid = int(uid_str)
@@ -733,7 +733,7 @@ def retry_windowed_all(units, suspect_ids, lang, target_lang, batch_chars, concu
             if res:
                 recovered.update(res)
                 break
-                
+
     return recovered
 
 def patch_missing_cues(text, expected_ids, recovered):
@@ -745,12 +745,12 @@ def patch_missing_cues(text, expected_ids, recovered):
 def retry_isolated_cues_all(missing_by_unit, cue_order, cue_text_by_id, cue_term_matches, lang, target_lang, batch_chars, concurrency, extra_valid=None):
     position = {cid: i for i, cid in enumerate(cue_order)}
     jobs = []
-    
+
     for unit_id, missing_ids in missing_by_unit.items():
         positions = sorted([position[cid] for cid in missing_ids if cid in position])
         if not positions:
             continue
-        
+
         for radius in ISOLATED_RADIUS_LADDER:
             lo = max(0, positions[0] - radius)
             hi = min(len(cue_order) - 1, positions[-1] + radius)
@@ -766,10 +766,10 @@ def retry_isolated_cues_all(missing_by_unit, cue_order, cue_text_by_id, cue_term
                 marker = "" if is_solo else wrap_marker(CUE_MARKER_TEMPLATE.format(cid))
                 payload += f"{marker}{protect_content_html(text, matches)}"
                 sent_ids.append(cid)
-            
+
             if not payload or len(payload) > batch_chars:
                 continue
-            
+
             jobs.append({
                 "unit_id": unit_id,
                 "radius": radius,
@@ -783,18 +783,30 @@ def retry_isolated_cues_all(missing_by_unit, cue_order, cue_text_by_id, cue_term
     if not jobs:
         return recovered_by_unit
 
-    payloads = [job["payload"] for job in jobs]
+    send_jobs, job_send_index, seen_solo_text = [], [], {}
+    for job in jobs:
+        if job["is_solo"] and len(job["sent_ids"]) == 1:
+            text_key = cue_text_by_id.get(job["sent_ids"][0])
+            if text_key in seen_solo_text:
+                job_send_index.append(seen_solo_text[text_key])
+                continue
+            seen_solo_text[text_key] = len(send_jobs)
+        job_send_index.append(len(send_jobs))
+        send_jobs.append(job)
+
+    payloads = [job["payload"] for job in send_jobs]
     html_results = run_packed_jobs(payloads, batch_chars, lang, target_lang, concurrency)
-    
+
     results_by_unit = {}
-    for job, html in zip(jobs, html_results):
+    for job, send_idx in zip(jobs, job_send_index):
+        html = html_results[send_idx]
         if not html:
             continue
         if job["is_solo"] and len(job["sent_ids"]) == 1:
             marker_res = {job["sent_ids"][0]: extract_marker_free_response(html)}
         else:
             marker_res = parse_translated_html(html, CUE_MARKER_PATTERN, "c", job["sent_ids"])
-            
+
         job_recovered = {}
         for cid in job["missing_ids"]:
             cand = marker_res.get(cid)
@@ -803,7 +815,7 @@ def retry_isolated_cues_all(missing_by_unit, cue_order, cue_text_by_id, cue_term
             orig = cue_text_by_id.get(cid, "")
             if cand and not CORRUPT_MARKER_SIGNATURE.search(cand) and is_length_plausible(orig, cand) and (extra_valid is None or extra_valid(orig, cand)):
                 job_recovered[cid] = apply_term_replacements(cand, cue_term_matches.get(cid) or [], target_lang)
-                
+
         if job_recovered:
             results_by_unit.setdefault(job["unit_id"], {}).setdefault(job["radius"], {}).update(job_recovered)
 
@@ -862,25 +874,25 @@ def translate_units(units, chapters, cues, lang, target_lang, batch_chars, concu
     resolved = {unit["id"]: unit["resolved"] for unit in units if unit.get("resolved") is not None}
     pending = [unit for unit in units if unit.get("resolved") is None]
     chapter_of_unit = {uid: chapter["id"] for chapter in chapters for uid in chapter["unit_ids"]}
-    
+
     items, chapter_groups = [], {}
     for unit in pending:
         cid = chapter_of_unit.get(unit["id"])
         html_text = protect_content_html(unit["text"], unit.get("term_matches") or [])
         items.append({"id": unit["id"], "text": unit["text"], "html": html_text})
         chapter_groups.setdefault(cid, []).append(unit["id"])
-        
+
     segments, oversized = build_segment_groups(items, list(chapter_groups.values()), batch_chars)
     batches = build_requests(segments, array_size)
     translations_raw, skipped = {}, [item["id"] for item in oversized]
-    
+
     total_batches = len(batches)
     completed = 0
     start_time = time.time()
     progress_lock = threading.Lock()
-    
+
     context_html = escape_html(raw_context) if raw_context else None
-    
+
     with ThreadPoolExecutor(max_workers=concurrency) as executor:
         futures = {executor.submit(translate_batch, batch, lang, target_lang, context_html): batch for batch in batches}
         for future in as_completed(futures):
@@ -918,10 +930,10 @@ def translate_units(units, chapters, cues, lang, target_lang, batch_chars, concu
     for unit in pending:
         raw_text = translations_raw.get(unit["id"])
         final_text = apply_term_replacements(raw_text, unit.get("term_matches") or [], target_lang) if raw_text is not None else None
-        
+
         if final_text is not None and is_untranslated(final_text, lang.current(), target_lang):
             untranslated_jobs.append(unit)
-            
+
     if untranslated_jobs:
         payloads = [protect_content_html(u["text"], u.get("term_matches") or []) for u in untranslated_jobs]
         html_results = run_packed_jobs(payloads, batch_chars, lang, target_lang, concurrency)
@@ -964,7 +976,7 @@ def translate_units(units, chapters, cues, lang, target_lang, batch_chars, concu
     for uid in bleed_victims:
         if uid in unit_by_id and uid not in primary_suspects:
             all_suspects.add(uid)
-    
+
     bleed_neighbors = set()
     for uid in cue_suspects:
         pos = unit_position.get(uid)
@@ -979,7 +991,7 @@ def translate_units(units, chapters, cues, lang, target_lang, batch_chars, concu
     if all_suspects:
         marker_loss_suspects = {uid for uid in all_suspects if uid in bleed_victims or uid in bleed_neighbors or uid in cue_suspects}
         normal_suspects = [uid for uid in all_suspects if uid not in marker_loss_suspects]
-        
+
         if normal_suspects:
             recovered = retry_windowed_all(units, sorted(normal_suspects), lang, target_lang, batch_chars, concurrency)
             if recovered:
@@ -987,7 +999,7 @@ def translate_units(units, chapters, cues, lang, target_lang, batch_chars, concu
                              for rid, text in recovered.items()}
                 log(f"windowed retry: recovered {sorted(recovered)}")
                 results.update(recovered)
-                
+
         if marker_loss_suspects:
             recovered_marker = retry_windowed_all(units, sorted(list(marker_loss_suspects)), lang, target_lang, batch_chars, concurrency, ladder=(5, 1, 0), strict_marker=True)
             if recovered_marker:
@@ -1003,17 +1015,17 @@ def translate_units(units, chapters, cues, lang, target_lang, batch_chars, concu
                 results[uid] = repair_corrupt_markers(results[uid], "c", expected)
             remaining = missing_cue_ids(unit_by_id[uid], results[uid])
             if not remaining: continue
-            
+
             trivial = [cid for cid in remaining if not has_translatable_content(cue_text_by_id.get(cid, ""), cue_term_matches.get(cid))]
             non_trivial = remaining
             if trivial:
                 filled = {cid: apply_term_replacements(cue_text_by_id[cid], cue_term_matches.get(cid) or [], target_lang) for cid in trivial}
                 results[uid] = patch_missing_cues(results[uid], expected_cue_ids(unit_by_id[uid]), filled)
                 non_trivial = [cid for cid in remaining if cid not in trivial]
-                
+
             if non_trivial:
                 missing_by_unit[uid] = non_trivial
-                
+
         if missing_by_unit:
             recovered_cues = retry_isolated_cues_all(missing_by_unit, cue_order, cue_text_by_id, cue_term_matches, lang, target_lang, batch_chars, concurrency)
             for uid, r_cues in recovered_cues.items():
@@ -1054,7 +1066,7 @@ def main():
     parser.add_argument("--context-file", default=None)
     parser.add_argument("--context-max-chars", type=int, default=3000)
     args = parser.parse_args()
-    
+
     DEBUG_MODE = args.debug or os.environ.get("DEBUG") == "1"
     WRAP_MARKERS = args.wrap_markers
 
@@ -1066,11 +1078,11 @@ def main():
     units = payload.get("units", [])
     chapters = payload.get("chapters", [])
     cues = payload.get("cues", [])
-    
+
     requested_lang = (args.source_lang or payload.get("source_lang") or "auto").strip()
     target_lang = normalize_microsoft_lang(args.target_lang or payload.get("target_lang"))
     lang_resolver = LanguageResolver(requested_lang)
-    
+
     raw_context = None
     if args.context_file:
         raw_context = open(args.context_file, encoding="utf-8").read().strip()
@@ -1078,7 +1090,7 @@ def main():
         if truncated:
             log(f"context truncated to {args.context_max_chars} chars (word boundary preserved)")
         raw_context = resolve_context_language(raw_context, requested_lang, sample_subtitle_text(units))
-    
+
     if not units:
         result = {"success": False, "reason": "no_units", "translations": {}, "skipped": []}
     else:
@@ -1092,9 +1104,9 @@ def main():
             "detected_source_lang": lang_resolver._detected or "",
             "target_lang": target_lang
         }
-        
+
     log(f"status: {'ok' if result['success'] else 'failed'} (translated={len(result.get('translations', {}))}, skipped={len(result.get('skipped', []))})")
-    
+
     out_str = json.dumps(result, ensure_ascii=False)
     if args.output:
         with open(args.output, "w", encoding="utf-8") as f:

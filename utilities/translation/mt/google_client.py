@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: google_client.py
-# Version: 2.13.1
+# Version: 2.14.0
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -402,51 +402,88 @@ def split_by_marker(flat_text, pattern):
     return result
 
 
-def parse_by_spans(html):
-    opens = [(m.end(), m.group(1)) for m in SPAN_OPEN_PATTERN.finditer(html) if m.group(1).isdigit()]
+def parse_by_tag_id(html, open_pattern, marker_pattern):
+    opens = [(m.end(), m.group(1)) for m in open_pattern.finditer(html) if m.group(1).isdigit()]
     result = {}
     for i, (end, idx_str) in enumerate(opens):
         idx = int(idx_str)
         chunk_end = opens[i + 1][0] if i + 1 < len(opens) else len(html)
         raw = html[end:chunk_end]
         text = unescape_html(TAG_PATTERN.sub("", ITALIC_PATTERN.sub("", raw))).strip()
-        text = " ".join(GROUP_MARKER_PATTERN.sub("", text).split())
+        text = " ".join(marker_pattern.sub("", text).split())
         if not text:
             continue
         result[idx] = f"{result[idx]} {text}" if idx in result else text
     return result
 
 
-def parse_by_markers(html):
-    flat = unescape_html(TAG_PATTERN.sub("", ITALIC_PATTERN.sub("", html)))
-    return {int(key): text for key, text in split_by_marker(flat, GROUP_MARKER_PATTERN).items() if key.isdigit()}
+def parse_by_spans(html):
+    return parse_by_tag_id(html, SPAN_OPEN_PATTERN, GROUP_MARKER_PATTERN)
 
 
 MARKER_OVERREACH_RATIO = 1.3
 
 
-def choose_candidate(span_text, marker_text):
+def choose_candidate(primary_text, marker_text):
     if marker_text is None:
-        return span_text
-    if span_text is None:
+        return primary_text
+    if primary_text is None:
         return marker_text
-    span_len = content_length(span_text)
-    if span_len and content_length(marker_text) / span_len > MARKER_OVERREACH_RATIO:
-        return span_text
+    primary_len = content_length(primary_text)
+    if primary_len and content_length(marker_text) / primary_len > MARKER_OVERREACH_RATIO:
+        return primary_text
     return marker_text
 
 
+def reconcile_span_marker_events(html):
+    events = []
+    for m in SPAN_OPEN_PATTERN.finditer(html):
+        if m.group(1).isdigit():
+            events.append((m.end(), "span", int(m.group(1))))
+    for m in GROUP_MARKER_PATTERN.finditer(html):
+        if m.group(1).isdigit():
+            events.append((m.start(), "marker", int(m.group(1))))
+    events.sort(key=lambda e: e[0])
+
+    starts, ambiguous = {}, set()
+    for order, (pos, kind, idx) in enumerate(events):
+        slot = starts.setdefault(idx, {})
+        if kind in slot:
+            ambiguous.add(idx)
+        slot[kind] = (pos, order)
+
+    boundaries = []
+    for idx, signals in starts.items():
+        if idx in ambiguous or "span" not in signals or "marker" not in signals:
+            continue
+        (span_pos, span_order), (marker_pos, marker_order) = signals["span"], signals["marker"]
+        if abs(span_order - marker_order) != 1:
+            continue
+        boundaries.append((min(span_pos, marker_pos), idx))
+    return sorted(boundaries)
+
+
+def parse_by_reconciled_boundaries(html, boundaries):
+    result = {}
+    for i, (pos, idx) in enumerate(boundaries):
+        end = boundaries[i + 1][0] if i + 1 < len(boundaries) else len(html)
+        raw = html[pos:end]
+        text = unescape_html(TAG_PATTERN.sub("", ITALIC_PATTERN.sub("", raw))).strip()
+        text = " ".join(GROUP_MARKER_PATTERN.sub("", text).split())
+        if text:
+            result[idx] = text
+    return result
+
+
 def parse_translated_html(html):
-    span_result = parse_by_spans(html)
-    marker_result = parse_by_markers(html) if ALIGNMENT_MODE == "marker" else {}
-    if DEBUG_MODE:
-        fallback_only = sorted(idx for idx in span_result if idx not in marker_result)
-        if fallback_only and ALIGNMENT_MODE == "marker":
-            log(f"debug: {len(fallback_only)} unit(s) recovered via span fallback (marker unreliable): {fallback_only}")
-        if not span_result and not marker_result:
-            with DEBUG_LOCK:
-                log(f"debug: parse_translated_html found NO matching blocks in HTML. Head: {html[:200]}")
-    return span_result, marker_result
+    if ALIGNMENT_MODE == "marker":
+        result = parse_by_reconciled_boundaries(html, reconcile_span_marker_events(html))
+    else:
+        result = parse_by_spans(html)
+    if DEBUG_MODE and not result:
+        with DEBUG_LOCK:
+            log(f"debug: parse_translated_html found NO matching blocks in HTML. Head: {html[:200]}")
+    return result
 
 
 def next_debug_seq():
@@ -510,15 +547,14 @@ def call_google(batch, lang, target_lang, api_key, context_html=None):
     id_by_index = {i: item_id for item_id, i in indices.items()}
     html = "".join(build_chapter_html(group, indices, context_html) for group in batch)
     translated_html = post_translate_html(html, lang, target_lang, api_key)
-    span_result, marker_result = parse_translated_html(translated_html)
+    parsed = parse_translated_html(translated_html)
     source_by_id = {item["id"]: item["text"] for item in items}
     result = {}
-    for idx in span_result.keys() | marker_result.keys():
+    for idx, text in parsed.items():
         item_id = id_by_index.get(idx)
         if item_id is None:
             continue
         source_text = source_by_id.get(item_id, "")
-        text = choose_candidate(span_result.get(idx), marker_result.get(idx))
         if has_content(text) or not has_content(source_text):
             result[item_id] = text
     return result
@@ -819,21 +855,47 @@ def patch_missing_cues(text, expected_ids, recovered):
     return " ".join(f"{CUE_MARKER_TEMPLATE.format(cid)} {chunks[cid]}" for cid in expected_ids if cid in chunks)
 
 
+DIV_ID_PATTERN = re.compile(r'<div[^>]*\bid=["\']?([a-zA-Z0-9:]+)["\']?[^>]*>')
+ISOLATED_RADIUS_LADDER = (ISOLATED_CUE_RADIUS, 2, 0)
+
+
 def build_isolated_divs(cue_ids, cue_text_by_id, cue_term_matches):
     return "".join(
-        f"<div>{wrap_marker(CUE_MARKER_TEMPLATE.format(cid))} {protect_content_html(cue_text_by_id[cid], cue_term_matches.get(cid) or [])}</div>"
+        f"<div id={cid}>{wrap_marker(CUE_MARKER_TEMPLATE.format(cid))} {protect_content_html(cue_text_by_id[cid], cue_term_matches.get(cid) or [])}</div>"
         for cid in cue_ids if cid in cue_text_by_id
     )
 
 
-def retry_isolated_cues(missing_ids, cue_order, cue_text_by_id, cue_term_matches, lang, target_lang, api_key, batch_chars):
+def dedupe_by_exact_text(ids, text_by_id):
+    seen, group_of, send_ids = {}, {}, []
+    for cid in ids:
+        text = text_by_id.get(cid)
+        if text is not None and text in seen:
+            group_of[cid] = seen[text]
+            continue
+        if text is not None:
+            seen[text] = cid
+        group_of[cid] = cid
+        send_ids.append(cid)
+    return send_ids, group_of
+
+
+def retry_isolated_cues_merged_at_radius(missing_by_unit, radius, cue_order, cue_text_by_id, cue_term_matches, lang, target_lang, api_key, batch_chars):
     position = {cid: i for i, cid in enumerate(cue_order)}
-    positions = sorted(position[cid] for cid in missing_ids if cid in position)
+    positions = set()
+    for cue_ids in missing_by_unit.values():
+        for cid in cue_ids:
+            p = position.get(cid)
+            if p is None:
+                continue
+            for k in range(max(0, p - radius), min(len(cue_order) - 1, p + radius) + 1):
+                positions.add(k)
     if not positions:
         return {}
-    lo = max(0, positions[0] - ISOLATED_CUE_RADIUS)
-    hi = min(len(cue_order) - 1, positions[-1] + ISOLATED_CUE_RADIUS)
-    html = build_isolated_divs(cue_order[lo:hi + 1], cue_text_by_id, cue_term_matches)
+
+    sent_ids = [cue_order[p] for p in sorted(positions)]
+    send_ids, group_of = dedupe_by_exact_text(sent_ids, cue_text_by_id) if radius == 0 else (sent_ids, {cid: cid for cid in sent_ids})
+    html = build_isolated_divs(send_ids, cue_text_by_id, cue_term_matches)
     if not within_budget(html, batch_chars):
         return {}
     try:
@@ -841,14 +903,40 @@ def retry_isolated_cues(missing_ids, cue_order, cue_text_by_id, cue_term_matches
     except Exception as e:
         log(f"isolated cue retry failed: {e}")
         return {}
-    flat = unescape_html(TAG_PATTERN.sub("", translated_html))
-    recovered = split_cue_chunks(flat)
-    return {
-        cid: apply_term_replacements(text, cue_term_matches.get(cid) or [], target_lang)
-        for cid, text in recovered.items()
-        if cid in missing_ids and has_content(text)
-        and is_length_plausible(cue_text_by_id.get(cid, ""), text)
-    }
+
+    flat = repair_corrupt_markers(unescape_html(TAG_PATTERN.sub("", translated_html)), "c", send_ids)
+    marker_result = split_cue_chunks(flat)
+    div_result = parse_by_tag_id(translated_html, DIV_ID_PATTERN, CUE_MARKER_PATTERN)
+    all_missing = {cid for cue_ids in missing_by_unit.values() for cid in cue_ids}
+    out = {}
+    for cid in all_missing:
+        rep_id = group_of.get(cid, cid)
+        text = choose_candidate(div_result.get(rep_id), marker_result.get(rep_id))
+        if not text or not has_content(text) or not is_length_plausible(cue_text_by_id.get(cid, ""), text):
+            continue
+        out[cid] = apply_term_replacements(text, cue_term_matches.get(cid) or [], target_lang)
+    return out
+
+
+def retry_isolated_cues_merged(missing_by_unit, cue_order, cue_text_by_id, cue_term_matches, lang, target_lang, api_key, batch_chars):
+    remaining = {uid: list(cids) for uid, cids in missing_by_unit.items() if cids}
+    recovered_by_unit = {}
+    for radius in ISOLATED_RADIUS_LADDER:
+        if not remaining:
+            break
+        recovered = retry_isolated_cues_merged_at_radius(remaining, radius, cue_order, cue_text_by_id, cue_term_matches, lang, target_lang, api_key, batch_chars)
+        if not recovered:
+            continue
+        next_remaining = {}
+        for uid, cue_ids in remaining.items():
+            for cid in cue_ids:
+                if cid in recovered:
+                    recovered_by_unit.setdefault(uid, {})[cid] = recovered[cid]
+            still_missing = [cid for cid in cue_ids if cid not in recovered]
+            if still_missing:
+                next_remaining[uid] = still_missing
+        remaining = next_remaining
+    return recovered_by_unit
 
 
 def translate_units(units, chapters, cues, lang, target_lang, api_key, batch_chars, concurrency, raw_context=None):
@@ -888,6 +976,7 @@ def translate_units(units, chapters, cues, lang, target_lang, api_key, batch_cha
     cue_text_by_id = {c["id"]: c["text"] for c in cues if c["id"] in markerable_cue_ids}
     cue_term_matches = build_cue_term_matches(units)
 
+    pending_isolated = {}
     for uid in sorted(length_suspects | cue_suspects):
         recovered = retry_windowed(units, uid, lang, target_lang, api_key, batch_chars)
         if recovered:
@@ -912,14 +1001,19 @@ def translate_units(units, chapters, cues, lang, target_lang, api_key, batch_cha
             results[uid] = patch_missing_cues(results[uid], expected_cue_ids(unit_by_id[uid]), filled)
             log(f"unit {uid}: cues {trivial} have no translatable content beyond glossary terms, filled without retry")
             remaining = [cid for cid in remaining if cid not in trivial]
-        if not remaining:
-            continue
-        recovered_cues = retry_isolated_cues(remaining, cue_order, cue_text_by_id, cue_term_matches, lang, target_lang, api_key, batch_chars)
-        if recovered_cues:
-            results[uid] = patch_missing_cues(results[uid], expected_cue_ids(unit_by_id[uid]), recovered_cues)
-            log(f"isolated cue retry for unit {uid}: recovered cues {sorted(recovered_cues)}")
-        else:
-            log(f"isolated cue retry for unit {uid}: cues {remaining} still missing, left as-is")
+        if remaining:
+            pending_isolated[uid] = remaining
+
+    if pending_isolated:
+        recovered_by_unit = retry_isolated_cues_merged(pending_isolated, cue_order, cue_text_by_id, cue_term_matches, lang, target_lang, api_key, batch_chars)
+        for uid, remaining in pending_isolated.items():
+            recovered_cues = recovered_by_unit.get(uid, {})
+            if recovered_cues:
+                results[uid] = patch_missing_cues(results[uid], expected_cue_ids(unit_by_id[uid]), recovered_cues)
+                log(f"isolated cue retry for unit {uid}: recovered cues {sorted(recovered_cues)}")
+            still_missing = [cid for cid in remaining if cid not in recovered_cues]
+            if still_missing:
+                log(f"isolated cue retry for unit {uid}: cues {still_missing} still missing, left as-is")
 
     skipped = [uid for uid, text in results.items() if text is None]
     translations = {str(uid): text for uid, text in results.items() if text is not None}
