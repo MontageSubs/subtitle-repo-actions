@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: bilingual_merge.py
-# Version: 2.7.4
+# Version: 2.7.5
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -466,6 +466,10 @@ def escape_protected_span(pos, protected):
     return pos
 
 
+HARD_BREAK_PUNCT_TOLERANCE = 0.15
+HARD_BREAK_PROXIMITY_CHARS = 3
+
+
 def resolve_cut(text, cursor, expected, boundary, max_cut, protected=(), target_lang=None, anchor=None):
     limit = len(text)
     ceiling = min(limit, max_cut)
@@ -490,14 +494,18 @@ def resolve_cut(text, cursor, expected, boundary, max_cut, protected=(), target_
                if cursor < m.start() < ceiling and not inside_protected_span(m.start(), protected)]
     if strong:
         cut = min(strong, key=lambda pos: abs(pos - expected))
-        if abs(cut - expected) <= max(INFERRED_PUNCT_TOLERANCE * chunk, PUNCT_PROXIMITY_CHARS):
+        strong_tol = max(HARD_BREAK_PUNCT_TOLERANCE * chunk, HARD_BREAK_PROXIMITY_CHARS) if boundary is None \
+            else max(INFERRED_PUNCT_TOLERANCE * chunk, PUNCT_PROXIMITY_CHARS)
+        if abs(cut - expected) <= strong_tol:
             return cut, "inferred"
     weak = [m.end() for m in GENERAL_WEAK_PUNCT_PATTERN.finditer(text, cursor)
             if cursor < m.end() < ceiling and not inside_protected_span(m.end(), protected)
             and not is_leading_punct_run(text, m.start())]
     if weak:
         cut = min(weak, key=lambda pos: abs(pos - expected))
-        if abs(cut - expected) <= max(INFERRED_WEAK_PUNCT_TOLERANCE * chunk, PUNCT_PROXIMITY_CHARS_WEAK):
+        weak_tol = max(HARD_BREAK_PUNCT_TOLERANCE * chunk, HARD_BREAK_PROXIMITY_CHARS) if boundary is None \
+            else max(INFERRED_WEAK_PUNCT_TOLERANCE * chunk, PUNCT_PROXIMITY_CHARS_WEAK)
+        if abs(cut - expected) <= weak_tol:
             return cut, "inferred"
     boundaries = [b for b in (bd + cursor for bd in word_boundaries(text[cursor:], target_lang))
                   if cursor < b < ceiling and not inside_protected_span(b, protected)]
