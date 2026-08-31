@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: microsoft_client.py
-# Version: 1.5
+# Version: 1.5.1
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -92,6 +92,10 @@ CORRUPT_MARKER_SIGNATURE = re.compile(
     r"\\+[^\u27e6\u27e7]{0,6}?\d{1,6}\u27e7|" + UNCLOSED_MARKER_SIGNATURE + "|" + MISSING_OPEN_MARKER_SIGNATURE
 )
 MARKER_BRACKET_PATTERN = re.compile(r"[\u27e6\u27e7]")
+MARKER_DEBRIS_PATTERN = re.compile(r"\\+[0-9\uFFFD]{0,6}[muc](?![a-zA-Z0-9])")
+
+def strip_marker_debris(text):
+    return MARKER_DEBRIS_PATTERN.sub("", text)
 
 def has_marker_leak(original_text, translated_text):
     original_count = len(MARKER_BRACKET_PATTERN.findall(original_text or ""))
@@ -1045,7 +1049,7 @@ def translate_units(units, chapters, cues, lang, target_lang, batch_chars, concu
             log(f"untranslated-leak retry for unit {uid}: recovered cues {sorted(r_cues)}")
 
     final_skipped = [str(uid) for uid, text in results.items() if text is None]
-    final_translations = {str(uid): restore_formatting_tags(text).strip() for uid, text in results.items() if text is not None}
+    final_translations = {str(uid): strip_marker_debris(restore_formatting_tags(text)).strip() for uid, text in results.items() if text is not None}
     return final_translations, final_skipped
 
 def main():
