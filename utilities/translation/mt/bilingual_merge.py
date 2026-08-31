@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: bilingual_merge.py
-# Version: 2.7.5
+# Version: 2.8
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -466,8 +466,8 @@ def escape_protected_span(pos, protected):
     return pos
 
 
-HARD_BREAK_PUNCT_TOLERANCE = 0.15
-HARD_BREAK_PROXIMITY_CHARS = 3
+HARD_BREAK_PUNCT_TOLERANCE = 0.12
+HARD_BREAK_PROXIMITY_CHARS = 2
 
 
 def resolve_cut(text, cursor, expected, boundary, max_cut, protected=(), target_lang=None, anchor=None):
