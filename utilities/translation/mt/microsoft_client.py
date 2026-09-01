@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: microsoft_client.py
-# Version: 1.5.2
+# Version: 1.5.3
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -667,7 +667,7 @@ def missing_cue_ids(unit, text):
     present = split_cue_chunks(text)
     return [cid for cid in expected if cid not in present]
 
-def retry_windowed_all(units, suspect_ids, lang, target_lang, batch_chars, concurrency, ladder=WINDOW_RADIUS_LADDER, strict_marker=False):
+def retry_windowed_all(units, suspect_ids, lang, target_lang, batch_chars, concurrency, ladder=WINDOW_RADIUS_LADDER, strict_marker=False, extra_valid=None):
     index = {u["id"]: i for i, u in enumerate(units)}
     unit_by_id = {u["id"]: u for u in units}
     jobs = []
@@ -730,7 +730,8 @@ def retry_windowed_all(units, suspect_ids, lang, target_lang, batch_chars, concu
                 expected = expected_cue_ids(unit)
                 if expected:
                     text = repair_corrupt_markers(text, "c", expected)
-                if not CORRUPT_MARKER_SIGNATURE.search(text) and (job["radius"] == 0 or is_length_plausible(unit["text"], text)):
+                if not CORRUPT_MARKER_SIGNATURE.search(text) and (job["radius"] == 0 or is_length_plausible(unit["text"], text)) \
+                        and (extra_valid is None or extra_valid(unit["text"], text)):
                     job_recovered[uid] = text
         if job_recovered:
             results_by_suspect.setdefault(job["suspect_id"], {}).setdefault(job["radius"], {}).update(job_recovered)
@@ -952,7 +953,7 @@ def translate_units(units, chapters, cues, lang, target_lang, batch_chars, concu
                 expected_cues = expected_cue_ids(unit)
                 if expected_cues:
                     retried = repair_corrupt_markers(retried, "c", expected_cues)
-                if retried and is_length_plausible(unit["text"], retried):
+                if retried and not is_untranslated(retried, lang.current(), target_lang) and is_length_plausible(unit["text"], retried):
                     translations_raw[unit["id"]] = retried
 
     results = dict(resolved)
@@ -970,7 +971,8 @@ def translate_units(units, chapters, cues, lang, target_lang, batch_chars, concu
 
     length_suspects = {uid for uid, text in results.items()
                         if text is not None and has_content(unit_by_id[uid]["text"])
-                        and (not has_content(text) or not is_length_plausible(unit_by_id[uid]["text"], text))}
+                        and (not has_content(text) or not is_length_plausible(unit_by_id[uid]["text"], text)
+                             or is_untranslated(text, lang.current(), target_lang))}
     cue_suspects = {uid for uid, text in results.items()
                     if text is not None and (missing_cue_ids(unit_by_id[uid], text) or CORRUPT_MARKER_SIGNATURE.search(text)
                                               or has_marker_leak(unit_by_id[uid]["text"], text))}
@@ -1002,7 +1004,8 @@ def translate_units(units, chapters, cues, lang, target_lang, batch_chars, concu
         normal_suspects = [uid for uid in all_suspects if uid not in marker_loss_suspects]
 
         if normal_suspects:
-            recovered = retry_windowed_all(units, sorted(normal_suspects), lang, target_lang, batch_chars, concurrency)
+            recovered = retry_windowed_all(units, sorted(normal_suspects), lang, target_lang, batch_chars, concurrency,
+                                            extra_valid=lambda orig, cand: not is_untranslated(cand, lang.current(), target_lang))
             if recovered:
                 recovered = {rid: apply_term_replacements(text, unit_by_id[rid].get("term_matches") or [], target_lang)
                              for rid, text in recovered.items()}
