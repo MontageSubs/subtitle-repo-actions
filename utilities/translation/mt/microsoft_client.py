@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: microsoft_client.py
-# Version: 1.5.1
+# Version: 1.5.2
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -92,7 +92,7 @@ CORRUPT_MARKER_SIGNATURE = re.compile(
     r"\\+[^\u27e6\u27e7]{0,6}?\d{1,6}\u27e7|" + UNCLOSED_MARKER_SIGNATURE + "|" + MISSING_OPEN_MARKER_SIGNATURE
 )
 MARKER_BRACKET_PATTERN = re.compile(r"[\u27e6\u27e7]")
-MARKER_DEBRIS_PATTERN = re.compile(r"\\+[0-9\uFFFD]{0,6}[muc](?![a-zA-Z0-9])")
+MARKER_DEBRIS_PATTERN = re.compile(r"\\+[0-9\uFFFD]{0,6}(?:[muc](?![a-zA-Z0-9])|(?=\u27e6))")
 
 def strip_marker_debris(text):
     return MARKER_DEBRIS_PATTERN.sub("", text)
@@ -108,6 +108,7 @@ def repair_corrupt_markers(text, prefix_char, expected_ids):
 
     valid_pattern = re.compile(rf"\u27e6{prefix_char}(\d+)\u27e7")
     seen = {int(m.group(1)) for m in valid_pattern.finditer(text)}
+    expected_id_set = set(expected_ids)
     pending = {cid for cid in expected_ids if cid not in seen}
     if not pending:
         return text
@@ -115,29 +116,33 @@ def repair_corrupt_markers(text, prefix_char, expected_ids):
     def replacer(m):
         before, num_str, after = m.group(1), m.group(2), m.group(3)
         cid = int(num_str)
+
+        is_marker = False
+        before_str = before.strip().lower()
+        if before_str.endswith(prefix_char.lower()):
+            is_marker = True
+        elif any(ch in before + after for ch in "\u27e6\u27e7\\\ufffd[]{}<>"):
+            is_marker = True
+        if not is_marker:
+            return m.group(0)
+
         if cid in pending:
-            corrupt_chars = "\u27e6\u27e7\\\ufffd[]{}<> " + prefix_char.lower() + prefix_char.upper()
+            resolved_id = cid
+        elif cid not in expected_id_set and pending:
+            resolved_id = min(pending)
+        else:
+            return m.group(0)
 
-            clean_before = before
-            while clean_before and clean_before[-1] in corrupt_chars:
-                clean_before = clean_before[:-1]
+        corrupt_chars = "\u27e6\u27e7\\\ufffd[]{}<> " + prefix_char.lower() + prefix_char.upper()
+        clean_before = before
+        while clean_before and clean_before[-1] in corrupt_chars:
+            clean_before = clean_before[:-1]
+        clean_after = after
+        while clean_after and clean_after[0] in corrupt_chars:
+            clean_after = clean_after[1:]
 
-            clean_after = after
-            while clean_after and clean_after[0] in corrupt_chars:
-                clean_after = clean_after[1:]
-
-            is_marker = False
-            before_str = before.strip().lower()
-            if before_str.endswith(prefix_char.lower()):
-                is_marker = True
-            else:
-                if any(ch in before + after for ch in "\u27e6\u27e7\\\ufffd[]{}<>"):
-                    is_marker = True
-
-            if is_marker:
-                pending.discard(cid)
-                return f"{clean_before}\u27e6{prefix_char}{cid}\u27e7{clean_after}"
-        return m.group(0)
+        pending.discard(resolved_id)
+        return f"{clean_before}\u27e6{prefix_char}{resolved_id}\u27e7{clean_after}"
 
     pattern = re.compile(r"([^\d\s]*\s*)(\d+)(\s*[^\d\s]*)")
     text = pattern.sub(replacer, text)
