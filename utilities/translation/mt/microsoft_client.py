@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: microsoft_client.py
-# Version: 1.6
+# Version: 1.6.1
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -102,22 +102,33 @@ def has_marker_leak(original_text, translated_text):
     translated_count = len(MARKER_BRACKET_PATTERN.findall(translated_text or ""))
     return translated_count > original_count
 
-def repair_corrupt_markers(text, prefix_char, expected_ids):
+def repair_corrupt_markers(text, prefix_char, expected_ids, source_text=""):
     if not text or not expected_ids:
         return text
 
-    valid_pattern = re.compile(rf"\u27e6{prefix_char}(\d+)\u27e7")
+    valid_pattern = re.compile(rf"\u27e6{prefix_char}(\d+)\u27e7", re.IGNORECASE)
     seen = {int(m.group(1)) for m in valid_pattern.finditer(text)}
     pending = {cid for cid in expected_ids if cid not in seen}
     if not pending:
         return text
 
+    native_source_ids = set()
+    if source_text:
+        raw_source = re.sub(r"\u27e6[a-zA-Z]\d+\u27e7", "", source_text)
+        for cid in pending:
+            pattern = rf"(?:\b|[^a-zA-Z0-9]){re.escape(prefix_char)}\s*{cid}(?:\b|[^a-zA-Z0-9])"
+            if re.search(pattern, raw_source, re.IGNORECASE):
+                native_source_ids.add(cid)
+
+    corrupt_brackets = "\u27e6\u27e7\\\ufffd/[]{}<>()\u3010\u3011\u3016\u3017\u3014\u3015"
+    prefix_chars = prefix_char.lower() + prefix_char.upper()
+    corrupt_chars = corrupt_brackets + " " + prefix_chars
+    trailing_punctuation = ":,，：、-—.。 "
+
     def replacer(m):
         before, num_str, after = m.group(1), m.group(2), m.group(3)
         cid = int(num_str)
-        if cid in pending:
-            corrupt_chars = "\u27e6\u27e7\\\ufffd[]{}<> " + prefix_char.lower() + prefix_char.upper()
-
+        if cid in pending and cid not in native_source_ids:
             clean_before = before
             while clean_before and clean_before[-1] in corrupt_chars:
                 clean_before = clean_before[:-1]
@@ -131,11 +142,13 @@ def repair_corrupt_markers(text, prefix_char, expected_ids):
             if before_str.endswith(prefix_char.lower()):
                 is_marker = True
             else:
-                if any(ch in before + after for ch in "\u27e6\u27e7\\\ufffd[]{}<>"):
+                if any(ch in before + after for ch in corrupt_brackets):
                     is_marker = True
 
             if is_marker:
                 pending.discard(cid)
+                while clean_after and clean_after[0] in trailing_punctuation:
+                    clean_after = clean_after[1:]
                 return f"{clean_before}\u27e6{prefix_char}{cid}\u27e7{clean_after}"
         return m.group(0)
 
@@ -146,7 +159,7 @@ def repair_corrupt_markers(text, prefix_char, expected_ids):
         empty_pattern = re.compile(rf"(?:[\u27e6\\\ufffd]{{1,3}}{prefix_char}[\u27e7\\\ufffd]{{1,3}}|[\u27e6\u27e7\\\ufffd]{{2,4}})", re.IGNORECASE)
         empty_matches = list(empty_pattern.finditer(text))
         if 0 < len(empty_matches) <= len(pending):
-            pending_list = sorted(list(pending))
+            pending_list = sorted([cid for cid in pending if cid not in native_source_ids])
             def empty_replacer(m):
                 if pending_list:
                     return f"\u27e6{prefix_char}{pending_list.pop(0)}\u27e7"
@@ -556,8 +569,8 @@ def parse_translated_html(html, marker_pattern, prefix_char=None, expected_ids=N
     if prefix_char and expected_ids:
         flat = repair_corrupt_markers(flat, prefix_char, expected_ids)
     inner_result = {
-        int(k): v for k, v in split_by_marker(flat, marker_pattern).items()
-        if k.isdigit()
+        int(k.strip()): v for k, v in split_by_marker(flat, marker_pattern).items()
+        if k.strip().isdigit()
     }
     return inner_result
 
@@ -703,14 +716,16 @@ def retry_windowed_all(units, suspect_ids, lang, target_lang, batch_chars, concu
         if not html:
             continue
         if job["is_solo"]:
-            marker_res = {str(job["window_ids"][0]): extract_marker_free_response(html)}
+            marker_res = {job["window_ids"][0]: extract_marker_free_response(html)}
         else:
             marker_res = parse_translated_html(html, UNIT_MARKER_PATTERN, "u", job["window_ids"])
+            if not all(wid in marker_res for wid in job["window_ids"]):
+                continue
 
-        if strict_marker and job["radius"] > 0 and str(job["suspect_id"]) not in marker_res:
+        if strict_marker and job["radius"] > 0 and job["suspect_id"] not in marker_res:
             continue
 
-        text_raw = marker_res.get(str(job["suspect_id"]))
+        text_raw = marker_res.get(job["suspect_id"])
         if text_raw is not None:
             unit = unit_by_id.get(job["suspect_id"])
             if unit:
