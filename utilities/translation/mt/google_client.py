@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: google_client.py
-# Version: 2.15.0
+# Version: 2.15.1
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -146,8 +146,54 @@ UNCLOSED_MARKER_SIGNATURE = r"\u27e6[a-zA-Z]\d{1,6}(?!\d)(?!\u27e7)"
 MISSING_OPEN_MARKER_SIGNATURE = r"(?<!\u27e6)[a-zA-Z]\d{1,6}\u27e7"
 CORRUPT_MARKER_SIGNATURE = re.compile(UNCLOSED_MARKER_SIGNATURE + "|" + MISSING_OPEN_MARKER_SIGNATURE)
 
-
+ANY_MARKER_PATTERN = re.compile(r"\u27e6[^\u27e6\u27e7]*\u27e7")
+CORRUPT_MARKER_PATTERN = re.compile(r"\u27e6[a-zA-Z0-9]+(?!\u27e7)|(?<!\u27e6)[a-zA-Z0-9]+\u27e7")
 MARKER_BRACKET_PATTERN = re.compile(r"[\u27e6\u27e7]")
+
+def sanitize_markers_against_source(text, source_text=""):
+    if not text:
+        return ""
+    source = source_text or ""
+    allowed = {}
+    for m in ANY_MARKER_PATTERN.finditer(source):
+        val = m.group(0)
+        allowed[val] = allowed.get(val, 0) + 1
+
+    def replace_valid(m):
+        val = m.group(0)
+        if allowed.get(val, 0) > 0:
+            allowed[val] -= 1
+            return val
+        return ""
+
+    cleaned = ANY_MARKER_PATTERN.sub(replace_valid, text)
+
+    for m in CORRUPT_MARKER_PATTERN.finditer(source):
+        val = m.group(0)
+        allowed[val] = allowed.get(val, 0) + 1
+
+    def replace_corrupt(m):
+        val = m.group(0)
+        if allowed.get(val, 0) > 0:
+            allowed[val] -= 1
+            return val
+        return ""
+
+    cleaned = CORRUPT_MARKER_PATTERN.sub(replace_corrupt, cleaned)
+
+    orig_bracket_count = len(MARKER_BRACKET_PATTERN.findall(source))
+    curr_brackets = MARKER_BRACKET_PATTERN.findall(cleaned)
+    if len(curr_brackets) > orig_bracket_count:
+        kept = 0
+        def replace_stray_bracket(m):
+            nonlocal kept
+            if kept < orig_bracket_count:
+                kept += 1
+                return m.group(0)
+            return ""
+        cleaned = MARKER_BRACKET_PATTERN.sub(replace_stray_bracket, cleaned)
+
+    return " ".join(cleaned.split())
 
 def has_marker_leak(original_text, translated_text):
     original_count = len(MARKER_BRACKET_PATTERN.findall(original_text or ""))
@@ -400,7 +446,7 @@ def split_by_marker(flat_text, pattern):
     return result
 
 
-def parse_by_tag_id(html, open_pattern, marker_pattern):
+def parse_by_tag_id(html, open_pattern, marker_pattern, source_by_index=None):
     opens = [(m.end(), m.group(1)) for m in open_pattern.finditer(html) if m.group(1).isdigit()]
     result = {}
     for i, (end, idx_str) in enumerate(opens):
@@ -408,15 +454,16 @@ def parse_by_tag_id(html, open_pattern, marker_pattern):
         chunk_end = opens[i + 1][0] if i + 1 < len(opens) else len(html)
         raw = html[end:chunk_end]
         text = unescape_html(TAG_PATTERN.sub("", ITALIC_PATTERN.sub("", raw))).strip()
-        text = " ".join(marker_pattern.sub("", text).split())
+        source_text = source_by_index.get(idx, "") if source_by_index else ""
+        text = sanitize_markers_against_source(text, source_text)
         if not text:
             continue
         result[idx] = f"{result[idx]} {text}" if idx in result else text
     return result
 
 
-def parse_by_spans(html):
-    return parse_by_tag_id(html, SPAN_OPEN_PATTERN, GROUP_MARKER_PATTERN)
+def parse_by_spans(html, source_by_index=None):
+    return parse_by_tag_id(html, SPAN_OPEN_PATTERN, GROUP_MARKER_PATTERN, source_by_index)
 
 
 MARKER_OVERREACH_RATIO = 1.3
@@ -433,48 +480,49 @@ def choose_candidate(primary_text, marker_text):
     return marker_text
 
 
-def merge_boundary_events(html, expected_ids):
-    events = []
+def extract_first_marker_anchors(html, expected_ids):
+    first_markers = {}
     for m in SPAN_OPEN_PATTERN.finditer(html):
         if m.group(1).isdigit():
             idx = int(m.group(1))
             if expected_ids is None or idx in expected_ids:
-                events.append((m.start(), m.end(), idx))
+                if idx not in first_markers or m.start() < first_markers[idx][0]:
+                    first_markers[idx] = (m.start(), m.end(), idx)
     for m in GROUP_MARKER_PATTERN.finditer(html):
         if m.group(1).isdigit():
             idx = int(m.group(1))
             if expected_ids is None or idx in expected_ids:
-                events.append((m.start(), m.end(), idx))
-    events.sort(key=lambda e: (e[0], e[1]))
-
-    deduped = []
-    for start, end, idx in events:
-        if deduped and start < deduped[-1][1]:
-            continue
-        deduped.append((start, end, idx))
-    return deduped
+                if idx not in first_markers or m.start() < first_markers[idx][0]:
+                    first_markers[idx] = (m.start(), m.end(), idx)
+    anchors = list(first_markers.values())
+    anchors.sort(key=lambda a: a[0])
+    return anchors
 
 
-def parse_by_reconciled_boundaries(html, boundaries):
+def parse_by_reconciled_boundaries(html, boundaries, source_by_index=None):
     result = {}
     for i, (start, end, idx) in enumerate(boundaries):
         next_boundary = boundaries[i + 1][0] if i + 1 < len(boundaries) else len(html)
-        raw = html[end:next_boundary]
+        if next_boundary < end:
+            raw = ""
+        else:
+            raw = html[end:next_boundary]
         text = unescape_html(TAG_PATTERN.sub("", ITALIC_PATTERN.sub("", raw))).strip()
-        text = " ".join(GROUP_MARKER_PATTERN.sub("", text).split())
-        if not text:
+        source_text = source_by_index.get(idx, "") if source_by_index else ""
+        text = sanitize_markers_against_source(text, source_text)
+        if not text and not (source_text and not has_content(source_text)):
             continue
-        result[idx] = f"{result[idx]}{text}" if idx in result else text
+        result[idx] = text
     return result
 
 
-def parse_translated_html(html, expected_ids=None):
+def parse_translated_html(html, expected_ids=None, source_by_index=None):
     if ALIGNMENT_MODE == "marker":
         if expected_ids:
             html = repair_corrupt_markers(html, "g", expected_ids)
-        result = parse_by_reconciled_boundaries(html, merge_boundary_events(html, expected_ids))
+        result = parse_by_reconciled_boundaries(html, extract_first_marker_anchors(html, expected_ids), source_by_index)
     else:
-        result = parse_by_spans(html)
+        result = parse_by_spans(html, source_by_index)
     if DEBUG_MODE and not result:
         with DEBUG_LOCK:
             log(f"debug: parse_translated_html found NO matching blocks in HTML. Head: {html[:200]}")
@@ -540,9 +588,10 @@ def call_google(batch, lang, target_lang, api_key, context_html=None):
     items = [item for group in batch for item in group]
     indices = {item["id"]: i for i, item in enumerate(items, start=1)}
     id_by_index = {i: item_id for item_id, i in indices.items()}
+    source_by_index = {i: item["text"] for i, item in enumerate(items, start=1)}
     html = "".join(build_chapter_html(group, indices, context_html) for group in batch)
     translated_html = post_translate_html(html, lang, target_lang, api_key)
-    parsed = parse_translated_html(translated_html, set(id_by_index.keys()))
+    parsed = parse_translated_html(translated_html, set(id_by_index.keys()), source_by_index)
     source_by_id = {item["id"]: item["text"] for item in items}
     result = {}
     for idx, text in parsed.items():
