@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: srt_extract.py
-# Version: 2.5.3
+# Version: 2.5.4
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -152,6 +152,7 @@ WHITESPACE_PATTERN = re.compile(r"\s+")
 TERMINAL_PUNCT_PATTERN = re.compile(r"[.!?。！？][’”\"')\]」』】）]*\s*$")
 TRAILING_ELLIPSIS_PATTERN = re.compile(r"(\.{2,}|…)\s*$")
 TRAILING_CUTOFF_PATTERN = re.compile(r"-{2,}\s*$")
+TRAILING_SINGLE_CUTOFF_PATTERN = re.compile(r"(?<!-)-\s*$")
 DIALOGUE_DASH_PATTERN = re.compile(r"(?:^|(?<=\s))-(?!-)\s?")
 STUTTER_WORD_PATTERN = re.compile(r"(?<![A-Za-z])([A-Za-z])-\1(?![A-Za-z])", re.IGNORECASE)
 STUTTER_PREFIX_PATTERN = re.compile(r"(?<![A-Za-z])([A-Za-z])-(?=\1[a-z])", re.IGNORECASE)
@@ -435,9 +436,12 @@ def merge_reason(prev_seg, curr_seg, latin_source=True):
         return "music" if music_continuation(curr_seg["text"]) else None
     if prev_seg.get("merge_side") == "next" or curr_seg.get("merge_side") == "prev":
         return "marker"
+    gap = time_to_ms(curr_seg["start"]) - time_to_ms(prev_seg["end"])
+    if TRAILING_SINGLE_CUTOFF_PATTERN.search(prev_seg["text"]) \
+            and not (gap <= GAP_THRESHOLD_MS and first_letter_is_lower(curr_seg["text"])):
+        return None
     if has_terminal_punct(prev_seg["text"]):
         return None
-    gap = time_to_ms(curr_seg["start"]) - time_to_ms(prev_seg["end"])
     return "gap" if gap <= GAP_THRESHOLD_MS or first_letter_is_lower(curr_seg["text"]) else None
 
 

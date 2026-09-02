@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: google_client.py
-# Version: 2.14.0
+# Version: 2.15.0
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -78,6 +78,7 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -146,69 +147,66 @@ MISSING_OPEN_MARKER_SIGNATURE = r"(?<!\u27e6)[a-zA-Z]\d{1,6}\u27e7"
 CORRUPT_MARKER_SIGNATURE = re.compile(UNCLOSED_MARKER_SIGNATURE + "|" + MISSING_OPEN_MARKER_SIGNATURE)
 
 
-def repair_displaced_close_bracket(text, prefix_char, pending):
-    if not pending:
-        return text
-    pattern = re.compile(rf"\u27e6{prefix_char}(\d+)\s{{0,2}}\u27e7", re.IGNORECASE)
+MARKER_BRACKET_PATTERN = re.compile(r"[\u27e6\u27e7]")
 
-    def replace(m):
-        cid = int(m.group(1))
-        if cid not in pending:
-            return m.group(0)
-        pending.discard(cid)
-        return f"\u27e6{prefix_char}{cid}\u27e7"
-
-    return pattern.sub(replace, text)
-
-
-def repair_unclosed_marker(text, prefix_char, pending):
-    if not pending:
-        return text
-    pattern = re.compile(rf"\u27e6{prefix_char}(\d+)(?!\d)(?!\u27e7)", re.IGNORECASE)
-
-    def replace(m):
-        cid = int(m.group(1))
-        if cid not in pending:
-            return m.group(0)
-        pending.discard(cid)
-        return f"{m.group(0)}\u27e7"
-
-    return pattern.sub(replace, text)
-
-
-def repair_missing_open_bracket(text, prefix_char, pending):
-    if not pending:
-        return text
-    pattern = re.compile(rf"(?<!\u27e6){prefix_char}(\d{{1,6}})\u27e7", re.IGNORECASE)
-
-    def replace(m):
-        cid = int(m.group(1))
-        if cid not in pending:
-            return m.group(0)
-        pending.discard(cid)
-        return f"\u27e6{m.group(0)}"
-
-    return pattern.sub(replace, text)
+def has_marker_leak(original_text, translated_text):
+    original_count = len(MARKER_BRACKET_PATTERN.findall(original_text or ""))
+    translated_count = len(MARKER_BRACKET_PATTERN.findall(translated_text or ""))
+    return translated_count > original_count
 
 
 def repair_corrupt_markers(text, prefix_char, expected_ids):
     if not text or not expected_ids:
         return text
-    own_marker_pattern = re.compile(rf"\u27e6{prefix_char}(\d+)\u27e7", re.IGNORECASE)
-    seen = {int(m.group(1)) for m in own_marker_pattern.finditer(text)}
+
+    valid_pattern = re.compile(rf"\u27e6{prefix_char}(\d+)\u27e7")
+    seen = {int(m.group(1)) for m in valid_pattern.finditer(text)}
     pending = {cid for cid in expected_ids if cid not in seen}
     if not pending:
         return text
 
-    text = repair_displaced_close_bracket(text, prefix_char, pending)
-    if not pending:
-        return text
+    def replacer(m):
+        before, num_str, after = m.group(1), m.group(2), m.group(3)
+        cid = int(num_str)
+        if cid in pending:
+            corrupt_chars = "\u27e6\u27e7\\\ufffd[]{}<> " + prefix_char.lower() + prefix_char.upper()
 
-    text = repair_unclosed_marker(text, prefix_char, pending)
-    if not pending:
-        return text
+            clean_before = before
+            while clean_before and clean_before[-1] in corrupt_chars:
+                clean_before = clean_before[:-1]
 
-    return repair_missing_open_bracket(text, prefix_char, pending)
+            clean_after = after
+            while clean_after and clean_after[0] in corrupt_chars:
+                clean_after = clean_after[1:]
+
+            is_marker = False
+            before_str = before.strip().lower()
+            if before_str.endswith(prefix_char.lower()):
+                is_marker = True
+            else:
+                if any(ch in before + after for ch in "\u27e6\u27e7\\\ufffd[]{}<>"):
+                    is_marker = True
+
+            if is_marker:
+                pending.discard(cid)
+                return f"{clean_before}\u27e6{prefix_char}{cid}\u27e7{clean_after}"
+        return m.group(0)
+
+    pattern = re.compile(r"([^\d\s]*\s*)(\d+)(\s*[^\d\s]*)")
+    text = pattern.sub(replacer, text)
+
+    if pending:
+        empty_pattern = re.compile(rf"(?:[\u27e6\\\ufffd]{{1,3}}{prefix_char}[\u27e7\\\ufffd]{{1,3}}|[\u27e6\u27e7\\\ufffd]{{2,4}})", re.IGNORECASE)
+        empty_matches = list(empty_pattern.finditer(text))
+        if 0 < len(empty_matches) <= len(pending):
+            pending_list = sorted(list(pending))
+            def empty_replacer(m):
+                if pending_list:
+                    return f"\u27e6{prefix_char}{pending_list.pop(0)}\u27e7"
+                return m.group(0)
+            text = empty_pattern.sub(empty_replacer, text)
+
+    return text
 
 NO_TRANSLATE_TEMPLATE = '<span translate="no">{}</span>'
 WRAP_MARKERS = False
@@ -435,49 +433,46 @@ def choose_candidate(primary_text, marker_text):
     return marker_text
 
 
-def reconcile_span_marker_events(html):
+def merge_boundary_events(html, expected_ids):
     events = []
     for m in SPAN_OPEN_PATTERN.finditer(html):
         if m.group(1).isdigit():
-            events.append((m.end(), "span", int(m.group(1))))
+            idx = int(m.group(1))
+            if expected_ids is None or idx in expected_ids:
+                events.append((m.start(), m.end(), idx))
     for m in GROUP_MARKER_PATTERN.finditer(html):
         if m.group(1).isdigit():
-            events.append((m.start(), "marker", int(m.group(1))))
-    events.sort(key=lambda e: e[0])
+            idx = int(m.group(1))
+            if expected_ids is None or idx in expected_ids:
+                events.append((m.start(), m.end(), idx))
+    events.sort(key=lambda e: (e[0], e[1]))
 
-    starts, ambiguous = {}, set()
-    for order, (pos, kind, idx) in enumerate(events):
-        slot = starts.setdefault(idx, {})
-        if kind in slot:
-            ambiguous.add(idx)
-        slot[kind] = (pos, order)
-
-    boundaries = []
-    for idx, signals in starts.items():
-        if idx in ambiguous or "span" not in signals or "marker" not in signals:
+    deduped = []
+    for start, end, idx in events:
+        if deduped and start < deduped[-1][1]:
             continue
-        (span_pos, span_order), (marker_pos, marker_order) = signals["span"], signals["marker"]
-        if abs(span_order - marker_order) != 1:
-            continue
-        boundaries.append((min(span_pos, marker_pos), idx))
-    return sorted(boundaries)
+        deduped.append((start, end, idx))
+    return deduped
 
 
 def parse_by_reconciled_boundaries(html, boundaries):
     result = {}
-    for i, (pos, idx) in enumerate(boundaries):
-        end = boundaries[i + 1][0] if i + 1 < len(boundaries) else len(html)
-        raw = html[pos:end]
+    for i, (start, end, idx) in enumerate(boundaries):
+        next_boundary = boundaries[i + 1][0] if i + 1 < len(boundaries) else len(html)
+        raw = html[end:next_boundary]
         text = unescape_html(TAG_PATTERN.sub("", ITALIC_PATTERN.sub("", raw))).strip()
         text = " ".join(GROUP_MARKER_PATTERN.sub("", text).split())
-        if text:
-            result[idx] = text
+        if not text:
+            continue
+        result[idx] = f"{result[idx]}{text}" if idx in result else text
     return result
 
 
-def parse_translated_html(html):
+def parse_translated_html(html, expected_ids=None):
     if ALIGNMENT_MODE == "marker":
-        result = parse_by_reconciled_boundaries(html, reconcile_span_marker_events(html))
+        if expected_ids:
+            html = repair_corrupt_markers(html, "g", expected_ids)
+        result = parse_by_reconciled_boundaries(html, merge_boundary_events(html, expected_ids))
     else:
         result = parse_by_spans(html)
     if DEBUG_MODE and not result:
@@ -547,7 +542,7 @@ def call_google(batch, lang, target_lang, api_key, context_html=None):
     id_by_index = {i: item_id for item_id, i in indices.items()}
     html = "".join(build_chapter_html(group, indices, context_html) for group in batch)
     translated_html = post_translate_html(html, lang, target_lang, api_key)
-    parsed = parse_translated_html(translated_html)
+    parsed = parse_translated_html(translated_html, set(id_by_index.keys()))
     source_by_id = {item["id"]: item["text"] for item in items}
     result = {}
     for idx, text in parsed.items():
@@ -579,14 +574,6 @@ def translate_batch(batch, lang, target_lang, api_key, context_html=None):
         if attempt < MAX_ATTEMPTS:
             time.sleep(RETRY_DELAY)
 
-    if len(items) > 1:
-        by_id = {item["id"]: item for item in items}
-        log(f"isolating {len(missing)} unit(s) still missing: {', '.join(sorted({str(i) for i in missing}))}")
-        for uid in sorted(missing, key=str):
-            solo_result, _solo_missing = translate_batch([[by_id[uid]]], lang, target_lang, api_key)
-            if uid in solo_result:
-                result[uid] = solo_result[uid]
-        missing = expected_ids - result.keys()
     return result, sorted(missing, key=str)
 
 
@@ -761,19 +748,10 @@ def apply_term_replacements(text, term_matches, target_lang):
     return text
 
 
-def retry_single(text, term_matches, lang, target_lang, api_key):
-    if not text or not text.strip():
-        return None
-    item = {"id": "retry", "text": text, "html": protect_content_html(text, term_matches or [])}
-    result, _missing = translate_batch([[item]], lang, target_lang, api_key)
-    return result.get("retry")
-
-
 UNIT_MARKER_TEMPLATE = "\u27e6u{}\u27e7"
 UNIT_MARKER_PATTERN = re.compile(r"\u27e6u([^\u27e6\u27e7]+)\u27e7")
-WINDOW_CONTEXT_RADIUS = 20
-WINDOW_KEEP_RADIUS = 2
-ISOLATED_CUE_RADIUS = 5
+WINDOW_RADIUS_LADDER = (5, 3, 1, 0)
+ISOLATED_RADIUS_LADDER = (5, 3, 1, 0)
 LENGTH_RATIO_MIN = 0.15
 LENGTH_RATIO_MAX = 6.0
 
@@ -788,38 +766,6 @@ def is_length_plausible(source_text, translated_text):
         return True
     ratio = content_length(translated_text) / source_len
     return LENGTH_RATIO_MIN <= ratio <= LENGTH_RATIO_MAX
-
-
-def retry_windowed(units, suspect_id, lang, target_lang, api_key, batch_chars):
-    index = {unit["id"]: i for i, unit in enumerate(units)}
-    i = index[suspect_id]
-    window = units[max(0, i - WINDOW_CONTEXT_RADIUS):i + WINDOW_CONTEXT_RADIUS + 1]
-    if len(window) < 2:
-        return {}
-    text_pieces = [window[0]["text"]]
-    html_pieces = [protect_content_html(window[0]["text"], window[0].get("term_matches") or [])]
-    for unit in window[1:]:
-        text_pieces.append(f" {UNIT_MARKER_TEMPLATE.format(unit['id'])} ")
-        text_pieces.append(unit["text"])
-        html_pieces.append(f" {wrap_marker(UNIT_MARKER_TEMPLATE.format(unit['id']))} ")
-        html_pieces.append(protect_content_html(unit["text"], unit.get("term_matches") or []))
-    windowed_text = "".join(text_pieces)
-    if not within_budget(windowed_text, batch_chars):
-        return {}
-    item = {"id": "window", "text": windowed_text, "html": "".join(html_pieces)}
-    result, _missing = translate_batch([[item]], lang, target_lang, api_key)
-    response = result.get("window")
-    if response is None:
-        return {}
-    lead = UNIT_MARKER_PATTERN.split(response, maxsplit=1)[0].strip()
-    chunks = {window[0]["id"]: lead} if lead else {}
-    chunks.update({int(k): v for k, v in split_by_marker(response, UNIT_MARKER_PATTERN).items() if k.isdigit()})
-    keep_ids = {unit["id"] for unit in units[max(0, i - WINDOW_KEEP_RADIUS):i + WINDOW_KEEP_RADIUS + 1]}
-    unit_by_id = {unit["id"]: unit for unit in window}
-    return {
-        uid: text for uid, text in chunks.items()
-        if uid in keep_ids and is_length_plausible(unit_by_id[uid]["text"], text)
-    }
 
 
 def expected_cue_ids(unit):
@@ -855,87 +801,319 @@ def patch_missing_cues(text, expected_ids, recovered):
     return " ".join(f"{CUE_MARKER_TEMPLATE.format(cid)} {chunks[cid]}" for cid in expected_ids if cid in chunks)
 
 
+def has_translatable_content(text, term_matches):
+    cursor, residue = 0, []
+    for match in sorted(term_matches or [], key=lambda m: m["start"]):
+        residue.append(text[cursor:match["start"]])
+        cursor = match["end"]
+    residue.append(text[cursor:])
+    return has_content("".join(residue))
+
+
+NOISE_CATEGORY_PREFIXES = ("P", "N")
+
+
+def normalize_for_equality(text):
+    return "".join(ch for ch in (text or "") if not ch.isspace() and unicodedata.category(ch)[0] not in NOISE_CATEGORY_PREFIXES)
+
+
+def word_count(text):
+    return len(re.findall(r"\w+", text or "", re.UNICODE))
+
+
+def is_leaked_untranslated(original, translated, source_lang, target_lang):
+    if not translated:
+        return False
+    norm_orig = normalize_for_equality(original)
+    if not norm_orig:
+        return False
+
+    sl, tl = script_of(source_lang), script_of(target_lang)
+    if sl == "latin" and tl == "cjk":
+        pass
+    elif sl == "cjk" and tl == "latin":
+        pass
+    else:
+        if word_count(original) < 2:
+            return False
+
+    return norm_orig == normalize_for_equality(translated)
+
+
+def unit_cue_ids(unit):
+    return [s["id"] for s in unit.get("spans", [])]
+
+
+def is_single_plain_cue(unit):
+    return len(unit_cue_ids(unit)) == 1 and not expected_cue_ids(unit)
+
+
+def find_leaked_cue_ids(unit, text, source_lang, target_lang):
+    marker_ids = expected_cue_ids(unit)
+    if marker_ids:
+        chunks = split_cue_chunks(text)
+        span_text = {s["id"]: s["text"] for s in unit.get("spans", []) if s.get("boundary") == "marker"}
+        return [cid for cid in marker_ids if cid in chunks and is_leaked_untranslated(span_text.get(cid, ""), chunks[cid], source_lang, target_lang)]
+    ids = unit_cue_ids(unit)
+    return ids if len(ids) == 1 and is_leaked_untranslated(unit["text"], text, source_lang, target_lang) else []
+
+
 DIV_ID_PATTERN = re.compile(r'<div[^>]*\bid=["\']?([a-zA-Z0-9:]+)["\']?[^>]*>')
-ISOLATED_RADIUS_LADDER = (ISOLATED_CUE_RADIUS, 2, 0)
+PLAIN_DIV_PATTERN = re.compile(r"<div>(.*?)</div>", re.S)
 
 
-def build_isolated_divs(cue_ids, cue_text_by_id, cue_term_matches):
-    return "".join(
-        f"<div id={cid}>{wrap_marker(CUE_MARKER_TEMPLATE.format(cid))} {protect_content_html(cue_text_by_id[cid], cue_term_matches.get(cid) or [])}</div>"
-        for cid in cue_ids if cid in cue_text_by_id
-    )
+def pack_by_chars(payloads, max_chars_per_request, max_items=50):
+    chunks, current, current_chars = [], [], 0
+    for i, payload in enumerate(payloads):
+        if current and (current_chars + len(payload) > max_chars_per_request or len(current) >= max_items):
+            chunks.append(current)
+            current, current_chars = [], 0
+        current.append(i)
+        current_chars += len(payload)
+    if current:
+        chunks.append(current)
+    return chunks
 
 
-def dedupe_by_exact_text(ids, text_by_id):
-    seen, group_of, send_ids = {}, {}, []
-    for cid in ids:
-        text = text_by_id.get(cid)
-        if text is not None and text in seen:
-            group_of[cid] = seen[text]
-            continue
-        if text is not None:
-            seen[text] = cid
-        group_of[cid] = cid
-        send_ids.append(cid)
-    return send_ids, group_of
+def parse_plain_divs(html):
+    return [
+        " ".join(unescape_html(TAG_PATTERN.sub("", ITALIC_PATTERN.sub("", m.group(1)))).split())
+        for m in PLAIN_DIV_PATTERN.finditer(html)
+    ]
 
 
-def retry_isolated_cues_merged_at_radius(missing_by_unit, radius, cue_order, cue_text_by_id, cue_term_matches, lang, target_lang, api_key, batch_chars):
-    position = {cid: i for i, cid in enumerate(cue_order)}
-    positions = set()
-    for cue_ids in missing_by_unit.values():
-        for cid in cue_ids:
-            p = position.get(cid)
-            if p is None:
-                continue
-            for k in range(max(0, p - radius), min(len(cue_order) - 1, p + radius) + 1):
-                positions.add(k)
-    if not positions:
+def resolve_chunk_with_binary_fallback(indices, payloads, lang, target_lang, api_key):
+    if not indices:
         return {}
-
-    sent_ids = [cue_order[p] for p in sorted(positions)]
-    send_ids, group_of = dedupe_by_exact_text(sent_ids, cue_text_by_id) if radius == 0 else (sent_ids, {cid: cid for cid in sent_ids})
-    html = build_isolated_divs(send_ids, cue_text_by_id, cue_term_matches)
-    if not within_budget(html, batch_chars):
-        return {}
+    chunk_html = "".join(payloads[i] for i in indices)
     try:
-        translated_html = post_translate_html(html, lang, target_lang, api_key)
+        translated_html = post_translate_html(chunk_html, lang, target_lang, api_key)
+        divs = parse_plain_divs(translated_html)
+        if len(divs) == len(indices):
+            return {i: divs[k] for k, i in enumerate(indices)}
+        if len(indices) == 1:
+            div_val = divs[0] if divs else unescape_html(TAG_PATTERN.sub("", ITALIC_PATTERN.sub("", translated_html))).strip()
+            return {indices[0]: div_val} if div_val else {}
     except Exception as e:
-        log(f"isolated cue retry failed: {e}")
+        log(f"packed jobs chunk failed: {e}")
+        if len(indices) == 1:
+            return {}
+
+    mid = len(indices) // 2
+    left_indices = indices[:mid]
+    right_indices = indices[mid:]
+    recovered = {}
+    recovered.update(resolve_chunk_with_binary_fallback(left_indices, payloads, lang, target_lang, api_key))
+    recovered.update(resolve_chunk_with_binary_fallback(right_indices, payloads, lang, target_lang, api_key))
+    return recovered
+
+
+def run_packed_jobs(payloads, max_chars_per_request, lang, target_lang, api_key, concurrency):
+    results = [None] * len(payloads)
+    if not payloads:
+        return results
+    chunks = pack_by_chars(payloads, max_chars_per_request)
+
+    def process_chunk(indices):
+        chunk_recovered = resolve_chunk_with_binary_fallback(indices, payloads, lang, target_lang, api_key)
+        for i, text in chunk_recovered.items():
+            results[i] = text
+
+    with ThreadPoolExecutor(max_workers=min(len(chunks), concurrency) or 1) as executor:
+        futures = [executor.submit(process_chunk, indices) for indices in chunks]
+        for future in as_completed(futures):
+            future.result()
+
+    return results
+
+
+def retry_windowed_all(units, suspect_ids, lang, target_lang, api_key, batch_chars, concurrency, ladder=WINDOW_RADIUS_LADDER, strict_marker=False):
+    index = {u["id"]: i for i, u in enumerate(units)}
+    unit_by_id = {u["id"]: u for u in units}
+    jobs = []
+
+    for suspect_id in suspect_ids:
+        if suspect_id not in index:
+            continue
+        i = index[suspect_id]
+        for radius in ladder:
+            window = units[max(0, i - radius):i + radius + 1]
+            if len(window) < 1:
+                continue
+
+            is_solo = (len(window) == 1)
+            if is_solo:
+                payload = f"<div>{protect_content_html(window[0]['text'], window[0].get('term_matches') or [])}</div>"
+            else:
+                inner = "".join(
+                    f"{wrap_marker(UNIT_MARKER_TEMPLATE.format(unit['id']))}{protect_content_html(unit['text'], unit.get('term_matches') or [])}"
+                    for unit in window
+                )
+                payload = f"<div>{inner}</div>"
+
+            if len(payload) > batch_chars:
+                continue
+
+            jobs.append({
+                "suspect_id": suspect_id,
+                "radius": radius,
+                "payload": payload,
+                "window_ids": [u["id"] for u in window],
+                "is_solo": is_solo
+            })
+
+    if not jobs:
         return {}
 
-    flat = repair_corrupt_markers(unescape_html(TAG_PATTERN.sub("", translated_html)), "c", send_ids)
-    marker_result = split_cue_chunks(flat)
-    div_result = parse_by_tag_id(translated_html, DIV_ID_PATTERN, CUE_MARKER_PATTERN)
-    all_missing = {cid for cue_ids in missing_by_unit.values() for cid in cue_ids}
-    out = {}
-    for cid in all_missing:
-        rep_id = group_of.get(cid, cid)
-        text = choose_candidate(div_result.get(rep_id), marker_result.get(rep_id))
-        if not text or not has_content(text) or not is_length_plausible(cue_text_by_id.get(cid, ""), text):
+    send_jobs, job_send_index, seen_solo_text = [], [], {}
+    for job in jobs:
+        if job["is_solo"] and len(job["window_ids"]) == 1:
+            text_key = unit_by_id.get(job["window_ids"][0], {}).get("text", "")
+            if text_key in seen_solo_text:
+                job_send_index.append(seen_solo_text[text_key])
+                continue
+            seen_solo_text[text_key] = len(send_jobs)
+        job_send_index.append(len(send_jobs))
+        send_jobs.append(job)
+
+    payloads = [job["payload"] for job in send_jobs]
+    html_results = run_packed_jobs(payloads, batch_chars, lang, target_lang, api_key, concurrency)
+
+    results_by_suspect = {}
+    for job, send_idx in zip(jobs, job_send_index):
+        html = html_results[send_idx]
+        if not html:
             continue
-        out[cid] = apply_term_replacements(text, cue_term_matches.get(cid) or [], target_lang)
-    return out
+
+        if job["is_solo"]:
+            marker_res = {job["window_ids"][0]: html}
+        else:
+            flat = repair_corrupt_markers(html, "u", job["window_ids"])
+            marker_res = {
+                int(k): v for k, v in split_by_marker(flat, UNIT_MARKER_PATTERN).items()
+                if k.isdigit()
+            }
+
+        if strict_marker and job["radius"] > 0 and job["suspect_id"] not in marker_res:
+            continue
+
+        text_raw = marker_res.get(job["suspect_id"])
+        if text_raw is not None:
+            unit = unit_by_id.get(job["suspect_id"])
+            if unit:
+                text = text_raw
+                expected = expected_cue_ids(unit)
+                if expected:
+                    text = repair_corrupt_markers(text, "c", expected)
+                if not CORRUPT_MARKER_SIGNATURE.search(text) and (job["radius"] == 0 or is_length_plausible(unit["text"], text)):
+                    results_by_suspect.setdefault(job["suspect_id"], {})[job["radius"]] = text
+
+    recovered = {}
+    for suspect_id in suspect_ids:
+        for radius in ladder:
+            res = results_by_suspect.get(suspect_id, {}).get(radius)
+            if res is not None:
+                recovered[suspect_id] = res
+                break
+
+    return recovered
 
 
-def retry_isolated_cues_merged(missing_by_unit, cue_order, cue_text_by_id, cue_term_matches, lang, target_lang, api_key, batch_chars):
-    remaining = {uid: list(cids) for uid, cids in missing_by_unit.items() if cids}
+def retry_isolated_cues_all(missing_by_unit, cue_order, cue_text_by_id, cue_term_matches, lang, target_lang, api_key, batch_chars, concurrency, extra_valid=None):
+    position = {cid: i for i, cid in enumerate(cue_order)}
+    jobs = []
+
+    for unit_id, missing_ids in missing_by_unit.items():
+        positions = sorted([position[cid] for cid in missing_ids if cid in position])
+        if not positions:
+            continue
+
+        for radius in ISOLATED_RADIUS_LADDER:
+            lo = max(0, positions[0] - radius)
+            hi = min(len(cue_order) - 1, positions[-1] + radius)
+            is_solo = (lo == hi)
+            sent_ids = []
+            inner_parts = []
+            for i in range(lo, hi + 1):
+                cid = cue_order[i]
+                text = cue_text_by_id.get(cid)
+                if text is None:
+                    continue
+                matches = cue_term_matches.get(cid) or []
+                marker = "" if is_solo else wrap_marker(CUE_MARKER_TEMPLATE.format(cid))
+                inner_parts.append(f"{marker}{protect_content_html(text, matches)}")
+                sent_ids.append(cid)
+
+            payload = f"<div>{''.join(inner_parts)}</div>"
+            if not payload or len(payload) > batch_chars:
+                continue
+
+            jobs.append({
+                "unit_id": unit_id,
+                "radius": radius,
+                "payload": payload,
+                "sent_ids": sent_ids,
+                "is_solo": is_solo,
+                "missing_ids": missing_ids
+            })
+
     recovered_by_unit = {}
-    for radius in ISOLATED_RADIUS_LADDER:
-        if not remaining:
-            break
-        recovered = retry_isolated_cues_merged_at_radius(remaining, radius, cue_order, cue_text_by_id, cue_term_matches, lang, target_lang, api_key, batch_chars)
-        if not recovered:
+    if not jobs:
+        return recovered_by_unit
+
+    send_jobs, job_send_index, seen_solo_text = [], [], {}
+    for job in jobs:
+        if job["is_solo"] and len(job["sent_ids"]) == 1:
+            text_key = cue_text_by_id.get(job["sent_ids"][0])
+            if text_key in seen_solo_text:
+                job_send_index.append(seen_solo_text[text_key])
+                continue
+            seen_solo_text[text_key] = len(send_jobs)
+        job_send_index.append(len(send_jobs))
+        send_jobs.append(job)
+
+    payloads = [job["payload"] for job in send_jobs]
+    html_results = run_packed_jobs(payloads, batch_chars, lang, target_lang, api_key, concurrency)
+
+    results_by_unit = {}
+    for job, send_idx in zip(jobs, job_send_index):
+        html = html_results[send_idx]
+        if not html:
             continue
-        next_remaining = {}
-        for uid, cue_ids in remaining.items():
-            for cid in cue_ids:
-                if cid in recovered:
-                    recovered_by_unit.setdefault(uid, {})[cid] = recovered[cid]
-            still_missing = [cid for cid in cue_ids if cid not in recovered]
-            if still_missing:
-                next_remaining[uid] = still_missing
-        remaining = next_remaining
+        if job["is_solo"] and len(job["sent_ids"]) == 1:
+            marker_res = {job["sent_ids"][0]: html}
+        else:
+            flat = repair_corrupt_markers(html, "c", job["sent_ids"])
+            marker_res = split_cue_chunks(flat)
+
+        job_recovered = {}
+        for cid in job["missing_ids"]:
+            cand = marker_res.get(cid)
+            if job["is_solo"] and cand:
+                cand = repair_corrupt_markers(cand, "c", [cid])
+            orig = cue_text_by_id.get(cid, "")
+            if cand and not CORRUPT_MARKER_SIGNATURE.search(cand) and is_length_plausible(orig, cand) and (extra_valid is None or extra_valid(orig, cand)):
+                job_recovered[cid] = apply_term_replacements(cand, cue_term_matches.get(cid) or [], target_lang)
+
+        if job_recovered:
+            results_by_unit.setdefault(job["unit_id"], {}).setdefault(job["radius"], {}).update(job_recovered)
+
+    for unit_id, missing_ids in missing_by_unit.items():
+        current_missing = set(missing_ids)
+        final_recovered = {}
+        for radius in ISOLATED_RADIUS_LADDER:
+            if not current_missing:
+                break
+            res = results_by_unit.get(unit_id, {}).get(radius)
+            if not res:
+                continue
+            for cid in list(current_missing):
+                if cid in res:
+                    final_recovered[cid] = res[cid]
+                    current_missing.remove(cid)
+        if final_recovered:
+            recovered_by_unit[unit_id] = final_recovered
+
     return recovered_by_unit
 
 
@@ -946,17 +1124,46 @@ def translate_units(units, chapters, cues, lang, target_lang, api_key, batch_cha
     items, chapter_groups = flatten_units(pending, chapter_of_unit)
     translations_raw, _skipped = translate(items, chapter_groups, lang, target_lang, api_key, batch_chars, concurrency, raw_context) if items else ({}, [])
 
-    results = dict(resolved)
+    unit_order = [u["id"] for u in units]
+    unit_position = {uid: i for i, uid in enumerate(unit_order)}
+    initial_missing_ids = {unit["id"] for unit in pending if unit["id"] not in translations_raw}
+    missing_units = [unit for unit in pending if unit["id"] in initial_missing_ids]
+    if missing_units:
+        payloads = [f"<div>{protect_content_html(u['text'], u.get('term_matches') or [])}</div>" for u in missing_units]
+        html_results = run_packed_jobs(payloads, batch_chars, lang, target_lang, api_key, concurrency)
+        for unit, html in zip(missing_units, html_results):
+            if not html:
+                continue
+            recovered = html
+            expected_cues = expected_cue_ids(unit)
+            if expected_cues:
+                recovered = repair_corrupt_markers(recovered, "c", expected_cues)
+            if recovered and not CORRUPT_MARKER_SIGNATURE.search(recovered) and is_length_plausible(unit["text"], recovered):
+                translations_raw[unit["id"]] = recovered
+
+    untranslated_jobs = []
     for unit in pending:
         raw_text = translations_raw.get(unit["id"])
         final_text = apply_term_replacements(raw_text, unit.get("term_matches") or [], target_lang) if raw_text is not None else None
         if final_text is not None and is_untranslated(final_text, lang.current(), target_lang):
-            retried = retry_single(unit["text"], unit.get("term_matches"), lang, target_lang, api_key)
-            if retried:
-                candidate = apply_term_replacements(retried, unit.get("term_matches") or [], target_lang)
-                if candidate != final_text:
-                    log(f"unit {unit['id']}: retry changed result")
-                    final_text = candidate
+            untranslated_jobs.append(unit)
+
+    if untranslated_jobs:
+        payloads = [f"<div>{protect_content_html(u['text'], u.get('term_matches') or [])}</div>" for u in untranslated_jobs]
+        html_results = run_packed_jobs(payloads, batch_chars, lang, target_lang, api_key, concurrency)
+        for unit, html in zip(untranslated_jobs, html_results):
+            if html:
+                retried = html
+                expected_cues = expected_cue_ids(unit)
+                if expected_cues:
+                    retried = repair_corrupt_markers(retried, "c", expected_cues)
+                if retried and is_length_plausible(unit["text"], retried):
+                    translations_raw[unit["id"]] = retried
+
+    results = dict(resolved)
+    for unit in pending:
+        raw_text = translations_raw.get(unit["id"])
+        final_text = apply_term_replacements(raw_text, unit.get("term_matches") or [], target_lang) if raw_text is not None else None
         results[unit["id"]] = final_text
 
     unit_by_id = {unit["id"]: unit for unit in units}
@@ -970,50 +1177,71 @@ def translate_units(units, chapters, cues, lang, target_lang, api_key, batch_cha
                         if text is not None and has_content(unit_by_id[uid]["text"])
                         and (not has_content(text) or not is_length_plausible(unit_by_id[uid]["text"], text))}
     cue_suspects = {uid for uid, text in results.items()
-                    if text is not None and missing_cue_ids(unit_by_id[uid], text)}
+                    if text is not None and (missing_cue_ids(unit_by_id[uid], text) or CORRUPT_MARKER_SIGNATURE.search(text)
+                                             or has_marker_leak(unit_by_id[uid]["text"], text))}
     markerable_cue_ids = {cid for unit in units for cid in expected_cue_ids(unit)}
     cue_order = [c["id"] for c in cues if c["id"] in markerable_cue_ids]
     cue_text_by_id = {c["id"]: c["text"] for c in cues if c["id"] in markerable_cue_ids}
     cue_term_matches = build_cue_term_matches(units)
 
-    pending_isolated = {}
-    for uid in sorted(length_suspects | cue_suspects):
-        recovered = retry_windowed(units, uid, lang, target_lang, api_key, batch_chars)
+    primary_suspects = length_suspects | cue_suspects | initial_missing_ids
+    all_suspects = set()
+    for uid in primary_suspects:
+        all_suspects.add(uid)
+        pos = unit_position.get(uid)
+        if pos is not None:
+            if pos > 0:
+                all_suspects.add(unit_order[pos - 1])
+            if pos + 1 < len(unit_order):
+                all_suspects.add(unit_order[pos + 1])
+
+    if all_suspects:
+        recovered = retry_windowed_all(units, sorted(all_suspects), lang, target_lang, api_key, batch_chars, concurrency, ladder=WINDOW_RADIUS_LADDER)
         if recovered:
             recovered = {rid: apply_term_replacements(text, unit_by_id[rid].get("term_matches") or [], target_lang)
                          for rid, text in recovered.items()}
-            log(f"windowed retry around unit {uid}: recovered {sorted(recovered)}")
+            log(f"windowed retry: recovered {sorted(recovered)}")
             results.update(recovered)
-        else:
-            log(f"windowed retry around unit {uid}: markers did not align, left as-is")
 
-        expected = expected_cue_ids(unit_by_id[uid])
-        if expected:
-            results[uid] = repair_corrupt_markers(results[uid], "c", expected)
-        remaining = missing_cue_ids(unit_by_id[uid], results[uid])
-        if not remaining:
-            continue
-        trivial = [cid for cid in remaining
-                   if not has_translatable_content(cue_text_by_id.get(cid, ""), cue_term_matches.get(cid))]
-        if trivial:
-            filled = {cid: apply_term_replacements(cue_text_by_id[cid], cue_term_matches.get(cid) or [], target_lang)
-                      for cid in trivial}
-            results[uid] = patch_missing_cues(results[uid], expected_cue_ids(unit_by_id[uid]), filled)
-            log(f"unit {uid}: cues {trivial} have no translatable content beyond glossary terms, filled without retry")
-            remaining = [cid for cid in remaining if cid not in trivial]
-        if remaining:
-            pending_isolated[uid] = remaining
+        missing_by_unit = {}
+        for uid in sorted(all_suspects):
+            expected = expected_cue_ids(unit_by_id[uid])
+            if expected:
+                results[uid] = repair_corrupt_markers(results[uid], "c", expected)
+            remaining = missing_cue_ids(unit_by_id[uid], results[uid])
+            if not remaining:
+                continue
 
-    if pending_isolated:
-        recovered_by_unit = retry_isolated_cues_merged(pending_isolated, cue_order, cue_text_by_id, cue_term_matches, lang, target_lang, api_key, batch_chars)
-        for uid, remaining in pending_isolated.items():
-            recovered_cues = recovered_by_unit.get(uid, {})
-            if recovered_cues:
-                results[uid] = patch_missing_cues(results[uid], expected_cue_ids(unit_by_id[uid]), recovered_cues)
-                log(f"isolated cue retry for unit {uid}: recovered cues {sorted(recovered_cues)}")
-            still_missing = [cid for cid in remaining if cid not in recovered_cues]
-            if still_missing:
-                log(f"isolated cue retry for unit {uid}: cues {still_missing} still missing, left as-is")
+            trivial = [cid for cid in remaining
+                       if not has_translatable_content(cue_text_by_id.get(cid, ""), cue_term_matches.get(cid))]
+            if trivial:
+                filled = {cid: apply_term_replacements(cue_text_by_id[cid], cue_term_matches.get(cid) or [], target_lang)
+                          for cid in trivial}
+                results[uid] = patch_missing_cues(results[uid], expected_cue_ids(unit_by_id[uid]), filled)
+                log(f"unit {uid}: cues {trivial} have no translatable content beyond glossary terms, filled without retry")
+                remaining = [cid for cid in remaining if cid not in trivial]
+
+            if remaining:
+                missing_by_unit[uid] = remaining
+
+        if missing_by_unit:
+            recovered_cues = retry_isolated_cues_all(
+                missing_by_unit, cue_order, cue_text_by_id, cue_term_matches, lang, target_lang, api_key, batch_chars, concurrency)
+            for uid, r_cues in recovered_cues.items():
+                results[uid] = patch_missing_cues(results[uid], expected_cue_ids(unit_by_id[uid]), r_cues)
+                log(f"isolated cue retry for unit {uid}: recovered cues {sorted(r_cues)}")
+
+    leak_by_unit = {uid: leaked for uid, text in results.items() if text is not None
+                    for leaked in [find_leaked_cue_ids(unit_by_id[uid], text, lang.current(), target_lang)] if leaked}
+    if leak_by_unit:
+        leak_recovered = retry_isolated_cues_all(
+            leak_by_unit, cue_order, cue_text_by_id, cue_term_matches, lang, target_lang, api_key, batch_chars, concurrency,
+            extra_valid=lambda orig, cand: not is_leaked_untranslated(orig, cand, lang.current(), target_lang),
+        )
+        for uid, r_cues in leak_recovered.items():
+            unit = unit_by_id[uid]
+            results[uid] = next(iter(r_cues.values())) if is_single_plain_cue(unit) else patch_missing_cues(results[uid], expected_cue_ids(unit), r_cues)
+            log(f"untranslated-leak retry for unit {uid}: recovered cues {sorted(r_cues)}")
 
     skipped = [uid for uid, text in results.items() if text is None]
     translations = {str(uid): text for uid, text in results.items() if text is not None}

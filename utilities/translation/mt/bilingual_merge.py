@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: bilingual_merge.py
-# Version: 2.8
+# Version: 2.8.1
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -620,6 +620,26 @@ def rebalance_disproportionate_cuts(text, spans, cuts, locked, protected, target
     return new_cuts
 
 
+FORWARD_SNAP_WINDOW = 3
+
+
+def snap_cuts_forward_to_punct(text, cuts, locked, tags, protected):
+    result = list(cuts)
+    for i in range(len(result)):
+        if i in locked or tags[i] == "original":
+            continue
+        cursor = result[i]
+        ceiling = result[i + 1] if i + 1 < len(result) else len(text)
+        window_end = min(cursor + FORWARD_SNAP_WINDOW, ceiling)
+        if window_end <= cursor:
+            continue
+        candidates = [m.end() for m in GENERAL_STRONG_PUNCT_PATTERN.finditer(text, cursor, window_end)
+                      if not inside_protected_span(m.end(), protected)]
+        if candidates:
+            result[i] = min(candidates)
+    return result
+
+
 def split_by_boundary(translated_text, spans, protected=(), target_lang=None, source_lang=None):
     boundary_types = [classify_boundary(span["text"]) for span in spans[:-1]]
     expected_positions = compute_expected_positions(translated_text, spans)
@@ -640,6 +660,7 @@ def split_by_boundary(translated_text, spans, protected=(), target_lang=None, so
 
     locked = {i for i in range(len(cuts)) if tags[i] == "marker"}
     cuts = rebalance_disproportionate_cuts(translated_text, spans, cuts, locked, protected, target_lang)
+    cuts = snap_cuts_forward_to_punct(translated_text, cuts, locked, tags, protected)
     parts, cursor = [], 0
     for cut in cuts:
         parts.append(translated_text[cursor:cut].strip())
