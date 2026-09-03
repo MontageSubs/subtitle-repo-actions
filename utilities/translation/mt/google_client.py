@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: google_client.py
-# Version: 2.16.1
+# Version: 2.16.2
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -999,7 +999,7 @@ def pack_by_chars(payloads, max_chars_per_request, max_items=50):
 
 def parse_plain_divs(html):
     return [
-        " ".join(unescape_html(TAG_PATTERN.sub("", ITALIC_PATTERN.sub("", m.group(1)))).split())
+        clean_translated_fragment(m.group(1))
         for m in PLAIN_DIV_PATTERN.finditer(html)
     ]
 
@@ -1014,7 +1014,7 @@ def resolve_chunk_with_binary_fallback(indices, payloads, lang, target_lang, api
         if len(divs) == len(indices):
             return {i: divs[k] for k, i in enumerate(indices)}
         if len(indices) == 1:
-            div_val = divs[0] if divs else unescape_html(TAG_PATTERN.sub("", ITALIC_PATTERN.sub("", translated_html))).strip()
+            div_val = divs[0] if divs else clean_translated_fragment(translated_html)
             return {indices[0]: div_val} if div_val else {}
     except Exception as e:
         log(f"packed jobs chunk failed: {e}")

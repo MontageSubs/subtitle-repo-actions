@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: srt_extract.py
-# Version: 2.6.1
+# Version: 2.6.2
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -36,6 +36,9 @@
 #       splitting; a cue fully wrapped by one such tag has it stripped
 #       before translation and flagged via `style_wrap` on every span it
 #       produces, to be re-applied per segment after translation.
+#     - A closing style tag at the end of one raw cue line immediately
+#       followed by the same opening tag at the start of the next line
+#       is collapsed into a single continuous wrap across the join.
 #
 # 功能特性：
 #     - 解析 SRT 字幕结构，并对文本和时间戳进行标准化。
@@ -348,11 +351,27 @@ def strip_tags_preserving_style(line):
     return STYLE_TAG_PLACEHOLDER_PATTERN.sub(lambda m: preserved[int(m.group(1))], stripped)
 
 
+STYLE_CLOSE_AT_END_PATTERN = re.compile(r"</(i|b|u)>$", re.IGNORECASE)
+STYLE_OPEN_AT_START_PATTERN = re.compile(r"^<(i|b|u)>", re.IGNORECASE)
+
+
+def collapse_adjacent_style_wraps(lines):
+    lines = list(lines)
+    for i in range(len(lines) - 1):
+        end_match = STYLE_CLOSE_AT_END_PATTERN.search(lines[i])
+        start_match = STYLE_OPEN_AT_START_PATTERN.match(lines[i + 1])
+        if end_match and start_match and end_match.group(1).lower() == start_match.group(1).lower():
+            lines[i] = lines[i][:end_match.start()]
+            lines[i + 1] = lines[i + 1][start_match.end():]
+    return lines
+
+
 def fold_text(raw, strip_sdh_enabled=False, latin_source=True):
     lines = [WHITESPACE_PATTERN.sub(" ", strip_tags_preserving_style(raw_line)).strip() for raw_line in raw.splitlines()]
     lines = [line for line in lines if line]
     if strip_sdh_enabled and latin_source and lines and not any(MUSIC_NOTE_PATTERN.search(line) for line in lines):
         lines = strip_speaker_tags(lines)
+    lines = collapse_adjacent_style_wraps(lines)
     return " ".join(line for line in lines if line)
 
 
