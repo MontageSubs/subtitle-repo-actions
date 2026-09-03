@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: microsoft_client.py
-# Version: 1.7
+# Version: 1.7.1
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -31,6 +31,8 @@
 #     - Multi-segment payload support (--array-size): Send multiple 8k segments in a single POST array.
 #     - Zero-space compact marker scheme (⟦m1⟧, ⟦m2⟧) for contextual translation.
 #     - Lossless formatting tag escape (<b>/<i> to ⟦b⟧/⟦i⟧) preserving character offsets.
+#     - Repairs a formatting marker missing one bracket where unambiguous;
+#       drops all formatting tags for a cue outright if still unbalanced.
 #     - Native glossary protection using <mstrans:dictionary> definitions.
 #     - Cascading retry pipeline with radius ladder: Windowed Context (±20 -> ±5 -> ±2) and
 #       Isolated Cues (±5 -> ±2 -> solo) shrink context on repeated failure instead of
@@ -97,9 +99,11 @@ MARKER_DEBRIS_PATTERN = re.compile(r"\\+[0-9\uFFFD]{0,6}[muc](?![a-zA-Z0-9])")
 def strip_marker_debris(text):
     return MARKER_DEBRIS_PATTERN.sub("", text)
 
+STYLE_MARKER_PATTERN = re.compile(r"\u27e6/?(?:b|i|u)\u27e7", re.IGNORECASE)
+
 def has_marker_leak(original_text, translated_text):
     original_count = len(MARKER_BRACKET_PATTERN.findall(original_text or ""))
-    translated_count = len(MARKER_BRACKET_PATTERN.findall(translated_text or ""))
+    translated_count = len(MARKER_BRACKET_PATTERN.findall(STYLE_MARKER_PATTERN.sub("", translated_text or "")))
     return translated_count > original_count
 
 def _marker_sort_key(marker_id):
@@ -192,9 +196,33 @@ def escape_formatting_tags(text):
         text = pattern.sub(repl, text)
     return text
 
+STYLE_MARKER_MISSING_OPEN_PATTERN = re.compile(r"(?<!\u27e6)/(b|i)\u27e7", re.IGNORECASE)
+STYLE_MARKER_MISSING_CLOSE_PATTERN = re.compile(r"\u27e6(b|i)(?!\u27e7)", re.IGNORECASE)
+STYLE_LITERAL_TAG_PATTERN = re.compile(r"</?(b|i)>", re.IGNORECASE)
+
+def repair_style_markers(text):
+    text = STYLE_MARKER_MISSING_OPEN_PATTERN.sub(lambda m: f"\u27e6/{m.group(1).lower()}\u27e7", text)
+    return STYLE_MARKER_MISSING_CLOSE_PATTERN.sub(lambda m: f"\u27e6{m.group(1).lower()}\u27e7", text)
+
+def style_tags_balanced(text):
+    depth = {"b": 0, "i": 0}
+    for m in STYLE_LITERAL_TAG_PATTERN.finditer(text):
+        token = m.group(0).lower()
+        tag = token.strip("</>")
+        depth[tag] += -1 if token[1] == "/" else 1
+        if depth[tag] < 0:
+            return False
+    return all(v == 0 for v in depth.values())
+
+def sanitize_style_tags(text):
+    if not text or not STYLE_LITERAL_TAG_PATTERN.search(text):
+        return text
+    return text if style_tags_balanced(text) else STYLE_LITERAL_TAG_PATTERN.sub("", text)
+
 def restore_formatting_tags(text):
     if not text:
         return text
+    text = repair_style_markers(text)
     for pattern, repl in FORMAT_TAG_RESTORE_PATTERNS:
         text = pattern.sub(repl, text)
     return text
@@ -1041,7 +1069,7 @@ def translate_units(units, chapters, cues, lang, target_lang, batch_chars, concu
             log(f"untranslated-leak retry for unit {uid}: recovered cues {sorted(r_cues, key=_marker_sort_key)}")
 
     final_skipped = [str(uid) for uid, text in results.items() if text is None]
-    final_translations = {str(uid): strip_marker_debris(restore_formatting_tags(text)).strip() for uid, text in results.items() if text is not None}
+    final_translations = {str(uid): sanitize_style_tags(strip_marker_debris(restore_formatting_tags(text))).strip() for uid, text in results.items() if text is not None}
     return final_translations, final_skipped
 
 def main():

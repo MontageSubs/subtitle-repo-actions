@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: google_client.py
-# Version: 2.16
+# Version: 2.16.1
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -39,6 +39,10 @@
 #     - Auto-detects and pins the source language so retries don't re-guess.
 #     - Optional --context-file primes translation, verified locally via langdetect.
 #     - Debug logging as JSON Lines, readable via debug_format.py.
+#     - Inline <i>/<b>/<u> tags sent as literal HTML and preserved verbatim
+#       on the way back, instead of the provider's own formatting noise.
+#     - Dangling/malformed style tags are repaired where the fix is
+#       unambiguous, otherwise dropped outright rather than kept broken.
 #
 # 功能:
 #     - 并发、章节感知分批；超长单元直接跳过，绝不截断。
@@ -93,8 +97,9 @@ MAX_ATTEMPTS = 3
 RETRY_DELAY = 3
 PROGRESS_INTERVAL = 20
 
-ITALIC_PATTERN = re.compile(r"<i>.*?</i>", re.DOTALL)
 TAG_PATTERN = re.compile(r"<[^>]+>")
+STYLE_TAG_PATTERN = re.compile(r"</?(?:i|b|u)>", re.IGNORECASE)
+STYLE_TAG_PLACEHOLDER_PATTERN = re.compile(r"\u0001(\d+)\u0001")
 USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 
@@ -357,6 +362,56 @@ def unescape_html(text):
                 .replace("&gt;", ">").replace("&quot;", '"').replace("&#39;", "'"))
 
 
+def escape_html_preserving_style(text):
+    pieces, cursor = [], 0
+    for m in STYLE_TAG_PATTERN.finditer(text):
+        pieces.append(escape_html(text[cursor:m.start()]))
+        pieces.append(m.group(0).lower())
+        cursor = m.end()
+    pieces.append(escape_html(text[cursor:]))
+    return "".join(pieces)
+
+
+def clean_translated_fragment(raw):
+    preserved = []
+
+    def guard(m):
+        preserved.append(m.group(0).lower())
+        return f"\u0001{len(preserved) - 1}\u0001"
+
+    guarded = STYLE_TAG_PATTERN.sub(guard, raw)
+    stripped = TAG_PATTERN.sub("", guarded)
+    restored = STYLE_TAG_PLACEHOLDER_PATTERN.sub(lambda m: preserved[int(m.group(1))], stripped)
+    return unescape_html(restored).strip()
+
+
+STYLE_DANGLING_OPEN_PATTERN = re.compile(r"<(i|b|u)(?![a-zA-Z>])", re.IGNORECASE)
+STYLE_MISSING_OPEN_BRACKET_PATTERN = re.compile(r"(?<!<)/(i|b|u)>", re.IGNORECASE)
+
+
+def repair_style_tags(text):
+    text = STYLE_DANGLING_OPEN_PATTERN.sub(lambda m: f"</{m.group(1).lower()}>", text)
+    return STYLE_MISSING_OPEN_BRACKET_PATTERN.sub(lambda m: f"</{m.group(1).lower()}>", text)
+
+
+def style_tags_balanced(text):
+    depth = {"i": 0, "b": 0, "u": 0}
+    for m in STYLE_TAG_PATTERN.finditer(text):
+        token = m.group(0).lower()
+        tag = token.strip("</>")
+        depth[tag] += -1 if token[1] == "/" else 1
+        if depth[tag] < 0:
+            return False
+    return all(v == 0 for v in depth.values())
+
+
+def sanitize_style_tags(text):
+    if not text or not STYLE_TAG_PATTERN.search(text):
+        return text
+    repaired = repair_style_tags(text)
+    return repaired if style_tags_balanced(repaired) else STYLE_TAG_PATTERN.sub("", repaired)
+
+
 def has_content(text):
     return bool(text) and bool(CONTENT_CHAR_PATTERN.search(text))
 
@@ -471,7 +526,7 @@ def parse_by_tag_id(html, open_pattern, marker_pattern, source_by_index=None):
         idx = int(idx_str)
         chunk_end = opens[i + 1][0] if i + 1 < len(opens) else len(html)
         raw = html[end:chunk_end]
-        text = unescape_html(TAG_PATTERN.sub("", ITALIC_PATTERN.sub("", raw))).strip()
+        text = clean_translated_fragment(raw)
         source_text = source_by_index.get(idx, "") if source_by_index else ""
         text = sanitize_markers_against_source(text, source_text)
         if not text:
@@ -525,7 +580,7 @@ def parse_by_reconciled_boundaries(html, boundaries, source_by_index=None):
             raw = ""
         else:
             raw = html[end:next_boundary]
-        text = unescape_html(TAG_PATTERN.sub("", ITALIC_PATTERN.sub("", raw))).strip()
+        text = clean_translated_fragment(raw)
         source_text = source_by_index.get(idx, "") if source_by_index else ""
         text = sanitize_markers_against_source(text, source_text)
         if not text and not (source_text and not has_content(source_text)):
@@ -758,11 +813,11 @@ def build_protected_spans(text, term_matches):
 def protect_content_html(text, term_matches):
     pieces, cursor = [], 0
     for span in build_protected_spans(text, term_matches):
-        pieces.append(escape_html(text[cursor:span["start"]]))
-        piece = escape_html(text[span["start"]:span["end"]])
+        pieces.append(escape_html_preserving_style(text[cursor:span["start"]]))
+        piece = escape_html_preserving_style(text[span["start"]:span["end"]])
         pieces.append(NO_TRANSLATE_TEMPLATE.format(piece) if span["wrap"] else piece)
         cursor = span["end"]
-    pieces.append(escape_html(text[cursor:]))
+    pieces.append(escape_html_preserving_style(text[cursor:]))
     return "".join(pieces)
 
 
@@ -1316,7 +1371,7 @@ def translate_units(units, chapters, cues, lang, target_lang, api_key, batch_cha
             log(f"untranslated-leak retry for unit {uid}: recovered cues {sorted(r_cues, key=_marker_sort_key)}")
 
     skipped = [uid for uid, text in results.items() if text is None]
-    translations = {str(uid): text for uid, text in results.items() if text is not None}
+    translations = {str(uid): sanitize_style_tags(text) for uid, text in results.items() if text is not None}
     return translations, skipped
 
 

@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: srt_extract.py
-# Version: 2.6
+# Version: 2.6.1
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -32,6 +32,10 @@
 #       splitting arbitrarily by character count.
 #     - Scene-change gap threshold (SCENE_CHANGE_MS, default 30000)
 #       configurable via --scene-change-ms.
+#     - Preserves inline <i>/<b>/<u> tags through folding and dialogue
+#       splitting; a cue fully wrapped by one such tag has it stripped
+#       before translation and flagged via `style_wrap` on every span it
+#       produces, to be re-applied per segment after translation.
 #
 # 功能特性：
 #     - 解析 SRT 字幕结构，并对文本和时间戳进行标准化。
@@ -148,18 +152,24 @@ SCRIPT_NAME = "srt_extract"
 
 TIME_LINE_PATTERN = re.compile(r"(\d{2}:\d{2}:\d{2}[,.]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,.]\d{3})")
 TAG_PATTERN = re.compile(r"<[^>]+>|\{[^}]*\}")
+STYLE_TAG_PATTERN = re.compile(r"</?(i|b|u)>", re.IGNORECASE)
+STYLE_TAG_PLACEHOLDER_PATTERN = re.compile(r"\u0001(\d+)\u0001")
+STYLE_TAG_ALT = r"(?:</?(?:i|b|u)>)"
+STYLE_OPEN_ALT = r"(?:<(?:i|b|u)>)"
+STYLE_CLOSE_ALT = r"(?:</(?:i|b|u)>)"
+FULL_WRAP_PATTERN = re.compile(r"^<(i|b|u)>(.*)</\1>$", re.IGNORECASE | re.DOTALL)
 WHITESPACE_PATTERN = re.compile(r"\s+")
-TERMINAL_PUNCT_PATTERN = re.compile(r"[.!?。！？][’”\"')\]」』】）]*\s*$")
-TRAILING_ELLIPSIS_PATTERN = re.compile(r"(\.{2,}|…)\s*$")
-TRAILING_CUTOFF_PATTERN = re.compile(r"-{2,}\s*$")
-TRAILING_SINGLE_CUTOFF_PATTERN = re.compile(r"(?<!-)-\s*$")
-DIALOGUE_DASH_PATTERN = re.compile(r"(?:^|(?<=\s))-(?!-)\s?")
+TERMINAL_PUNCT_PATTERN = re.compile(rf"[.!?。！？][’”\"')\]」』】）]*{STYLE_CLOSE_ALT}*\s*$", re.IGNORECASE)
+TRAILING_ELLIPSIS_PATTERN = re.compile(rf"(\.{{2,}}|…){STYLE_CLOSE_ALT}*\s*$", re.IGNORECASE)
+TRAILING_CUTOFF_PATTERN = re.compile(rf"-{{2,}}{STYLE_CLOSE_ALT}*\s*$", re.IGNORECASE)
+TRAILING_SINGLE_CUTOFF_PATTERN = re.compile(rf"(?<!-)-{STYLE_CLOSE_ALT}*\s*$", re.IGNORECASE)
+DIALOGUE_DASH_PATTERN = re.compile(rf"(?:^|(?<=\s)){STYLE_TAG_ALT}*-(?!-){STYLE_TAG_ALT}*\s?", re.IGNORECASE)
 STUTTER_WORD_PATTERN = re.compile(r"(?<![A-Za-z])([A-Za-z])-\1(?![A-Za-z])", re.IGNORECASE)
 STUTTER_PREFIX_PATTERN = re.compile(r"(?<![A-Za-z])([A-Za-z])-(?=\1[a-z])", re.IGNORECASE)
 SHORT_REPLY_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9]")
 SHORT_REPLY_MAX_TOKENS = 3
 STUTTER_RESIDUAL_PATTERN = re.compile(r"[A-Za-z]")
-TRAILING_MARK_PATTERN = re.compile(r"[!?…]+$")
+TRAILING_MARK_PATTERN = re.compile(rf"[!?…]+{STYLE_CLOSE_ALT}*$", re.IGNORECASE)
 GAP_THRESHOLD_MS = 200
 WORD_TOKEN_PATTERN = re.compile(r"[A-Za-z]+(?:['’][A-Za-z]+)*")
 ISOLATED_MERGE_MAX_WORDS = 0
@@ -172,8 +182,9 @@ MUSIC_NOTE_CHARS = "\u2669\u266a\u266b\u266c"
 MUSIC_NOTE_PATTERN = re.compile(f"[{MUSIC_NOTE_CHARS}]")
 INNER_B = r"\[\]\(\)\{\}\uff08\uff09\u3010\u3011"
 SDH_BRACKET_PATTERN = re.compile(r"\[[^" + INNER_B + r"]*\]|\([^" + INNER_B + r"]*\)|\{[^" + INNER_B + r"]*\}|\uff08[^" + INNER_B + r"]*\uff09|\u3010[^" + INNER_B + r"]*\u3011")
-LEADING_ELLIPSIS_PATTERN = re.compile(r"^(\.{2,}|\u2026)")
+LEADING_ELLIPSIS_PATTERN = re.compile(rf"^{STYLE_OPEN_ALT}*(\.{{2,}}|\u2026)", re.IGNORECASE)
 LEADING_NON_LETTER_PATTERN = re.compile(r"^[^A-Za-z]*")
+STYLE_TAG_LEADING_PATTERN = re.compile(rf"^{STYLE_OPEN_ALT}+", re.IGNORECASE)
 EDGE_NOTE_PATTERN = re.compile(f"^[{MUSIC_NOTE_CHARS}\\s]+|[{MUSIC_NOTE_CHARS}\\s]+$")
 
 LATIN_SOURCE_LANGS = {"en", "es", "fr", "de", "it", "pt", "nl", "pl", "sv", "da", "no", "fi", "ro", "cs", "hu", "tr", "id", "vi", "ms", "tl", "ca", "eu", "gl", "la"}
@@ -319,17 +330,37 @@ def strip_edge_notes(text):
 
 
 def first_letter_is_lower(text):
+    text = STYLE_TAG_LEADING_PATTERN.sub("", text)
     match = LEADING_NON_LETTER_PATTERN.match(text)
     rest = text[match.end():]
     return bool(rest) and rest[0].islower()
 
 
+def strip_tags_preserving_style(line):
+    preserved = []
+
+    def guard(m):
+        preserved.append(m.group(0).lower())
+        return f"\u0001{len(preserved) - 1}\u0001"
+
+    guarded = STYLE_TAG_PATTERN.sub(guard, line)
+    stripped = TAG_PATTERN.sub("", guarded)
+    return STYLE_TAG_PLACEHOLDER_PATTERN.sub(lambda m: preserved[int(m.group(1))], stripped)
+
+
 def fold_text(raw, strip_sdh_enabled=False, latin_source=True):
-    lines = [WHITESPACE_PATTERN.sub(" ", TAG_PATTERN.sub("", raw_line)).strip() for raw_line in raw.splitlines()]
+    lines = [WHITESPACE_PATTERN.sub(" ", strip_tags_preserving_style(raw_line)).strip() for raw_line in raw.splitlines()]
     lines = [line for line in lines if line]
     if strip_sdh_enabled and latin_source and lines and not any(MUSIC_NOTE_PATTERN.search(line) for line in lines):
         lines = strip_speaker_tags(lines)
     return " ".join(line for line in lines if line)
+
+
+def split_full_wrap(text):
+    match = FULL_WRAP_PATTERN.match(text.strip())
+    if not match or STYLE_TAG_PATTERN.search(match.group(2)):
+        return text, None
+    return match.group(2).strip(), match.group(1).lower()
 
 
 def parse_srt(content, strip_sdh_enabled=True, latin_source=True):
@@ -490,13 +521,14 @@ def find_pure_glossary_line(text, glossary, latin_source=True):
 def build_segments(cues, glossary, latin_source=True):
     segments = []
     for cue in cues:
-        for dash_index, part in enumerate(split_dialogue(cue["text"])):
+        working_text, style_wrap = split_full_wrap(cue["text"])
+        for dash_index, part in enumerate(split_dialogue(working_text)):
             resolved = find_pure_glossary_line(part, glossary, latin_source)
             if not resolved and latin_source:
                 resolved = find_stutter_resolution(part, glossary)
             text = part if resolved or not latin_source else strip_letter_stutter(part)
             segments.append({"cue_id": cue["id"], "text": text, "start": cue["start"], "end": cue["end"],
-                              "resolved": resolved, "dash_index": dash_index})
+                              "resolved": resolved, "dash_index": dash_index, "style_wrap": style_wrap})
     return assign_merge_sides(segments, latin_source)
 
 
@@ -657,7 +689,7 @@ def build_units(cues, glossary, latin_source=True):
             unit_id += 1
             spans = [{"id": s["cue_id"], "start": s["start"], "end": s["end"], "text": s["text"],
                        "boundary": "marker" if (is_music_chapter or s.get("marker_boundary")) else None,
-                       "dash_index": s.get("dash_index", 0),
+                       "dash_index": s.get("dash_index", 0), "style_wrap": s.get("style_wrap"),
                        "kind": "music" if is_music_segment(s["text"]) else "dialogue"} for s in group]
             assign_marker_ids(spans)
             marker_merges += sum(1 for s in group if s.get("marker_boundary"))

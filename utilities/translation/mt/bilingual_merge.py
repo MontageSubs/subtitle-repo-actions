@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: bilingual_merge.py
-# Version: 2.9
+# Version: 2.9.1
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -31,6 +31,11 @@
 #       into a single space.
 #     - Sentence-splitting bracket set covers CJK/French/German quotes and
 #       Spanish inverted punctuation.
+#     - Spans flagged `style_wrap` by extraction (a cue fully wrapped by one
+#       <i>/<b>/<u> tag) get that tag re-applied per split segment after
+#       translation; inline <i>/<b>/<u> runs survive alignment cuts intact.
+#     - Multi-speaker music cues wrap each dash segment's notes individually
+#       instead of enclosing the whole joined line in one pair.
 #
 # 功能:
 #     - 重构双语字幕块并保持原始时间轴。
@@ -169,6 +174,8 @@ BOUNDARY_SEARCH_PATTERNS = {
     "colon": (re.compile(r"[:：]+"),),
 }
 MARKER_PATTERN = re.compile(r"\u27e6c(\d+(?:\.\d+)?)\u27e7")
+STYLE_TAG_PATTERN = re.compile(r"</?(?:i|b|u)>", re.IGNORECASE)
+STYLE_TAG_SPAN_PATTERN = re.compile(r"<(i|b|u)>.*?</\1>", re.IGNORECASE | re.DOTALL)
 RESIDUAL_MARKER_PATTERN = re.compile(r"\s*\u27e6[^\u27e6\u27e7]*\u27e7\s*")
 
 
@@ -283,6 +290,7 @@ PUNCT_WEIGHT_PATTERN = re.compile(r"[，,、；;。.!?！？：:…]")
 
 
 def effective_length(text):
+    text = STYLE_TAG_PATTERN.sub("", text)
     latin_words = len(LATIN_WORD_PATTERN.findall(text))
     digits = len(DIGIT_PATTERN.findall(text))
     others = len(OTHER_WORD_PATTERN.findall(text))
@@ -436,6 +444,7 @@ def is_leading_punct_run(text, match_start):
 
 def find_protected_spans(text, glossary_terms, target_lang=None):
     spans = [(m.start(), m.end()) for m in BOOK_TITLE_PATTERN.finditer(text)]
+    spans.extend((m.start(), m.end()) for m in STYLE_TAG_SPAN_PATTERN.finditer(text))
     spans.extend((m.start(), m.end()) for m in LATIN_WORD_PATTERN.finditer(text))
     spans.extend((m.start(), m.end()) for m in MARKER_PATTERN.finditer(text))
     spans.extend((m.start(), m.end()) for m in ELLIPSIS_PATTERN.finditer(text))
@@ -758,7 +767,7 @@ def determine_dash_style(cues):
     nospace_count = 0
     for cue in cues:
         for line in cue["text"].split("\n"):
-            line = line.strip()
+            line = STYLE_TAG_PATTERN.sub("", line).strip()
             if line.startswith("-"):
                 if line.startswith("- "):
                     space_count += 1
@@ -807,6 +816,8 @@ def build_bilingual_cues(cues, units, translations, target_lang, source_lang=Non
             approx_splits.append({"unit_id": unit["id"], "cues": [span["id"] for span in spans], "method": method})
         for span, part in zip(spans, parts):
             part = normalize_translation(part, target_lang)
+            if span.get("style_wrap") and part:
+                part = f"<{span['style_wrap']}>{part}</{span['style_wrap']}>"
             if span.get("kind") == "music" and not cue_all_music.get(span["id"], False):
                 part = format_music_line(part)
             cue_segments.setdefault(span["id"], []).append((span.get("dash_index", 0), part))
@@ -815,8 +826,11 @@ def build_bilingual_cues(cues, units, translations, target_lang, source_lang=Non
     for cue in cues:
         entries = cue_segments.get(cue["id"])
         parts = [p for _, p in sorted(entries, key=lambda e: e[0])] if entries else None
+        is_all_music = cue_all_music.get(cue["id"], False)
         if not parts or any(p is None for p in parts):
             translation = None
+        elif len(parts) > 1 and is_all_music:
+            translation = " ".join(f"-{format_music_line(p.lstrip('- '))}" for p in parts)
         elif len(parts) > 1:
             translation = " ".join(f"-{p.lstrip('- ')}" for p in parts)
         else:
@@ -824,8 +838,8 @@ def build_bilingual_cues(cues, units, translations, target_lang, source_lang=Non
         if translation:
             translation = DASH_REPLACE_PATTERN.sub(rf"\1{dash_style}", translation)
             translation = normalize_exclaim_question(translation)
-            if cue_all_music.get(cue["id"], False):
-                translation = POSITION_TOP_TAG + format_music_line(translation)
+            if is_all_music:
+                translation = POSITION_TOP_TAG + (translation if len(parts) > 1 else format_music_line(translation))
             duration_ms = parse_srt_timestamp_ms(cue["end"]) - parse_srt_timestamp_ms(cue["start"])
             metrics = evaluate_reading_speed(translation, duration_ms, target_lang)
             if metrics["over_cps"] or metrics["over_length"]:
