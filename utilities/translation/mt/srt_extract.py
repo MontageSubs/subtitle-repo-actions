@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: srt_extract.py
-# Version: 2.5.4
+# Version: 2.6
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -600,16 +600,28 @@ def match_glossary_terms(text, glossary):
     return matches
 
 
-def join_group_text(group, is_music_group):
+def assign_marker_ids(spans):
+    marked_by_cue = {}
+    for i, span in enumerate(spans):
+        if span["boundary"] == "marker":
+            marked_by_cue.setdefault(span["id"], []).append(i)
+    for indices in marked_by_cue.values():
+        needs_suffix = len(indices) > 1
+        for pos, idx in enumerate(indices):
+            spans[idx]["marker_id"] = f"{spans[idx]['id']}.{pos + 1}" if needs_suffix else str(spans[idx]["id"])
+    for span in spans:
+        span.setdefault("marker_id", str(span["id"]))
+
+
+def join_group_text(group, spans, is_music_group):
     pieces = []
-    is_multi_music = is_music_group and len(group) > 1
     for i, seg in enumerate(group):
         piece = strip_edge_notes(seg["text"]) if is_music_group else seg["text"]
-        if is_multi_music:
-            marker = f"{MARKER_TEMPLATE.format(seg['cue_id'])} "
+        if spans[i]["boundary"] == "marker":
+            marker = f"{MARKER_TEMPLATE.format(spans[i]['marker_id'])} "
             pieces.append(f" {marker}" if i > 0 else marker)
         elif i > 0:
-            pieces.append(f" {MARKER_TEMPLATE.format(seg['cue_id'])} " if seg.get("marker_boundary") else " ")
+            pieces.append(" ")
         pieces.append(piece)
     return "".join(pieces).strip()
 
@@ -647,11 +659,12 @@ def build_units(cues, glossary, latin_source=True):
                        "boundary": "marker" if (is_music_chapter or s.get("marker_boundary")) else None,
                        "dash_index": s.get("dash_index", 0),
                        "kind": "music" if is_music_segment(s["text"]) else "dialogue"} for s in group]
+            assign_marker_ids(spans)
             marker_merges += sum(1 for s in group if s.get("marker_boundary"))
             if len(group) == 1 and group[0]["resolved"]:
                 units.append({"id": unit_id, "spans": spans, "text": "", "term_matches": [], "resolved": group[0]["resolved"]})
             else:
-                text = join_group_text(group, is_music_chapter)
+                text = join_group_text(group, spans, is_music_chapter)
                 units.append({"id": unit_id, "spans": spans, "text": text, "term_matches": match_glossary_terms(text, glossary), "resolved": None})
             unit_ids.append(unit_id)
         chapters.append({"id": chapter_index, "kind": raw_chapter["kind"], "unit_ids": unit_ids})

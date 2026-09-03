@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: bilingual_merge.py
-# Version: 2.8.1
+# Version: 2.9
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -168,7 +168,7 @@ BOUNDARY_SEARCH_PATTERNS = {
     "period": (re.compile(r"[.。!?！？]+['\"”’)\]]*"),),
     "colon": (re.compile(r"[:：]+"),),
 }
-MARKER_PATTERN = re.compile(r"\u27e6c(\d+)\u27e7")
+MARKER_PATTERN = re.compile(r"\u27e6c(\d+(?:\.\d+)?)\u27e7")
 RESIDUAL_MARKER_PATTERN = re.compile(r"\s*\u27e6[^\u27e6\u27e7]*\u27e7\s*")
 
 
@@ -325,9 +325,9 @@ def classify_boundary(text):
 def resolve_marker_anchors(text, spans):
     positions = {}
     for m in MARKER_PATTERN.finditer(text):
-        positions.setdefault(int(m.group(1)), m.start())
-    return {i: positions[spans[i + 1]["id"]] for i in range(len(spans) - 1)
-            if spans[i + 1].get("boundary") == "marker" and spans[i + 1]["id"] in positions}
+        positions.setdefault(m.group(1), m.start())
+    return {i: positions[spans[i + 1]["marker_id"]] for i in range(len(spans) - 1)
+            if spans[i + 1].get("boundary") == "marker" and spans[i + 1]["marker_id"] in positions}
 
 
 def build_weight_prefix(text):
