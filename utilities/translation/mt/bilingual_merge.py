@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: bilingual_merge.py
-# Version: 2.9.2
+# Version: 2.9.3
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -690,16 +690,41 @@ def has_content(text):
     return bool(WORD_CHAR_PATTERN.search(text))
 
 
+def proportional_split(text, spans, target_lang):
+    boundaries = word_boundaries(text, target_lang)
+    if len(boundaries) <= 2:
+        return None
+    weights = [effective_length(s["text"]) for s in spans]
+    total = sum(weights) or len(weights)
+    cursor, cuts = 0, []
+    for weight in weights[:-1]:
+        cursor += weight
+        cuts.append(nearest_boundary(boundaries, round(len(text) * cursor / total)))
+    cuts = sorted(set(c for c in cuts if 0 < c < len(text)))
+    if len(cuts) != len(spans) - 1:
+        return None
+    parts, cursor = [], 0
+    for cut in cuts:
+        parts.append(text[cursor:cut].strip())
+        cursor = cut
+    parts.append(text[cursor:].strip())
+    return parts
+
+
 def repair_empty_parts(parts, spans, protected=(), target_lang=None, source_lang=None):
     parts = list(parts)
     for i, part in enumerate(parts):
-        if has_content(part):
+        if has_content(part) or not has_content(spans[i]["text"]):
             continue
         neighbor = i - 1 if i > 0 else i + 1
         if not (0 <= neighbor < len(parts)):
             continue
         lo, hi = sorted((i, neighbor))
         fixed, _ = split_by_boundary(parts[neighbor], spans[lo:hi + 1], protected, target_lang, source_lang)
+        if not has_content(fixed[i - lo]):
+            proportional = proportional_split(parts[neighbor], spans[lo:hi + 1], target_lang)
+            if proportional and has_content(proportional[i - lo]):
+                fixed = proportional
         parts[lo], parts[hi] = fixed
     return parts
 

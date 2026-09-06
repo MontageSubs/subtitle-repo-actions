@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: srt_extract.py
-# Version: 2.6.2
+# Version: 2.6.3
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -162,8 +162,9 @@ STYLE_OPEN_ALT = r"(?:<(?:i|b|u)>)"
 STYLE_CLOSE_ALT = r"(?:</(?:i|b|u)>)"
 FULL_WRAP_PATTERN = re.compile(r"^<(i|b|u)>(.*)</\1>$", re.IGNORECASE | re.DOTALL)
 WHITESPACE_PATTERN = re.compile(r"\s+")
-TERMINAL_PUNCT_PATTERN = re.compile(rf"[.!?。！？][’”\"')\]」』】）]*{STYLE_CLOSE_ALT}*\s*$", re.IGNORECASE)
-TRAILING_ELLIPSIS_PATTERN = re.compile(rf"(\.{{2,}}|…){STYLE_CLOSE_ALT}*\s*$", re.IGNORECASE)
+CLOSING_WRAP_ALT = r"[’”\"')\]」』】）]*"
+TERMINAL_PUNCT_PATTERN = re.compile(rf"[.!?。！？]{CLOSING_WRAP_ALT}{STYLE_CLOSE_ALT}*\s*$", re.IGNORECASE)
+TRAILING_ELLIPSIS_PATTERN = re.compile(rf"(\.{{2,}}|…){CLOSING_WRAP_ALT}{STYLE_CLOSE_ALT}*\s*$", re.IGNORECASE)
 TRAILING_CUTOFF_PATTERN = re.compile(rf"-{{2,}}{STYLE_CLOSE_ALT}*\s*$", re.IGNORECASE)
 TRAILING_SINGLE_CUTOFF_PATTERN = re.compile(rf"(?<!-)-{STYLE_CLOSE_ALT}*\s*$", re.IGNORECASE)
 DIALOGUE_DASH_PATTERN = re.compile(rf"(?:^|(?<=\s)){STYLE_TAG_ALT}*-(?!-){STYLE_TAG_ALT}*\s?", re.IGNORECASE)
@@ -339,6 +340,15 @@ def first_letter_is_lower(text):
     return bool(rest) and rest[0].islower()
 
 
+def first_letter_case(text):
+    text = STYLE_TAG_LEADING_PATTERN.sub("", text)
+    match = LEADING_NON_LETTER_PATTERN.match(text)
+    rest = text[match.end():]
+    if not rest or not rest[0].isalpha():
+        return None
+    return "lower" if rest[0].islower() else "upper"
+
+
 def strip_tags_preserving_style(line):
     preserved = []
 
@@ -492,7 +502,10 @@ def merge_reason(prev_seg, curr_seg, latin_source=True):
         return None
     if has_terminal_punct(prev_seg["text"]):
         return None
-    return "gap" if gap <= GAP_THRESHOLD_MS or first_letter_is_lower(curr_seg["text"]) else None
+    case = first_letter_case(curr_seg["text"])
+    if case == "upper":
+        return None
+    return "gap" if gap <= GAP_THRESHOLD_MS or case == "lower" else None
 
 
 def find_stutter_resolution(text, glossary):

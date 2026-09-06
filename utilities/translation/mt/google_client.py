@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: google_client.py
-# Version: 2.16.3
+# Version: 2.17.0
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -1041,194 +1041,279 @@ def run_packed_jobs(payloads, max_chars_per_request, lang, target_lang, api_key,
     return results
 
 
+def run_packed_jobs_with_lookahead(primary, speculative, max_chars_per_request, lang, target_lang, api_key, concurrency):
+    primary_results, speculative_results = {}, {}
+    suspect_ids = list(primary.keys())
+    if not suspect_ids:
+        return primary_results, speculative_results
+
+    chunks = pack_by_chars([primary[sid] for sid in suspect_ids], max_chars_per_request)
+    used_speculative = set()
+    speculative_entries = list(speculative.items())
+    borrow_cursor = 0
+    attached_per_chunk = []
+    for chunk_idx_list in chunks:
+        used = sum(len(primary[suspect_ids[idx]]) for idx in chunk_idx_list)
+        attached = []
+        for idx in chunk_idx_list:
+            sid = suspect_ids[idx]
+            spec = speculative.get(sid)
+            if spec is None or sid in used_speculative or used + len(spec) > max_chars_per_request:
+                continue
+            attached.append(sid)
+            used_speculative.add(sid)
+            used += len(spec)
+        while borrow_cursor < len(speculative_entries):
+            sid, spec = speculative_entries[borrow_cursor]
+            if sid in used_speculative:
+                borrow_cursor += 1
+                continue
+            if used + len(spec) > max_chars_per_request:
+                break
+            attached.append(sid)
+            used_speculative.add(sid)
+            used += len(spec)
+            borrow_cursor += 1
+        attached_per_chunk.append(attached)
+
+    def process_chunk(ci, chunk_idx_list):
+        items = [(suspect_ids[idx], "primary") for idx in chunk_idx_list]
+        items += [(sid, "speculative") for sid in attached_per_chunk[ci]]
+        payloads = [primary[sid] if kind == "primary" else speculative[sid] for sid, kind in items]
+        recovered = resolve_chunk_with_binary_fallback(list(range(len(items))), payloads, lang, target_lang, api_key)
+        for i, text in recovered.items():
+            sid, kind = items[i]
+            (primary_results if kind == "primary" else speculative_results)[sid] = text
+
+    with ThreadPoolExecutor(max_workers=min(len(chunks), concurrency) or 1) as executor:
+        futures = [executor.submit(process_chunk, ci, chunk_idx_list) for ci, chunk_idx_list in enumerate(chunks)]
+        for future in as_completed(futures):
+            future.result()
+
+    return primary_results, speculative_results
+
+
+def build_window_job(units, index, unit_by_id, suspect_id, radius, batch_chars):
+    i = index.get(suspect_id)
+    if i is None:
+        return None
+    window = units[max(0, i - radius):i + radius + 1]
+    if len(window) < 1:
+        return None
+    is_solo = (len(window) == 1)
+    if is_solo:
+        payload = f"<div>{protect_content_html(window[0]['text'], window[0].get('term_matches') or [])}</div>"
+    else:
+        inner = "".join(
+            f"{wrap_marker(UNIT_MARKER_TEMPLATE.format(unit['id']))}{protect_content_html(unit['text'], unit.get('term_matches') or [])}"
+            for unit in window
+        )
+        payload = f"<div>{inner}</div>"
+    if len(payload) > batch_chars:
+        return None
+    return {"suspect_id": suspect_id, "payload": payload, "window_ids": [u["id"] for u in window], "is_solo": is_solo}
+
+
+def validate_window_job(job, html, radius, unit_by_id, strict_marker):
+    if job["is_solo"]:
+        marker_res = {job["window_ids"][0]: html}
+    else:
+        flat = repair_corrupt_markers(html, "u", job["window_ids"])
+        marker_res = {
+            int(k.strip()): v for k, v in split_by_marker(flat, UNIT_MARKER_PATTERN).items()
+            if k.strip().isdigit()
+        }
+        if not all(wid in marker_res for wid in job["window_ids"]):
+            return None
+
+    if strict_marker and radius > 0 and job["suspect_id"] not in marker_res:
+        return None
+
+    text_raw = marker_res.get(job["suspect_id"])
+    if text_raw is None:
+        return None
+    unit = unit_by_id.get(job["suspect_id"])
+    if not unit:
+        return None
+    text = text_raw
+    expected = expected_cue_ids(unit)
+    if expected:
+        text = repair_corrupt_markers(text, "c", expected)
+    if not CORRUPT_MARKER_SIGNATURE.search(text) and (radius == 0 or is_length_plausible(unit["text"], text)):
+        return text
+    return None
+
+
 def retry_windowed_all(units, suspect_ids, lang, target_lang, api_key, batch_chars, concurrency, ladder=WINDOW_RADIUS_LADDER, strict_marker=False):
     index = {u["id"]: i for i, u in enumerate(units)}
     unit_by_id = {u["id"]: u for u in units}
-    jobs = []
-
-    for suspect_id in suspect_ids:
-        if suspect_id not in index:
-            continue
-        i = index[suspect_id]
-        for radius in ladder:
-            window = units[max(0, i - radius):i + radius + 1]
-            if len(window) < 1:
-                continue
-
-            is_solo = (len(window) == 1)
-            if is_solo:
-                payload = f"<div>{protect_content_html(window[0]['text'], window[0].get('term_matches') or [])}</div>"
-            else:
-                inner = "".join(
-                    f"{wrap_marker(UNIT_MARKER_TEMPLATE.format(unit['id']))}{protect_content_html(unit['text'], unit.get('term_matches') or [])}"
-                    for unit in window
-                )
-                payload = f"<div>{inner}</div>"
-
-            if len(payload) > batch_chars:
-                continue
-
-            jobs.append({
-                "suspect_id": suspect_id,
-                "radius": radius,
-                "payload": payload,
-                "window_ids": [u["id"] for u in window],
-                "is_solo": is_solo
-            })
-
-    if not jobs:
-        return {}
-
-    send_jobs, job_send_index, seen_solo_text = [], [], {}
-    for job in jobs:
-        if job["is_solo"] and len(job["window_ids"]) == 1:
-            text_key = unit_by_id.get(job["window_ids"][0], {}).get("text", "")
-            if text_key in seen_solo_text:
-                job_send_index.append(seen_solo_text[text_key])
-                continue
-            seen_solo_text[text_key] = len(send_jobs)
-        job_send_index.append(len(send_jobs))
-        send_jobs.append(job)
-
-    payloads = [job["payload"] for job in send_jobs]
-    html_results = run_packed_jobs(payloads, batch_chars, lang, target_lang, api_key, concurrency)
-
-    results_by_suspect = {}
-    for job, send_idx in zip(jobs, job_send_index):
-        html = html_results[send_idx]
-        if not html:
-            continue
-
-        if job["is_solo"]:
-            marker_res = {job["window_ids"][0]: html}
-        else:
-            flat = repair_corrupt_markers(html, "u", job["window_ids"])
-            marker_res = {
-                int(k.strip()): v for k, v in split_by_marker(flat, UNIT_MARKER_PATTERN).items()
-                if k.strip().isdigit()
-            }
-            if not all(wid in marker_res for wid in job["window_ids"]):
-                continue
-
-        if strict_marker and job["radius"] > 0 and job["suspect_id"] not in marker_res:
-            continue
-
-        text_raw = marker_res.get(job["suspect_id"])
-        if text_raw is not None:
-            unit = unit_by_id.get(job["suspect_id"])
-            if unit:
-                text = text_raw
-                expected = expected_cue_ids(unit)
-                if expected:
-                    text = repair_corrupt_markers(text, "c", expected)
-                if not CORRUPT_MARKER_SIGNATURE.search(text) and (job["radius"] == 0 or is_length_plausible(unit["text"], text)):
-                    results_by_suspect.setdefault(job["suspect_id"], {})[job["radius"]] = text
-
+    pending = [sid for sid in suspect_ids if sid in index]
+    skip_radius = {}
     recovered = {}
-    for suspect_id in suspect_ids:
-        for radius in ladder:
-            res = results_by_suspect.get(suspect_id, {}).get(radius)
-            if res is not None:
-                recovered[suspect_id] = res
-                break
+
+    for ladder_index, radius in enumerate(ladder):
+        if not pending:
+            break
+        next_radius = ladder[ladder_index + 1] if ladder_index + 1 < len(ladder) else None
+        active = [sid for sid in pending if skip_radius.get(sid) != radius]
+
+        jobs = {}
+        for suspect_id in active:
+            job = build_window_job(units, index, unit_by_id, suspect_id, radius, batch_chars)
+            if job:
+                jobs[suspect_id] = job
+        if not jobs:
+            continue
+
+        speculative_jobs = {}
+        if next_radius is not None:
+            for suspect_id in jobs:
+                spec_job = build_window_job(units, index, unit_by_id, suspect_id, next_radius, batch_chars)
+                if spec_job:
+                    speculative_jobs[suspect_id] = spec_job
+
+        primary_payloads = {sid: job["payload"] for sid, job in jobs.items()}
+        speculative_payloads = {sid: job["payload"] for sid, job in speculative_jobs.items()}
+        primary_results, speculative_results = run_packed_jobs_with_lookahead(
+            primary_payloads, speculative_payloads, batch_chars, lang, target_lang, api_key, concurrency
+        )
+
+        resolved_this_round = set()
+        for suspect_id, job in jobs.items():
+            html = primary_results.get(suspect_id)
+            if html is None:
+                continue
+            text = validate_window_job(job, html, radius, unit_by_id, strict_marker)
+            if text is not None:
+                recovered[suspect_id] = text
+                resolved_this_round.add(suspect_id)
+
+        for suspect_id, spec_job in speculative_jobs.items():
+            if suspect_id in resolved_this_round:
+                continue
+            html = speculative_results.get(suspect_id)
+            if html is None:
+                continue
+            text = validate_window_job(spec_job, html, next_radius, unit_by_id, strict_marker)
+            if text is not None:
+                recovered[suspect_id] = text
+                resolved_this_round.add(suspect_id)
+            else:
+                skip_radius[suspect_id] = next_radius
+
+        pending = [sid for sid in pending if sid not in resolved_this_round]
 
     return recovered
 
 
+def build_isolated_job(unit_id, anchor_lo, anchor_hi, radius, marker_order, marker_text_by_id, marker_term_matches, missing_ids, batch_chars):
+    lo = max(0, anchor_lo - radius)
+    hi = min(len(marker_order) - 1, anchor_hi + radius)
+    is_solo = (lo == hi)
+    sent_ids, inner_parts = [], []
+    for i in range(lo, hi + 1):
+        cid = marker_order[i]
+        text = marker_text_by_id.get(cid)
+        if text is None:
+            continue
+        matches = marker_term_matches.get(cid) or []
+        marker = "" if is_solo else wrap_marker(CUE_MARKER_TEMPLATE.format(cid))
+        inner_parts.append(f"{marker}{protect_content_html(text, matches)}")
+        sent_ids.append(cid)
+    payload = f"<div>{''.join(inner_parts)}</div>"
+    if not inner_parts or len(payload) > batch_chars:
+        return None
+    return {"unit_id": unit_id, "payload": payload, "sent_ids": sent_ids, "is_solo": is_solo, "missing_ids": missing_ids}
+
+
+def validate_isolated_job(job, html, remaining, marker_text_by_id, marker_term_matches, target_lang, extra_valid=None):
+    if job["is_solo"] and len(job["sent_ids"]) == 1:
+        marker_res = {job["sent_ids"][0]: html}
+    else:
+        flat = repair_corrupt_markers(html, "c", job["sent_ids"])
+        marker_res = split_cue_chunks(flat)
+
+    job_recovered = {}
+    for cid in job["missing_ids"]:
+        if cid not in remaining:
+            continue
+        cand = marker_res.get(cid)
+        if job["is_solo"] and cand:
+            cand = repair_corrupt_markers(cand, "c", [cid])
+        orig = marker_text_by_id.get(cid, "")
+        if cand and not CORRUPT_MARKER_SIGNATURE.search(cand) and is_length_plausible(orig, cand) and (extra_valid is None or extra_valid(orig, cand)):
+            job_recovered[cid] = apply_term_replacements(cand, marker_term_matches.get(cid) or [], target_lang)
+    return job_recovered
+
+
 def retry_isolated_cues_all(missing_by_unit, marker_order, marker_text_by_id, marker_term_matches, lang, target_lang, api_key, batch_chars, concurrency, extra_valid=None):
     position = {cid: i for i, cid in enumerate(marker_order)}
-    jobs = []
+    recovered_by_unit = {}
 
+    anchors, remaining_by_unit = {}, {}
     for unit_id, missing_ids in missing_by_unit.items():
         positions = sorted([position[cid] for cid in missing_ids if cid in position])
         if not positions:
             continue
+        anchors[unit_id] = (positions[0], positions[-1])
+        remaining_by_unit[unit_id] = set(missing_ids)
 
-        for radius in ISOLATED_RADIUS_LADDER:
-            lo = max(0, positions[0] - radius)
-            hi = min(len(marker_order) - 1, positions[-1] + radius)
-            is_solo = (lo == hi)
-            sent_ids = []
-            inner_parts = []
-            for i in range(lo, hi + 1):
-                cid = marker_order[i]
-                text = marker_text_by_id.get(cid)
-                if text is None:
-                    continue
-                matches = marker_term_matches.get(cid) or []
-                marker = "" if is_solo else wrap_marker(CUE_MARKER_TEMPLATE.format(cid))
-                inner_parts.append(f"{marker}{protect_content_html(text, matches)}")
-                sent_ids.append(cid)
+    skip_radius = {}
+    for ladder_index, radius in enumerate(ISOLATED_RADIUS_LADDER):
+        if not remaining_by_unit:
+            break
+        next_radius = ISOLATED_RADIUS_LADDER[ladder_index + 1] if ladder_index + 1 < len(ISOLATED_RADIUS_LADDER) else None
 
-            payload = f"<div>{''.join(inner_parts)}</div>"
-            if not payload or len(payload) > batch_chars:
+        jobs = {}
+        for unit_id, missing_ids in remaining_by_unit.items():
+            if skip_radius.get(unit_id) == radius:
                 continue
-
-            jobs.append({
-                "unit_id": unit_id,
-                "radius": radius,
-                "payload": payload,
-                "sent_ids": sent_ids,
-                "is_solo": is_solo,
-                "missing_ids": missing_ids
-            })
-
-    recovered_by_unit = {}
-    if not jobs:
-        return recovered_by_unit
-
-    send_jobs, job_send_index, seen_solo_text = [], [], {}
-    for job in jobs:
-        if job["is_solo"] and len(job["sent_ids"]) == 1:
-            text_key = marker_text_by_id.get(job["sent_ids"][0])
-            if text_key in seen_solo_text:
-                job_send_index.append(seen_solo_text[text_key])
-                continue
-            seen_solo_text[text_key] = len(send_jobs)
-        job_send_index.append(len(send_jobs))
-        send_jobs.append(job)
-
-    payloads = [job["payload"] for job in send_jobs]
-    html_results = run_packed_jobs(payloads, batch_chars, lang, target_lang, api_key, concurrency)
-
-    results_by_unit = {}
-    for job, send_idx in zip(jobs, job_send_index):
-        html = html_results[send_idx]
-        if not html:
+            anchor_lo, anchor_hi = anchors[unit_id]
+            job = build_isolated_job(unit_id, anchor_lo, anchor_hi, radius, marker_order, marker_text_by_id, marker_term_matches, list(missing_ids), batch_chars)
+            if job:
+                jobs[unit_id] = job
+        if not jobs:
             continue
-        if job["is_solo"] and len(job["sent_ids"]) == 1:
-            marker_res = {job["sent_ids"][0]: html}
-        else:
-            flat = repair_corrupt_markers(html, "c", job["sent_ids"])
-            marker_res = split_cue_chunks(flat)
 
-        job_recovered = {}
-        for cid in job["missing_ids"]:
-            cand = marker_res.get(cid)
-            if job["is_solo"] and cand:
-                cand = repair_corrupt_markers(cand, "c", [cid])
-            orig = marker_text_by_id.get(cid, "")
-            if cand and not CORRUPT_MARKER_SIGNATURE.search(cand) and is_length_plausible(orig, cand) and (extra_valid is None or extra_valid(orig, cand)):
-                job_recovered[cid] = apply_term_replacements(cand, marker_term_matches.get(cid) or [], target_lang)
+        speculative_jobs = {}
+        if next_radius is not None:
+            for unit_id in jobs:
+                anchor_lo, anchor_hi = anchors[unit_id]
+                spec_job = build_isolated_job(unit_id, anchor_lo, anchor_hi, next_radius, marker_order, marker_text_by_id, marker_term_matches, list(remaining_by_unit[unit_id]), batch_chars)
+                if spec_job:
+                    speculative_jobs[unit_id] = spec_job
 
-        if job_recovered:
-            results_by_unit.setdefault(job["unit_id"], {}).setdefault(job["radius"], {}).update(job_recovered)
+        primary_payloads = {uid: job["payload"] for uid, job in jobs.items()}
+        speculative_payloads = {uid: job["payload"] for uid, job in speculative_jobs.items()}
+        primary_results, speculative_results = run_packed_jobs_with_lookahead(
+            primary_payloads, speculative_payloads, batch_chars, lang, target_lang, api_key, concurrency
+        )
 
-    for unit_id, missing_ids in missing_by_unit.items():
-        current_missing = set(missing_ids)
-        final_recovered = {}
-        for radius in ISOLATED_RADIUS_LADDER:
-            if not current_missing:
-                break
-            res = results_by_unit.get(unit_id, {}).get(radius)
-            if not res:
+        for unit_id, job in jobs.items():
+            html = primary_results.get(unit_id)
+            remaining = remaining_by_unit.get(unit_id)
+            if html is None or remaining is None:
                 continue
-            for cid in list(current_missing):
-                if cid in res:
-                    final_recovered[cid] = res[cid]
-                    current_missing.remove(cid)
-        if final_recovered:
-            recovered_by_unit[unit_id] = final_recovered
+            job_recovered = validate_isolated_job(job, html, remaining, marker_text_by_id, marker_term_matches, target_lang, extra_valid)
+            if job_recovered:
+                recovered_by_unit.setdefault(unit_id, {}).update(job_recovered)
+                remaining -= job_recovered.keys()
+                if not remaining:
+                    del remaining_by_unit[unit_id]
+
+        for unit_id, spec_job in speculative_jobs.items():
+            html = speculative_results.get(unit_id)
+            remaining = remaining_by_unit.get(unit_id)
+            if html is None or remaining is None:
+                continue
+            job_recovered = validate_isolated_job(spec_job, html, remaining, marker_text_by_id, marker_term_matches, target_lang, extra_valid)
+            if job_recovered:
+                recovered_by_unit.setdefault(unit_id, {}).update(job_recovered)
+                remaining -= job_recovered.keys()
+                if not remaining:
+                    del remaining_by_unit[unit_id]
+            if unit_id in remaining_by_unit:
+                skip_radius[unit_id] = next_radius
 
     return recovered_by_unit
 
