@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: microsoft_client.py
-# Version: 1.7.2
+# Version: 1.7.3
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -110,7 +110,7 @@ def _marker_sort_key(marker_id):
     cue, _, sub = marker_id.partition(".")
     return (int(cue), int(sub) if sub else 0)
 
-def repair_corrupt_markers(text, prefix_char, expected_ids, source_text=""):
+def repair_corrupt_markers(text, prefix_char, expected_ids):
     if not text or not expected_ids:
         return text
 
@@ -120,14 +120,6 @@ def repair_corrupt_markers(text, prefix_char, expected_ids, source_text=""):
     if not pending:
         return text
 
-    native_source_ids = set()
-    if source_text:
-        raw_source = re.sub(r"\u27e6[a-zA-Z]\d+(?:\.\d+)?\u27e7", "", source_text)
-        for cid in pending:
-            pattern = rf"(?:\b|[^a-zA-Z0-9]){re.escape(prefix_char)}\s*{re.escape(cid)}(?:\b|[^a-zA-Z0-9])"
-            if re.search(pattern, raw_source, re.IGNORECASE):
-                native_source_ids.add(cid)
-
     corrupt_brackets = "\u27e6\u27e7\\\ufffd/[]{}<>()\u3010\u3011\u3016\u3017\u3014\u3015"
     prefix_chars = prefix_char.lower() + prefix_char.upper()
     corrupt_chars = corrupt_brackets + " " + prefix_chars
@@ -136,7 +128,7 @@ def repair_corrupt_markers(text, prefix_char, expected_ids, source_text=""):
     def replacer(m):
         before, num_str, after = m.group(1), m.group(2), m.group(3)
         cid = num_str
-        if cid in pending and cid not in native_source_ids:
+        if cid in pending:
             clean_before = before
             while clean_before and clean_before[-1] in corrupt_chars:
                 clean_before = clean_before[:-1]
@@ -167,7 +159,7 @@ def repair_corrupt_markers(text, prefix_char, expected_ids, source_text=""):
         empty_pattern = re.compile(rf"(?:[\u27e6\\\ufffd]{{1,3}}{prefix_char}[\u27e7\\\ufffd]{{1,3}}|[\u27e6\u27e7\\\ufffd]{{2,4}})", re.IGNORECASE)
         empty_matches = list(empty_pattern.finditer(text))
         if 0 < len(empty_matches) <= len(pending):
-            pending_list = sorted((cid for cid in pending if cid not in native_source_ids), key=_marker_sort_key)
+            pending_list = sorted(pending, key=_marker_sort_key)
             def empty_replacer(m):
                 if pending_list:
                     return f"\u27e6{prefix_char}{pending_list.pop(0)}\u27e7"
