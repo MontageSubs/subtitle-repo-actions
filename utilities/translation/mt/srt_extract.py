@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: srt_extract.py
-# Version: 2.6.3
+# Version: 2.6.4
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -162,11 +162,14 @@ STYLE_OPEN_ALT = r"(?:<(?:i|b|u)>)"
 STYLE_CLOSE_ALT = r"(?:</(?:i|b|u)>)"
 FULL_WRAP_PATTERN = re.compile(r"^<(i|b|u)>(.*)</\1>$", re.IGNORECASE | re.DOTALL)
 WHITESPACE_PATTERN = re.compile(r"\s+")
-CLOSING_WRAP_ALT = r"[’”\"')\]」』】）]*"
-TERMINAL_PUNCT_PATTERN = re.compile(rf"[.!?。！？]{CLOSING_WRAP_ALT}{STYLE_CLOSE_ALT}*\s*$", re.IGNORECASE)
-TRAILING_ELLIPSIS_PATTERN = re.compile(rf"(\.{{2,}}|…){CLOSING_WRAP_ALT}{STYLE_CLOSE_ALT}*\s*$", re.IGNORECASE)
-TRAILING_CUTOFF_PATTERN = re.compile(rf"-{{2,}}{STYLE_CLOSE_ALT}*\s*$", re.IGNORECASE)
-TRAILING_SINGLE_CUTOFF_PATTERN = re.compile(rf"(?<!-)-{STYLE_CLOSE_ALT}*\s*$", re.IGNORECASE)
+CLOSE_QUOTE_CHARS = "\"'\u201d\u2019\u00bb\u203a\u300d\u300f\u301e\u301f"
+CLOSE_BRACKET_CHARS = ")\\]}>\uff09\uff3d\uff5d\uff1e\u3015\u3017\u3019\u301b\u3009\u300b\u3011\u27e9\u27eb"
+DECORATION_CHARS = "*\u2020\u2021\u203b\u2605\u2606"
+CLOSING_WRAP_ALT = rf"[{CLOSE_QUOTE_CHARS}{CLOSE_BRACKET_CHARS}{DECORATION_CHARS}]*"
+TERMINAL_PUNCT_PATTERN = re.compile(rf"[.!?\u2026\u22ef\u3002\uff01\uff1f]{CLOSING_WRAP_ALT}{STYLE_CLOSE_ALT}*\s*$", re.IGNORECASE)
+TRAILING_ELLIPSIS_PATTERN = re.compile(rf"(\.{{2,}}|\u2026|\u22ef){STYLE_CLOSE_ALT}*\s*$", re.IGNORECASE)
+TRAILING_CUTOFF_PATTERN = re.compile(rf"-{{2,}}{CLOSING_WRAP_ALT}{STYLE_CLOSE_ALT}*\s*$", re.IGNORECASE)
+TRAILING_SINGLE_CUTOFF_PATTERN = re.compile(rf"(?<!-)-{CLOSING_WRAP_ALT}{STYLE_CLOSE_ALT}*\s*$", re.IGNORECASE)
 DIALOGUE_DASH_PATTERN = re.compile(rf"(?:^|(?<=\s)){STYLE_TAG_ALT}*-(?!-){STYLE_TAG_ALT}*\s?", re.IGNORECASE)
 STUTTER_WORD_PATTERN = re.compile(r"(?<![A-Za-z])([A-Za-z])-\1(?![A-Za-z])", re.IGNORECASE)
 STUTTER_PREFIX_PATTERN = re.compile(r"(?<![A-Za-z])([A-Za-z])-(?=\1[a-z])", re.IGNORECASE)
@@ -340,15 +343,6 @@ def first_letter_is_lower(text):
     return bool(rest) and rest[0].islower()
 
 
-def first_letter_case(text):
-    text = STYLE_TAG_LEADING_PATTERN.sub("", text)
-    match = LEADING_NON_LETTER_PATTERN.match(text)
-    rest = text[match.end():]
-    if not rest or not rest[0].isalpha():
-        return None
-    return "lower" if rest[0].islower() else "upper"
-
-
 def strip_tags_preserving_style(line):
     preserved = []
 
@@ -502,10 +496,7 @@ def merge_reason(prev_seg, curr_seg, latin_source=True):
         return None
     if has_terminal_punct(prev_seg["text"]):
         return None
-    case = first_letter_case(curr_seg["text"])
-    if case == "upper":
-        return None
-    return "gap" if gap <= GAP_THRESHOLD_MS or case == "lower" else None
+    return "gap" if gap <= GAP_THRESHOLD_MS or first_letter_is_lower(curr_seg["text"]) else None
 
 
 def find_stutter_resolution(text, glossary):

@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: google_client.py
-# Version: 2.17.0
+# Version: 2.17.1
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -141,8 +141,8 @@ class LanguageResolver:
                 log(f"auto-detected {self.label} language: {detected} (pinned for subsequent calls)")
 
 ALIGNMENT_MODE = "marker"
-GROUP_MARKER_TEMPLATE = "\u27e6g{}\u27e7"
-GROUP_MARKER_PATTERN = re.compile(r"\u27e6g([^\u27e6\u27e7]+)\u27e7")
+GROUP_MARKER_TEMPLATE = "\u27e6t{}\u27e7"
+GROUP_MARKER_PATTERN = re.compile(r"\u27e6t([^\u27e6\u27e7]+)\u27e7")
 CUE_MARKER_TEMPLATE = "\u27e6c{}\u27e7"
 CUE_MARKER_PATTERN = re.compile(r"\u27e6c(\d+(?:\.\d+)?)\u27e7")
 CONTENT_CHAR_PATTERN = re.compile(r"\w", re.UNICODE)
@@ -564,10 +564,30 @@ def extract_first_marker_anchors(html, expected_ids):
     return anchors
 
 
-def parse_by_reconciled_boundaries(html, boundaries, source_by_index=None):
+DIV_OPEN_PATTERN = re.compile(r"<div[^>]*>")
+
+
+def collect_boundary_stops(html, boundaries):
+    stops = [start for start, _, _ in boundaries]
+    for m in SPAN_OPEN_PATTERN.finditer(html):
+        if not m.group(1).isdigit():
+            stops.append(m.start())
+    for m in GROUP_MARKER_PATTERN.finditer(html):
+        if not m.group(1).isdigit():
+            stops.append(m.start())
+    for m in DIV_OPEN_PATTERN.finditer(html):
+        stops.append(m.start())
+    stops.sort()
+    return stops
+
+
+def parse_by_reconciled_boundaries(html, boundaries, stops, source_by_index=None):
     result = {}
-    for i, (start, end, idx) in enumerate(boundaries):
-        next_boundary = boundaries[i + 1][0] if i + 1 < len(boundaries) else len(html)
+    stop_cursor = 0
+    for start, end, idx in boundaries:
+        while stop_cursor < len(stops) and stops[stop_cursor] <= end:
+            stop_cursor += 1
+        next_boundary = stops[stop_cursor] if stop_cursor < len(stops) else len(html)
         if next_boundary < end:
             raw = ""
         else:
@@ -584,8 +604,9 @@ def parse_by_reconciled_boundaries(html, boundaries, source_by_index=None):
 def parse_translated_html(html, expected_ids=None, source_by_index=None):
     if ALIGNMENT_MODE == "marker":
         if expected_ids:
-            html = repair_corrupt_markers(html, "g", expected_ids)
-        result = parse_by_reconciled_boundaries(html, extract_first_marker_anchors(html, expected_ids), source_by_index)
+            html = repair_corrupt_markers(html, "t", expected_ids)
+        anchors = extract_first_marker_anchors(html, expected_ids)
+        result = parse_by_reconciled_boundaries(html, anchors, collect_boundary_stops(html, anchors), source_by_index)
     else:
         result = parse_by_spans(html, source_by_index)
     if DEBUG_MODE and not result:
@@ -849,6 +870,18 @@ def flatten_units(units, chapter_of_unit):
     return items, list(chapter_items.values())
 
 
+_TERM_PATTERN_CACHE = {}
+
+
+def _term_pattern(source_text, boundary):
+    key = (boundary, source_text)
+    pattern = _TERM_PATTERN_CACHE.get(key)
+    if pattern is None:
+        pattern = re.compile(boundary + re.escape(source_text) + boundary)
+        _TERM_PATTERN_CACHE[key] = pattern
+    return pattern
+
+
 def apply_term_replacements(text, term_matches, target_lang):
     if not text or not term_matches:
         return text
@@ -857,7 +890,7 @@ def apply_term_replacements(text, term_matches, target_lang):
     for match in term_matches:
         seen.setdefault(match["matched"], match["target"])
     for source_text, target_text in sorted(seen.items(), key=lambda kv: -len(kv[0])):
-        pattern = re.compile(boundary + re.escape(source_text) + boundary)
+        pattern = _term_pattern(source_text, boundary)
         text = pattern.sub(lambda _m, t=target_text: t, text)
     return text
 

@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: microsoft_client.py
-# Version: 1.8
+# Version: 1.8.1
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -80,8 +80,8 @@ DEBUG_RAW_OUT_FILE = None
 
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36 Edg/133.0.0.0"
 
-GROUP_MARKER_TEMPLATE = "\u27e6m{}\u27e7"
-GROUP_MARKER_PATTERN = re.compile(r"\u27e6m([^\u27e6\u27e7]+)\u27e7", re.IGNORECASE)
+GROUP_MARKER_TEMPLATE = "\u27e6t{}\u27e7"
+GROUP_MARKER_PATTERN = re.compile(r"\u27e6t([^\u27e6\u27e7]+)\u27e7", re.IGNORECASE)
 UNIT_MARKER_TEMPLATE = "\u27e6u{}\u27e7"
 UNIT_MARKER_PATTERN = re.compile(r"\u27e6u([^\u27e6\u27e7]+)\u27e7", re.IGNORECASE)
 CUE_MARKER_TEMPLATE = "\u27e6c{}\u27e7"
@@ -664,7 +664,7 @@ def translate_batch(batch, lang, target_lang, context_html=None):
                 if r_item.get("translations"):
                     html = r_item["translations"][0]["text"]
                     segment_ids = segment_ids_list[seg_idx] if seg_idx < len(segment_ids_list) else list(expected_ids)
-                    marker_res = parse_translated_html(html, GROUP_MARKER_PATTERN, "m", segment_ids)
+                    marker_res = parse_translated_html(html, GROUP_MARKER_PATTERN, "t", segment_ids)
                     for idx, text in marker_res.items():
                         if idx in expected_ids:
                             result[idx] = text
