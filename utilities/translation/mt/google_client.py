@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: google_client.py
-# Version: 2.17.1
+# Version: 2.17.2
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -987,6 +987,34 @@ def is_leaked_untranslated(original, translated, source_lang, target_lang):
     return norm_orig == normalize_for_equality(translated)
 
 
+def find_latin_word_leaks(text):
+    return SCRIPT_LEAK_PATTERNS["latin"].findall(text or "")
+
+
+def repair_latin_word_leaks(results, lang, target_lang, api_key, batch_chars, concurrency):
+    if script_of(lang.current()) != "latin" or script_of(target_lang) != "cjk":
+        return
+    leaks_by_uid = {uid: words for uid, text in results.items() if text
+                    for words in [find_latin_word_leaks(text)] if words}
+    if not leaks_by_uid:
+        return
+
+    words = sorted({word for words in leaks_by_uid.values() for word in words})
+    payloads = [f"<div>{escape_html(word)}</div>" for word in words]
+    html_results = run_packed_jobs(payloads, batch_chars, lang, target_lang, api_key, concurrency)
+    translated = {word: html for word, html in zip(words, html_results) if html and not find_latin_word_leaks(html)}
+    if not translated:
+        return
+
+    for uid, leaked_words in leaks_by_uid.items():
+        text = results[uid]
+        for word in dict.fromkeys(leaked_words):
+            replacement = translated.get(word)
+            if replacement:
+                text = text.replace(word, replacement)
+        results[uid] = text
+
+
 def unit_cue_ids(unit):
     return [s["id"] for s in unit.get("spans", [])]
 
@@ -1074,7 +1102,33 @@ def run_packed_jobs(payloads, max_chars_per_request, lang, target_lang, api_key,
     return results
 
 
+def run_packed_jobs_deduped(payloads, max_chars_per_request, lang, target_lang, api_key, concurrency):
+    unique_payloads, slot_of, index_by_payload = [], [], {}
+    for payload in payloads:
+        slot = index_by_payload.setdefault(payload, len(unique_payloads))
+        if slot == len(unique_payloads):
+            unique_payloads.append(payload)
+        slot_of.append(slot)
+    unique_results = run_packed_jobs(unique_payloads, max_chars_per_request, lang, target_lang, api_key, concurrency)
+    return [unique_results[slot] for slot in slot_of]
+
+
+def dedupe_by_payload(payload_by_key):
+    unique, alias, seen = {}, {}, {}
+    for key, payload in payload_by_key.items():
+        rep = seen.get(payload)
+        if rep is None:
+            seen[payload] = key
+            unique[key] = payload
+        else:
+            alias[key] = rep
+    return unique, alias
+
+
 def run_packed_jobs_with_lookahead(primary, speculative, max_chars_per_request, lang, target_lang, api_key, concurrency):
+    primary, primary_alias = dedupe_by_payload(primary)
+    speculative, speculative_alias = dedupe_by_payload(speculative)
+
     primary_results, speculative_results = {}, {}
     suspect_ids = list(primary.keys())
     if not suspect_ids:
@@ -1122,6 +1176,13 @@ def run_packed_jobs_with_lookahead(primary, speculative, max_chars_per_request, 
         futures = [executor.submit(process_chunk, ci, chunk_idx_list) for ci, chunk_idx_list in enumerate(chunks)]
         for future in as_completed(futures):
             future.result()
+
+    for dup_id, rep_id in primary_alias.items():
+        if rep_id in primary_results:
+            primary_results[dup_id] = primary_results[rep_id]
+    for dup_id, rep_id in speculative_alias.items():
+        if rep_id in speculative_results:
+            speculative_results[dup_id] = speculative_results[rep_id]
 
     return primary_results, speculative_results
 
@@ -1364,7 +1425,7 @@ def translate_units(units, chapters, cues, lang, target_lang, api_key, batch_cha
     missing_units = [unit for unit in pending if unit["id"] in initial_missing_ids]
     if missing_units:
         payloads = [f"<div>{protect_content_html(u['text'], u.get('term_matches') or [])}</div>" for u in missing_units]
-        html_results = run_packed_jobs(payloads, batch_chars, lang, target_lang, api_key, concurrency)
+        html_results = run_packed_jobs_deduped(payloads, batch_chars, lang, target_lang, api_key, concurrency)
         for unit, html in zip(missing_units, html_results):
             if not html:
                 continue
@@ -1384,7 +1445,7 @@ def translate_units(units, chapters, cues, lang, target_lang, api_key, batch_cha
 
     if untranslated_jobs:
         payloads = [f"<div>{protect_content_html(u['text'], u.get('term_matches') or [])}</div>" for u in untranslated_jobs]
-        html_results = run_packed_jobs(payloads, batch_chars, lang, target_lang, api_key, concurrency)
+        html_results = run_packed_jobs_deduped(payloads, batch_chars, lang, target_lang, api_key, concurrency)
         for unit, html in zip(untranslated_jobs, html_results):
             if html:
                 retried = html
@@ -1479,6 +1540,8 @@ def translate_units(units, chapters, cues, lang, target_lang, api_key, batch_cha
             unit = unit_by_id[uid]
             results[uid] = next(iter(r_cues.values())) if is_single_plain_cue(unit) else patch_missing_cues(results[uid], expected_cue_ids(unit), r_cues)
             log(f"untranslated-leak retry for unit {uid}: recovered cues {sorted(r_cues, key=_marker_sort_key)}")
+
+    repair_latin_word_leaks(results, lang, target_lang, api_key, batch_chars, concurrency)
 
     skipped = [uid for uid, text in results.items() if text is None]
     translations = {str(uid): sanitize_style_tags(text) for uid, text in results.items() if text is not None}
