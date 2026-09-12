@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: bilingual_merge.py
-# Version: 2.9.4
+# Version: 2.9.5
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -96,7 +96,7 @@ def pip_install(package):
 
 
 def is_chinese_target(target_lang):
-    return (target_lang or "").split("-")[0].lower() == "zh"
+    return (target_lang or "").split("-")[0].lower() in ("zh", "yue")
 
 
 READING_SPEED_LIMITS = {"cjk": {"cps": 9, "max_chars_per_line": 16}, "default": {"cps": 17, "max_chars_per_line": 42}}
@@ -177,6 +177,22 @@ MARKER_PATTERN = re.compile(r"\u27e6c(\d+(?:\.\d+)?)\u27e7")
 STYLE_TAG_PATTERN = re.compile(r"</?(?:i|b|u)>", re.IGNORECASE)
 STYLE_TAG_SPAN_PATTERN = re.compile(r"<(i|b|u)>.*?</\1>", re.IGNORECASE | re.DOTALL)
 RESIDUAL_MARKER_PATTERN = re.compile(r"\s*\u27e6[^\u27e6\u27e7]*\u27e7\s*")
+VALID_CUE_MARKER_PATTERN = re.compile(r"\u27e6c\d+(?:\.\d+)?\u27e7", re.IGNORECASE)
+FOREIGN_MARKER_PATTERN = re.compile(r"\u27e6[^\u27e6\u27e7]*\u27e7|[\u27e6\u27e7]")
+MARKER_PLACEHOLDER_PATTERN = re.compile(r"\u0002(\d+)\u0002")
+
+
+def strip_foreign_markers(text):
+    if "\u27e6" not in text and "\u27e7" not in text:
+        return text
+    preserved = []
+
+    def guard(m):
+        preserved.append(m.group(0))
+        return f"\u0002{len(preserved) - 1}\u0002"
+
+    cleaned = FOREIGN_MARKER_PATTERN.sub("", VALID_CUE_MARKER_PATTERN.sub(guard, text))
+    return MARKER_PLACEHOLDER_PATTERN.sub(lambda m: preserved[int(m.group(1))], cleaned)
 
 
 def log(message):
@@ -213,7 +229,12 @@ def strip_terminator(match):
 
 
 CJK_OPEN_QUOTE, CJK_CLOSE_QUOTE = "“", "”"
-TARGET_QUOTE_PAIRS = {"zh": (CJK_OPEN_QUOTE, CJK_CLOSE_QUOTE)}
+CJK_ANGLE_OPEN_QUOTE, CJK_ANGLE_CLOSE_QUOTE = "「", "」"
+TARGET_QUOTE_PAIRS = {
+    "zh": (CJK_OPEN_QUOTE, CJK_CLOSE_QUOTE),
+    "zh-hant": (CJK_ANGLE_OPEN_QUOTE, CJK_ANGLE_CLOSE_QUOTE),
+    "yue": (CJK_ANGLE_OPEN_QUOTE, CJK_ANGLE_CLOSE_QUOTE),
+}
 MUSIC_NOTE_CHARS = "\u2669\u266a\u266b\u266c"
 MUSIC_NOTE_PATTERN = re.compile(f"[{MUSIC_NOTE_CHARS}]")
 MUSIC_NOTE_LEADING_GAP_PATTERN = re.compile(f"(?<=\\S)([{MUSIC_NOTE_CHARS}])")
@@ -239,7 +260,8 @@ def format_music_line(text):
 
 
 def target_quote_pair(target_lang):
-    return TARGET_QUOTE_PAIRS.get((target_lang or "").split("-")[0].lower())
+    lc = (target_lang or "").lower()
+    return TARGET_QUOTE_PAIRS.get(lc) or TARGET_QUOTE_PAIRS.get(lc.split("-")[0])
 
 
 def rectify_translation_quotes(translated_text, original_text, target_lang):
@@ -428,8 +450,16 @@ GENERAL_STRONG_PUNCT_PATTERN = re.compile(r"[，,、；;。.!?！？：:]+[" + C
 GENERAL_WEAK_PUNCT_PATTERN = re.compile(r"(?:\.{2,}|—+|…+)[" + CLOSING_TAIL_CHARS + r"]*")
 LEFT_CUT_PATTERN = re.compile(r"[“「『（([{＜〈《【〔„‚«‹¿¡]")
 BOOK_TITLE_PATTERN = re.compile(r"《[^《》]*》")
-EMBEDDED_QUOTE_PATTERN = re.compile(r"“[^“”]*”")
 EMBEDDED_QUOTE_MAX_CHARS = 16
+EMBEDDED_QUOTE_PATTERN_CACHE = {}
+
+
+def embedded_quote_pattern(open_q, close_q):
+    pattern = EMBEDDED_QUOTE_PATTERN_CACHE.get((open_q, close_q))
+    if pattern is None:
+        pattern = re.compile(f"{open_q}[^{open_q}{close_q}]*{close_q}")
+        EMBEDDED_QUOTE_PATTERN_CACHE[(open_q, close_q)] = pattern
+    return pattern
 ORIGINAL_PUNCT_TOLERANCE = {"trail_off": 0.60, "comma": 0.30, "period": 0.25, "colon": 0.25}
 INFERRED_PUNCT_TOLERANCE = 0.15
 INFERRED_WEAK_PUNCT_TOLERANCE = 0.06
@@ -448,8 +478,10 @@ def find_protected_spans(text, glossary_terms, target_lang=None):
     spans.extend((m.start(), m.end()) for m in LATIN_WORD_PATTERN.finditer(text))
     spans.extend((m.start(), m.end()) for m in MARKER_PATTERN.finditer(text))
     spans.extend((m.start(), m.end()) for m in ELLIPSIS_PATTERN.finditer(text))
-    if target_quote_pair(target_lang):
-        spans.extend((m.start(), m.end()) for m in EMBEDDED_QUOTE_PATTERN.finditer(text)
+    quotes = target_quote_pair(target_lang)
+    if quotes:
+        pattern = embedded_quote_pattern(*quotes)
+        spans.extend((m.start(), m.end()) for m in pattern.finditer(text)
                      if m.start() > 0 and m.end() < len(text) and m.end() - m.start() <= EMBEDDED_QUOTE_MAX_CHARS)
     for term in glossary_terms:
         if not term:
@@ -691,7 +723,8 @@ def has_content(text):
 
 
 def proportional_split(text, spans, target_lang):
-    boundaries = word_boundaries(text, target_lang)
+    title_spans = [(m.start(), m.end()) for m in BOOK_TITLE_PATTERN.finditer(text)]
+    boundaries = [b for b in word_boundaries(text, target_lang) if not inside_protected_span(b, title_spans)]
     if len(boundaries) <= 2:
         return None
     weights = [effective_length(s["text"]) for s in spans]
@@ -833,7 +866,7 @@ def build_bilingual_cues(cues, units, translations, target_lang, source_lang=Non
                 cue_segments.setdefault(span["id"], []).append((span.get("dash_index", 0), None))
             continue
         original_text = "".join(span["text"] for span in spans)
-        translated = strip_unsourced_brackets(original_text, translated)
+        translated = strip_unsourced_brackets(original_text, strip_foreign_markers(translated))
         translated = rectify_translation_quotes(translated, original_text, target_lang)
         protected = find_protected_spans(translated, glossary_terms, target_lang)
         parts, method = split_translation(translated, spans, protected, target_lang, source_lang)

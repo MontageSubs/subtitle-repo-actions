@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: google_client.py
-# Version: 2.17.2
+# Version: 2.17.3
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -154,6 +154,12 @@ CORRUPT_MARKER_SIGNATURE = re.compile(UNCLOSED_MARKER_SIGNATURE + "|" + MISSING_
 ANY_MARKER_PATTERN = re.compile(r"\u27e6[^\u27e6\u27e7]*\u27e7")
 CORRUPT_MARKER_PATTERN = re.compile(r"\u27e6[a-zA-Z0-9.]+(?!\u27e7)|(?<!\u27e6)[a-zA-Z0-9.]+\u27e7")
 MARKER_BRACKET_PATTERN = re.compile(r"[\u27e6\u27e7]")
+MARKER_WHITESPACE_PATTERN = re.compile(r"\u27e6\s*([a-zA-Z]{1,3})\s*(\d+(?:\.\d+)?)\s*\u27e7")
+
+def normalize_marker_whitespace(text):
+    if "\u27e6" not in text:
+        return text
+    return MARKER_WHITESPACE_PATTERN.sub(lambda m: f"\u27e6{m.group(1)}{m.group(2)}\u27e7", text)
 
 def sanitize_markers_against_source(text, source_text=""):
     if not text:
@@ -212,7 +218,10 @@ def _marker_sort_key(marker_id):
 
 
 def repair_corrupt_markers(text, prefix_char, expected_ids):
-    if not text or not expected_ids:
+    if not text:
+        return text
+    text = normalize_marker_whitespace(text)
+    if not expected_ids:
         return text
 
     valid_pattern = re.compile(rf"\u27e6{prefix_char}(\d+(?:\.\d+)?)\u27e7", re.IGNORECASE)
@@ -295,7 +304,7 @@ LANGUAGE_SCRIPTS = {
     "nl": "latin", "pl": "latin", "sv": "latin", "da": "latin", "no": "latin", "fi": "latin",
     "ro": "latin", "cs": "latin", "hu": "latin", "tr": "latin", "id": "latin", "vi": "latin",
     "ms": "latin", "tl": "latin", "ca": "latin", "eu": "latin", "gl": "latin", "la": "latin",
-    "zh": "cjk", "ja": "cjk", "ko": "cjk",
+    "zh": "cjk", "ja": "cjk", "ko": "cjk", "yue": "cjk",
     "ru": "cyrillic", "uk": "cyrillic", "bg": "cyrillic",
     "ar": "arabic", "fa": "arabic", "ur": "arabic",
     "hi": "devanagari", "ne": "devanagari", "mr": "devanagari",

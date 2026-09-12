@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: microsoft_client.py
-# Version: 1.8.2
+# Version: 1.8.3
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -95,6 +95,12 @@ CORRUPT_MARKER_SIGNATURE = re.compile(
 )
 MARKER_BRACKET_PATTERN = re.compile(r"[\u27e6\u27e7]")
 MARKER_DEBRIS_PATTERN = re.compile(r"\\+[0-9\uFFFD]{0,6}[muc](?![a-zA-Z0-9])")
+MARKER_WHITESPACE_PATTERN = re.compile(r"\u27e6\s*([a-zA-Z]{1,3})\s*(\d+(?:\.\d+)?)\s*\u27e7")
+
+def normalize_marker_whitespace(text):
+    if "\u27e6" not in text:
+        return text
+    return MARKER_WHITESPACE_PATTERN.sub(lambda m: f"\u27e6{m.group(1)}{m.group(2)}\u27e7", text)
 
 def strip_marker_debris(text):
     return MARKER_DEBRIS_PATTERN.sub("", text)
@@ -111,7 +117,10 @@ def _marker_sort_key(marker_id):
     return (int(cue), int(sub) if sub else 0)
 
 def repair_corrupt_markers(text, prefix_char, expected_ids):
-    if not text or not expected_ids:
+    if not text:
+        return text
+    text = normalize_marker_whitespace(text)
+    if not expected_ids:
         return text
 
     valid_pattern = re.compile(rf"\u27e6{prefix_char}(\d+(?:\.\d+)?)\u27e7", re.IGNORECASE)
@@ -245,7 +254,7 @@ LANGUAGE_SCRIPTS = {
     "nl": "latin", "pl": "latin", "sv": "latin", "da": "latin", "no": "latin", "fi": "latin",
     "ro": "latin", "cs": "latin", "hu": "latin", "tr": "latin", "id": "latin", "vi": "latin",
     "ms": "latin", "tl": "latin", "ca": "latin", "eu": "latin", "gl": "latin", "la": "latin",
-    "zh": "cjk", "ja": "cjk", "ko": "cjk",
+    "zh": "cjk", "ja": "cjk", "ko": "cjk", "yue": "cjk",
     "ru": "cyrillic", "uk": "cyrillic", "bg": "cyrillic",
     "ar": "arabic", "fa": "arabic", "ur": "arabic",
     "hi": "devanagari", "ne": "devanagari", "mr": "devanagari",
@@ -391,9 +400,7 @@ def content_length(text):
 
 def script_of(lang):
     if not lang: return None
-    normalized = lang.lower().split("-")[0]
-    if normalized == "zh": return "cjk"
-    return LANGUAGE_SCRIPTS.get(normalized)
+    return LANGUAGE_SCRIPTS.get(lang.lower().split("-")[0])
 
 def wrap_marker(text):
     return NO_TRANSLATE_TEMPLATE.format(text) if WRAP_MARKERS else text
