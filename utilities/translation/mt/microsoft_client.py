@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: microsoft_client.py
-# Version: 1.8.3
+# Version: 1.8.4
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -129,37 +129,29 @@ def repair_corrupt_markers(text, prefix_char, expected_ids):
     if not pending:
         return text
 
-    corrupt_brackets = "\u27e6\u27e7\\\ufffd/[]{}<>()\u3010\u3011\u3016\u3017\u3014\u3015"
     prefix_chars = prefix_char.lower() + prefix_char.upper()
-    corrupt_chars = corrupt_brackets + " " + prefix_chars
     trailing_punctuation = ":,，：、-—.。 "
+    prefix_trim_pattern = re.compile(rf"[{re.escape(prefix_chars)}\s]+$")
 
     def replacer(m):
         before, num_str, after = m.group(1), m.group(2), m.group(3)
         cid = num_str
-        if cid in pending:
-            clean_before = before
-            while clean_before and clean_before[-1] in corrupt_chars:
-                clean_before = clean_before[:-1]
+        if cid not in pending:
+            return m.group(0)
 
-            clean_after = after
-            while clean_after and clean_after[0] in corrupt_chars:
-                clean_after = clean_after[1:]
+        before_str = before.strip().lower()
+        open_at = before.rfind("\u27e6")
+        close_at = after.find("\u27e7")
+        is_marker = before_str.endswith(prefix_char.lower()) or open_at != -1 or close_at != -1
+        if not is_marker:
+            return m.group(0)
 
-            is_marker = False
-            before_str = before.strip().lower()
-            if before_str.endswith(prefix_char.lower()):
-                is_marker = True
-            else:
-                if any(ch in before + after for ch in corrupt_brackets):
-                    is_marker = True
-
-            if is_marker:
-                pending.discard(cid)
-                while clean_after and clean_after[0] in trailing_punctuation:
-                    clean_after = clean_after[1:]
-                return f"{clean_before}\u27e6{prefix_char}{cid}\u27e7{clean_after}"
-        return m.group(0)
+        pending.discard(cid)
+        clean_before = before[:open_at] if open_at != -1 else prefix_trim_pattern.sub("", before)
+        clean_after = after[close_at + 1:] if close_at != -1 else after.lstrip()
+        while clean_after and clean_after[0] in trailing_punctuation:
+            clean_after = clean_after[1:]
+        return f"{clean_before}\u27e6{prefix_char}{cid}\u27e7{clean_after}"
 
     pattern = re.compile(r"([^\d\s]*\s*)(\d+(?:\.\d+)?)(\s*[^\d\s]*)")
     text = pattern.sub(replacer, text)
