@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: google_client.py
-# Version: 2.17.4
+# Version: 2.18
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -139,6 +139,21 @@ class LanguageResolver:
             if self._detected is None:
                 self._detected = detected
                 log(f"auto-detected {self.label} language: {detected} (pinned for subsequent calls)")
+
+class AutoLanguage:
+    def current(self):
+        return "auto"
+
+    def observe(self, detected):
+        return None
+
+
+AUTO_LANGUAGE = AutoLanguage()
+
+
+def route_language(auto, lang):
+    return AUTO_LANGUAGE if auto else lang
+
 
 ALIGNMENT_MODE = "marker"
 GROUP_MARKER_TEMPLATE = "\u27e6t{}\u27e7"
@@ -802,13 +817,21 @@ def script_of(lang):
     return LANGUAGE_SCRIPTS.get((lang or "").split("-")[0].lower())
 
 
+STYLE_AND_TAG_STRIP_PATTERN = re.compile(r"\{\\[^}]*\}|<[^>]*>|\u27e6[^\u27e6\u27e7]*\u27e7")
+UNTRANSLATED_WORD_PAIR_THRESHOLD = 2
+
+
 def is_untranslated(text, source_lang, target_lang):
     if not text:
         return False
     source_script, target_script = script_of(source_lang), script_of(target_lang)
     if not source_script or not target_script or source_script == target_script:
         return False
-    return len(SCRIPT_LEAK_PATTERNS[source_script].findall(text)) > 1
+    clean = STYLE_AND_TAG_STRIP_PATTERN.sub("", text).strip()
+    if not clean:
+        return False
+    word_pair = source_script in WORD_BASED_SCRIPTS and target_script in WORD_BASED_SCRIPTS
+    return len(SCRIPT_LEAK_PATTERNS[source_script].findall(clean)) > (UNTRANSLATED_WORD_PAIR_THRESHOLD if word_pair else 0)
 
 
 def build_protected_spans(text, term_matches):
@@ -916,6 +939,10 @@ def is_length_plausible(source_text, translated_text):
     return LENGTH_RATIO_MIN <= ratio <= LENGTH_RATIO_MAX
 
 
+def is_cue_addressable_span(unit, span):
+    return span.get("boundary") == "marker" or (len(unit.get("spans") or []) == 1 and unit.get("resolved") is None)
+
+
 def expected_cue_ids(unit):
     return [s["marker_id"] for s in unit["spans"] if s.get("boundary") == "marker"]
 
@@ -961,12 +988,16 @@ def has_translatable_content(text, term_matches):
 NOISE_CATEGORY_PREFIXES = ("P", "N")
 
 
+MUSIC_NOTE_CHARS = "\u2669\u266a\u266b\u266c"
+
+
 def normalize_for_equality(text):
-    return "".join(ch for ch in (text or "") if not ch.isspace() and unicodedata.category(ch)[0] not in NOISE_CATEGORY_PREFIXES)
+    stripped = STYLE_TAG_PATTERN.sub("", text or "")
+    return "".join(ch for ch in stripped if not ch.isspace() and ch not in MUSIC_NOTE_CHARS and unicodedata.category(ch)[0] not in NOISE_CATEGORY_PREFIXES)
 
 
 def word_count(text):
-    return len(re.findall(r"\w+", text or "", re.UNICODE))
+    return len(re.findall(r"\w+", STYLE_TAG_PATTERN.sub("", text or ""), re.UNICODE))
 
 
 def is_leaked_untranslated(original, translated, source_lang, target_lang):
@@ -1249,7 +1280,7 @@ def retry_windowed_all(units, suspect_ids, lang, target_lang, api_key, batch_cha
     for ladder_index, radius in enumerate(ladder):
         if not pending:
             break
-        next_radius = ladder[ladder_index + 1] if ladder_index + 1 < len(ladder) else None
+        speculative_radius = ladder[ladder_index + 1] if ladder_index + 1 < len(ladder) else 0
         active = [sid for sid in pending if skip_radius.get(sid) != radius]
 
         jobs = {}
@@ -1261,16 +1292,16 @@ def retry_windowed_all(units, suspect_ids, lang, target_lang, api_key, batch_cha
             continue
 
         speculative_jobs = {}
-        if next_radius is not None:
+        if speculative_radius:
             for suspect_id in jobs:
-                spec_job = build_window_job(units, index, unit_by_id, suspect_id, next_radius, batch_chars)
+                spec_job = build_window_job(units, index, unit_by_id, suspect_id, speculative_radius, batch_chars)
                 if spec_job:
                     speculative_jobs[suspect_id] = spec_job
 
         primary_payloads = {sid: job["payload"] for sid, job in jobs.items()}
         speculative_payloads = {sid: job["payload"] for sid, job in speculative_jobs.items()}
         primary_results, speculative_results = run_packed_jobs_with_lookahead(
-            primary_payloads, speculative_payloads, batch_chars, lang, target_lang, api_key, concurrency
+            primary_payloads, speculative_payloads, batch_chars, route_language(radius == 0, lang), target_lang, api_key, concurrency
         )
 
         resolved_this_round = set()
@@ -1289,12 +1320,12 @@ def retry_windowed_all(units, suspect_ids, lang, target_lang, api_key, batch_cha
             html = speculative_results.get(suspect_id)
             if html is None:
                 continue
-            text = validate_window_job(spec_job, html, next_radius, unit_by_id, strict_marker)
+            text = validate_window_job(spec_job, html, speculative_radius, unit_by_id, strict_marker)
             if text is not None:
                 recovered[suspect_id] = text
                 resolved_this_round.add(suspect_id)
             else:
-                skip_radius[suspect_id] = next_radius
+                skip_radius[suspect_id] = speculative_radius
 
         pending = [sid for sid in pending if sid not in resolved_this_round]
 
@@ -1357,7 +1388,7 @@ def retry_isolated_cues_all(missing_by_unit, marker_order, marker_text_by_id, ma
     for ladder_index, radius in enumerate(ISOLATED_RADIUS_LADDER):
         if not remaining_by_unit:
             break
-        next_radius = ISOLATED_RADIUS_LADDER[ladder_index + 1] if ladder_index + 1 < len(ISOLATED_RADIUS_LADDER) else None
+        speculative_radius = ISOLATED_RADIUS_LADDER[ladder_index + 1] if ladder_index + 1 < len(ISOLATED_RADIUS_LADDER) else 0
 
         jobs = {}
         for unit_id, missing_ids in remaining_by_unit.items():
@@ -1371,17 +1402,17 @@ def retry_isolated_cues_all(missing_by_unit, marker_order, marker_text_by_id, ma
             continue
 
         speculative_jobs = {}
-        if next_radius is not None:
+        if speculative_radius:
             for unit_id in jobs:
                 anchor_lo, anchor_hi = anchors[unit_id]
-                spec_job = build_isolated_job(unit_id, anchor_lo, anchor_hi, next_radius, marker_order, marker_text_by_id, marker_term_matches, list(remaining_by_unit[unit_id]), batch_chars)
+                spec_job = build_isolated_job(unit_id, anchor_lo, anchor_hi, speculative_radius, marker_order, marker_text_by_id, marker_term_matches, list(remaining_by_unit[unit_id]), batch_chars)
                 if spec_job:
                     speculative_jobs[unit_id] = spec_job
 
         primary_payloads = {uid: job["payload"] for uid, job in jobs.items()}
         speculative_payloads = {uid: job["payload"] for uid, job in speculative_jobs.items()}
         primary_results, speculative_results = run_packed_jobs_with_lookahead(
-            primary_payloads, speculative_payloads, batch_chars, lang, target_lang, api_key, concurrency
+            primary_payloads, speculative_payloads, batch_chars, route_language(radius == 0, lang), target_lang, api_key, concurrency
         )
 
         for unit_id, job in jobs.items():
@@ -1408,7 +1439,7 @@ def retry_isolated_cues_all(missing_by_unit, marker_order, marker_text_by_id, ma
                 if not remaining:
                     del remaining_by_unit[unit_id]
             if unit_id in remaining_by_unit:
-                skip_radius[unit_id] = next_radius
+                skip_radius[unit_id] = speculative_radius
 
     return recovered_by_unit
 
@@ -1478,7 +1509,7 @@ def translate_units(units, chapters, cues, lang, target_lang, api_key, batch_cha
     marker_order, marker_text_by_id = [], {}
     for unit in units:
         for span in unit.get("spans") or []:
-            if span.get("boundary") == "marker":
+            if is_cue_addressable_span(unit, span):
                 marker_order.append(span["marker_id"])
                 marker_text_by_id[span["marker_id"]] = span["text"]
     marker_term_matches = build_cue_term_matches(units)

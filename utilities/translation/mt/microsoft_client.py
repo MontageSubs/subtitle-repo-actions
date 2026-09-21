@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: microsoft_client.py
-# Version: 1.8.4
+# Version: 1.9
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -34,8 +34,8 @@
 #     - Repairs a formatting marker missing one bracket where unambiguous;
 #       drops all formatting tags for a cue outright if still unbalanced.
 #     - Native glossary protection using <mstrans:dictionary> definitions.
-#     - Cascading retry pipeline with radius ladder: Windowed Context (±20 -> ±5 -> ±2) and
-#       Isolated Cues (±5 -> ±2 -> solo) shrink context on repeated failure instead of
+#     - Cascading retry pipeline with radius ladder: Windowed Context and Isolated Cues
+#       (±5 -> ±3 -> ±1 -> solo, solo retries use auto language detection) shrink context on repeated failure instead of
 #       repeating an identical oversized request.
 #     - Case-insensitive marker matching and heuristic repair of truncated/malformed markers
 #       (e.g. missing opening bracket) via suffix-matching against still-pending marker ids.
@@ -378,6 +378,18 @@ class LanguageResolver:
                 self._detected = detected
                 log(f"auto-detected language: {detected} (pinned)")
 
+class AutoLanguage:
+    def current(self):
+        return ""
+
+    def observe(self, detected):
+        return None
+
+AUTO_LANGUAGE = AutoLanguage()
+
+def route_language(auto, lang):
+    return AUTO_LANGUAGE if auto else lang
+
 def escape_html(text):
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
@@ -397,20 +409,30 @@ def script_of(lang):
 def wrap_marker(text):
     return NO_TRANSLATE_TEMPLATE.format(text) if WRAP_MARKERS else text
 
+STYLE_TAG_PATTERN = re.compile(r"</?(?:i|b|u)>", re.IGNORECASE)
+STYLE_AND_TAG_STRIP_PATTERN = re.compile(r"\{\\[^}]*\}|<[^>]*>|\u27e6[^\u27e6\u27e7]*\u27e7")
+UNTRANSLATED_WORD_PAIR_THRESHOLD = 2
+
 def is_untranslated(text, source_lang, target_lang):
     if not text: return False
     sl = script_of(source_lang)
     tl = script_of(target_lang)
     if not sl or not tl or sl == tl: return False
-    return len(SCRIPT_LEAK_PATTERNS[sl].findall(text)) >= 1
+    clean = STYLE_AND_TAG_STRIP_PATTERN.sub("", text).strip()
+    if not clean: return False
+    word_pair = sl in WORD_BASED_SCRIPTS and tl in WORD_BASED_SCRIPTS
+    return len(SCRIPT_LEAK_PATTERNS[sl].findall(clean)) > (UNTRANSLATED_WORD_PAIR_THRESHOLD if word_pair else 0)
 
 NOISE_CATEGORY_PREFIXES = ("P", "N")
 
+MUSIC_NOTE_CHARS = "\u2669\u266a\u266b\u266c"
+
 def normalize_for_equality(text):
-    return "".join(ch for ch in (text or "") if not ch.isspace() and unicodedata.category(ch)[0] not in NOISE_CATEGORY_PREFIXES)
+    stripped = STYLE_TAG_PATTERN.sub("", text or "")
+    return "".join(ch for ch in stripped if not ch.isspace() and ch not in MUSIC_NOTE_CHARS and unicodedata.category(ch)[0] not in NOISE_CATEGORY_PREFIXES)
 
 def word_count(text):
-    return len(re.findall(r"\w+", text or "", re.UNICODE))
+    return len(re.findall(r"\w+", STYLE_TAG_PATTERN.sub("", text or ""), re.UNICODE))
 
 def is_leaked_untranslated(original, translated, source_lang, target_lang):
     if not translated:
@@ -731,6 +753,9 @@ def split_cue_chunks(text):
 def expected_cue_ids(unit):
     return [s["marker_id"] for s in unit.get("spans", []) if s.get("boundary") == "marker"]
 
+def is_cue_addressable_span(unit, span):
+    return span.get("boundary") == "marker" or (len(unit.get("spans") or []) == 1 and unit.get("resolved") is None)
+
 def missing_cue_ids(unit, text):
     expected = expected_cue_ids(unit)
     if not expected: return []
@@ -865,7 +890,7 @@ def retry_windowed_all(units, suspect_ids, lang, target_lang, batch_chars, concu
     for ladder_index, radius in enumerate(ladder):
         if not pending:
             break
-        next_radius = ladder[ladder_index + 1] if ladder_index + 1 < len(ladder) else None
+        next_radius = ladder[ladder_index + 1] if ladder_index + 1 < len(ladder) else 0
         active = [sid for sid in pending if skip_radius.get(sid) != radius]
 
         jobs = {}
@@ -877,7 +902,7 @@ def retry_windowed_all(units, suspect_ids, lang, target_lang, batch_chars, concu
             continue
 
         speculative_jobs = {}
-        if next_radius is not None:
+        if next_radius:
             for suspect_id in jobs:
                 spec_job = build_window_job(units, index, suspect_id, next_radius, batch_chars)
                 if spec_job:
@@ -886,7 +911,7 @@ def retry_windowed_all(units, suspect_ids, lang, target_lang, batch_chars, concu
         primary_payloads = {sid: job["payload"] for sid, job in jobs.items()}
         speculative_payloads = {sid: job["payload"] for sid, job in speculative_jobs.items()}
         primary_results, speculative_results = run_packed_jobs_with_lookahead(
-            primary_payloads, speculative_payloads, batch_chars, lang, target_lang, concurrency
+            primary_payloads, speculative_payloads, batch_chars, route_language(radius == 0, lang), target_lang, concurrency
         )
 
         resolved_this_round = set()
@@ -974,7 +999,7 @@ def retry_isolated_cues_all(missing_by_unit, marker_order, marker_text_by_id, ma
     for ladder_index, radius in enumerate(ISOLATED_RADIUS_LADDER):
         if not remaining_by_unit:
             break
-        next_radius = ISOLATED_RADIUS_LADDER[ladder_index + 1] if ladder_index + 1 < len(ISOLATED_RADIUS_LADDER) else None
+        next_radius = ISOLATED_RADIUS_LADDER[ladder_index + 1] if ladder_index + 1 < len(ISOLATED_RADIUS_LADDER) else 0
 
         jobs = {}
         for unit_id, missing_ids in remaining_by_unit.items():
@@ -988,7 +1013,7 @@ def retry_isolated_cues_all(missing_by_unit, marker_order, marker_text_by_id, ma
             continue
 
         speculative_jobs = {}
-        if next_radius is not None:
+        if next_radius:
             for unit_id in jobs:
                 anchor_lo, anchor_hi = anchors[unit_id]
                 spec_job = build_isolated_job(unit_id, anchor_lo, anchor_hi, next_radius, marker_order, marker_text_by_id, marker_term_matches, list(remaining_by_unit[unit_id]), batch_chars)
@@ -998,7 +1023,7 @@ def retry_isolated_cues_all(missing_by_unit, marker_order, marker_text_by_id, ma
         primary_payloads = {uid: job["payload"] for uid, job in jobs.items()}
         speculative_payloads = {uid: job["payload"] for uid, job in speculative_jobs.items()}
         primary_results, speculative_results = run_packed_jobs_with_lookahead(
-            primary_payloads, speculative_payloads, batch_chars, lang, target_lang, concurrency
+            primary_payloads, speculative_payloads, batch_chars, route_language(radius == 0, lang), target_lang, concurrency
         )
 
         for unit_id, job in jobs.items():
@@ -1156,7 +1181,7 @@ def translate_units(units, chapters, cues, lang, target_lang, batch_chars, concu
     marker_order, marker_text_by_id = [], {}
     for unit in units:
         for span in unit.get("spans") or []:
-            if span.get("boundary") == "marker":
+            if is_cue_addressable_span(unit, span):
                 marker_order.append(span["marker_id"])
                 marker_text_by_id[span["marker_id"]] = span["text"]
     marker_term_matches = build_cue_term_matches(units)
