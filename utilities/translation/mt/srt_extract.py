@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: srt_extract.py
-# Version: 2.6.4
+# Version: 2.7
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -238,6 +238,8 @@ def time_to_ms(value):
 
 
 def strip_letter_stutter(text):
+    if "-" not in text:
+        return text
     text = STUTTER_WORD_PATTERN.sub(lambda m: m.group(1), text)
     return STUTTER_PREFIX_PATTERN.sub("", text)
 
@@ -344,6 +346,8 @@ def first_letter_is_lower(text):
 
 
 def strip_tags_preserving_style(line):
+    if "<" not in line and "{" not in line:
+        return line
     preserved = []
 
     def guard(m):
@@ -379,11 +383,24 @@ def fold_text(raw, strip_sdh_enabled=False, latin_source=True):
     return " ".join(line for line in lines if line)
 
 
+EDGE_NOTE_LEADING_PATTERN = re.compile(f"^[{MUSIC_NOTE_CHARS}\\s]+")
+EDGE_NOTE_TRAILING_PATTERN = re.compile(f"[{MUSIC_NOTE_CHARS}\\s]+$")
+
+
 def split_full_wrap(text):
-    match = FULL_WRAP_PATTERN.match(text.strip())
+    text = text.strip()
+    if "<" not in text:
+        return text, None
+    leading_match = EDGE_NOTE_LEADING_PATTERN.match(text)
+    leading = leading_match.group(0) if leading_match else ""
+    remainder = text[len(leading):]
+    trailing_match = EDGE_NOTE_TRAILING_PATTERN.search(remainder)
+    trailing = trailing_match.group(0) if trailing_match else ""
+    core = remainder[:len(remainder) - len(trailing)] if trailing else remainder
+    match = FULL_WRAP_PATTERN.match(core)
     if not match or STYLE_TAG_PATTERN.search(match.group(2)):
         return text, None
-    return match.group(2).strip(), match.group(1).lower()
+    return f"{leading}{match.group(2).strip()}{trailing}", match.group(1).lower()
 
 
 def parse_srt(content, strip_sdh_enabled=True, latin_source=True):
@@ -415,6 +432,8 @@ def parse_srt(content, strip_sdh_enabled=True, latin_source=True):
 
 
 def split_dialogue(text):
+    if "-" not in text:
+        return [text]
     matches = list(DIALOGUE_DASH_PATTERN.finditer(text))
     if not matches:
         return [text]

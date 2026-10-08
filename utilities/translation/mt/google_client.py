@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: google_client.py
-# Version: 2.18
+# Version: 2.19
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -37,7 +37,7 @@
 #     - Alignment markers sent unwrapped by default (--wrap-markers to opt back in).
 #     - Retry cascade recovers missing units, then context windows, then single cues.
 #     - Auto-detects and pins the source language so retries don't re-guess.
-#     - Optional --context-file primes translation, verified locally via langdetect.
+#     - Optional --context-file primes translation; its language is checked locally via langdetect and the context is translated to the subtitle language when they differ.
 #     - Debug logging as JSON Lines, readable via debug_format.py.
 #     - Inline <i>/<b>/<u> tags sent as literal HTML and preserved verbatim
 #       on the way back, instead of the provider's own formatting noise.
@@ -51,7 +51,7 @@
 #     - 对齐标记默认不包裹 translate="no"（可用 --wrap-markers 恢复包裹）。
 #     - 重试级联：先恢复缺失单元，再带上下文窗口重发，最后隔离重发单条 cue。
 #     - 首次调用自动探测并锁定源语言，避免短文本重试反复误判。
-#     - 可选 --context-file 携带上下文，发送前用 langdetect 本地校验语言。
+#     - 可选 --context-file 携带上下文，发送前用 langdetect 本地校验语言，语言与字幕不一致时先翻译为字幕语言。
 #     - Debug 日志为 JSON Lines 格式，可用 debug_format.py 渲染可读。
 #
 # Dependencies / 依赖:
@@ -164,7 +164,8 @@ CONTENT_CHAR_PATTERN = re.compile(r"\w", re.UNICODE)
 
 UNCLOSED_MARKER_SIGNATURE = r"\u27e6[a-zA-Z]\d{1,6}(?:\.\d{1,6})?(?![\d.])(?!\u27e7)"
 MISSING_OPEN_MARKER_SIGNATURE = r"(?<!\u27e6)[a-zA-Z]\d{1,6}(?:\.\d{1,6})?\u27e7"
-CORRUPT_MARKER_SIGNATURE = re.compile(UNCLOSED_MARKER_SIGNATURE + "|" + MISSING_OPEN_MARKER_SIGNATURE)
+ESCAPED_MARKER_SIGNATURE = r"\\+[^\u27e6\u27e7]{0,6}?\d{1,6}(?:\.\d{1,6})?\u27e7"
+CORRUPT_MARKER_SIGNATURE = re.compile(ESCAPED_MARKER_SIGNATURE + "|" + UNCLOSED_MARKER_SIGNATURE + "|" + MISSING_OPEN_MARKER_SIGNATURE)
 
 ANY_MARKER_PATTERN = re.compile(r"\u27e6[^\u27e6\u27e7]*\u27e7")
 CORRUPT_MARKER_PATTERN = re.compile(r"\u27e6[a-zA-Z0-9.]+(?!\u27e7)|(?<!\u27e6)[a-zA-Z0-9.]+\u27e7")
@@ -287,7 +288,7 @@ def repair_corrupt_markers(text, prefix_char, expected_ids):
 
 NO_TRANSLATE_TEMPLATE = '<span translate="no">{}</span>'
 WRAP_MARKERS = False
-CONTEXT_MAX_CHARS = 300
+CONTEXT_MAX_CHARS = 500
 CONTEXT_GROUP_MARKER = "ctx"
 CONTEXT_SAMPLE_CHARS = 500
 
@@ -366,8 +367,8 @@ def escape_html(text):
 
 
 def unescape_html(text):
-    return (text.replace("&amp;", "&").replace("&lt;", "<")
-                .replace("&gt;", ">").replace("&quot;", '"').replace("&#39;", "'"))
+    return (text.replace("&lt;", "<").replace("&gt;", ">")
+                .replace("&quot;", '"').replace("&#39;", "'").replace("&amp;", "&"))
 
 
 def escape_html_preserving_style(text):
@@ -437,76 +438,73 @@ def wrap_marker(text):
     return NO_TRANSLATE_TEMPLATE.format(text) if WRAP_MARKERS else text
 
 
-def within_budget(text, limit):
-    if len(text) <= limit:
-        return True
-    log(f"payload of {len(text)} chars exceeds budget ({limit}), refusing to truncate, skipping")
-    return False
+def item_html(item):
+    return item.get("html", escape_html(item["text"]))
 
 
-def split_oversized_chapter(items, batch_chars, context_chars=0):
-    limit = max(batch_chars - context_chars, 1)
-    pieces, piece, piece_chars, oversized = [], [], 0, []
+def span_markup(html, index):
+    marker = wrap_marker(GROUP_MARKER_TEMPLATE.format(index)) if ALIGNMENT_MODE == "marker" else ""
+    return f"<span id={index}>{marker}{html}</span>"
+
+
+def build_chapter_html(group, indices, context_html=None):
+    prefix = span_markup(context_html, CONTEXT_GROUP_MARKER) if context_html else ""
+    spans = "".join(span_markup(item_html(item), indices[item["id"]]) for item in group)
+    return f"<div>{prefix}{spans}</div>"
+
+
+def split_oversized_chapter(items, limit, group_overhead, cost):
+    pieces, piece, piece_cost, oversized = [], [], group_overhead, []
     for item in items:
-        item_chars = len(item["text"])
-        if item_chars > limit:
+        item_cost = cost(item)
+        if group_overhead + item_cost > limit:
             oversized.append(item)
             continue
-        if piece and piece_chars + item_chars > limit:
+        if piece and piece_cost + item_cost > limit:
             pieces.append(piece)
-            piece, piece_chars = [], 0
+            piece, piece_cost = [], group_overhead
         piece.append(item)
-        piece_chars += item_chars
+        piece_cost += item_cost
     if piece:
         pieces.append(piece)
     return pieces, oversized
 
 
-def build_batches(items, chapter_groups, batch_chars, context_chars=0):
+def build_batches(items, chapter_groups, batch_chars, context_html=None):
     by_id = {item["id"]: item for item in items}
+    item_overhead = len(span_markup("", 10 ** (len(str(len(items))) - 1)))
+    group_overhead = len(build_chapter_html([], {}, context_html))
+
+    def cost(item):
+        return item_overhead + len(item_html(item))
+
     batches, oversized = [], []
-    current, current_chars = [], 0
+    current, current_cost = [], 0
 
     def flush():
-        nonlocal current, current_chars
+        nonlocal current, current_cost
         if current:
             batches.append(current)
-        current, current_chars = [], 0
+        current, current_cost = [], 0
 
     for group in chapter_groups:
         group_items = [by_id[i] for i in group if i in by_id]
         if not group_items:
             continue
-        group_chars = sum(len(item["text"]) for item in group_items) + context_chars
-        if group_chars > batch_chars:
+        group_cost = group_overhead + sum(cost(item) for item in group_items)
+        if group_cost > batch_chars:
             flush()
-            pieces, group_oversized = split_oversized_chapter(group_items, batch_chars, context_chars)
+            pieces, group_oversized = split_oversized_chapter(group_items, batch_chars, group_overhead, cost)
             batches.extend([piece] for piece in pieces)
             oversized.extend(group_oversized)
-        elif current_chars + group_chars > batch_chars:
+        elif current_cost + group_cost > batch_chars:
             flush()
-            current, current_chars = [group_items], group_chars
+            current, current_cost = [group_items], group_cost
         else:
             current.append(group_items)
-            current_chars += group_chars
+            current_cost += group_cost
     flush()
     return batches, oversized
-
-
-def build_chapter_html(group, indices, context_html=None):
-    marker = ALIGNMENT_MODE == "marker"
-    prefix = ""
-    if context_html:
-        marker_text = wrap_marker(GROUP_MARKER_TEMPLATE.format(CONTEXT_GROUP_MARKER)) if marker else ""
-        prefix = f'<span id={CONTEXT_GROUP_MARKER}>{marker_text}{context_html}</span>'
-    spans = "".join(
-        f'<span id={indices[item["id"]]}>'
-        f'{wrap_marker(GROUP_MARKER_TEMPLATE.format(indices[item["id"]])) if marker else ""}'
-        f'{item.get("html", escape_html(item["text"]))}'
-        f'</span>'
-        for item in group
-    )
-    return f"<div>{prefix}{spans}</div>"
 
 
 SPAN_OPEN_PATTERN = re.compile(r'<span[^>]*\bid=["\']?([a-zA-Z0-9:]+)["\']?[^>]*>')
@@ -755,42 +753,46 @@ def sample_subtitle_text(units, max_chars=CONTEXT_SAMPLE_CHARS):
     return " ".join(pieces)[:max_chars]
 
 
-def resolve_context_language(raw_context, requested_source_lang, subtitle_sample):
+def translate_context(raw_context, reference_lang, api_key):
+    html = f"<div>{escape_html(raw_context)}</div>"
+    divs = parse_plain_divs(post_translate_html(html, LanguageResolver("auto"), reference_lang, api_key))
+    return divs[0] if divs and divs[0] else raw_context
+
+
+def prepare_context(raw_context, lang, subtitle_sample, api_key, max_chars):
     if not raw_context:
         return None
-    context_detected = detect_language(raw_context)
-    if context_detected is None:
-        log("langdetect unavailable or inconclusive on context text, dropping context to be safe "
+    reference = lang.requested if not lang.is_auto else detect_language(subtitle_sample)
+    if reference is None:
+        log("could not determine subtitle source language locally, dropping context to be safe "
             "(pip install langdetect to enable this check)")
         return None
-    reference = requested_source_lang if requested_source_lang != "auto" else detect_language(subtitle_sample)
-    if reference is None:
-        log("could not determine subtitle source language locally, dropping context to be safe")
-        return None
-    if primary_subtag(context_detected) != primary_subtag(reference):
-        log(f"context language ({context_detected}) does not match subtitle language ({reference}), "
-            f"dropping context")
-        return None
-    log(f"context language ({context_detected}) matches subtitle language, sending as provided")
-    return raw_context
+    context_detected = detect_language(raw_context)
+    if context_detected is not None and primary_subtag(context_detected) == primary_subtag(reference):
+        log(f"context language ({context_detected}) matches subtitle language, sending as provided")
+        return raw_context
+    log(f"context language ({context_detected or 'unknown'}) differs from subtitle language ({reference}), "
+        f"translating context to match the subtitle")
+    try:
+        translated = translate_context(raw_context, reference, api_key)
+    except Exception as e:
+        log(f"context translation failed, using the original text as-is: {e}")
+        return raw_context
+    return truncate_context(translated, max_chars)[0]
 
 
 def translate(items, chapter_groups, lang, target_lang, api_key, batch_chars, concurrency=DEFAULT_CONCURRENCY, raw_context=None):
     translations, skipped = {}, []
-    context_reserve = len(raw_context) if raw_context else 0
-    if context_reserve and context_reserve * 2 > batch_chars:
-        log(f"warning: context ({context_reserve} chars) is large relative to batch_chars ({batch_chars}), "
-            f"batches will pack very few chapters per div")
-    batches, oversized = build_batches(items, chapter_groups, batch_chars, context_reserve)
+    context_html = escape_html(raw_context) if raw_context else None
+    batches, oversized = build_batches(items, chapter_groups, batch_chars, context_html)
     for item in oversized:
-        log(f"unit {item['id']}: {len(item['text'])} chars exceeds batch_chars ({batch_chars}), "
+        log(f"unit {item['id']}: {len(item_html(item))} chars exceeds batch_chars ({batch_chars}), "
             f"cue-level content cannot be split further, skipping without truncation")
         skipped.append(item["id"])
     if not batches:
         return translations, skipped
 
     total_batches = len(batches)
-    context_html = escape_html(raw_context) if raw_context else None
 
     start_time = last_report = time.time()
     completed = 0
@@ -858,21 +860,26 @@ def protect_content_html(text, term_matches):
     return "".join(pieces)
 
 
+EDGE_NOTE_PATTERN = re.compile("^[\u2669\u266a\u266b\u266c\\s]+|[\u2669\u266a\u266b\u266c\\s]+$")
+
+
 def cue_term_matches_for_unit(unit):
     spans = unit.get("spans") or []
     term_matches = unit.get("term_matches") or []
-    if len(spans) <= 1:
-        return {span["marker_id"]: term_matches for span in spans}
+    if not term_matches:
+        return {span["marker_id"]: [] for span in spans}
     text, cursor, result = unit["text"], 0, {}
     for span in spans:
-        pos = text.find(span["text"], cursor)
-        if pos == -1:
+        visible = EDGE_NOTE_PATTERN.sub("", span["text"]) if span.get("kind") == "music" else span["text"]
+        start = text.find(visible, cursor)
+        if start == -1:
             result[span["marker_id"]] = []
             continue
-        start, end = pos, pos + len(span["text"])
+        end = start + len(visible)
         cursor = end
+        shift = span["text"].find(visible) - start
         result[span["marker_id"]] = [
-            {**match, "start": match["start"] - start, "end": match["end"] - start}
+            {**match, "start": match["start"] + shift, "end": match["end"] + shift}
             for match in term_matches if start <= match["start"] and match["end"] <= end
         ]
     return result
@@ -881,7 +888,10 @@ def cue_term_matches_for_unit(unit):
 def build_cue_term_matches(units):
     result = {}
     for unit in units:
-        result.update(cue_term_matches_for_unit(unit))
+        matches = cue_term_matches_for_unit(unit)
+        for span in unit.get("spans") or []:
+            if is_cue_addressable_span(unit, span):
+                result[span["marker_id"]] = matches[span["marker_id"]]
     return result
 
 
@@ -1501,18 +1511,23 @@ def translate_units(units, chapters, cues, lang, target_lang, api_key, batch_cha
             results[uid] = repair_corrupt_markers(text, "c", expected)
 
     length_suspects = {uid for uid, text in results.items()
-                        if text is not None and has_content(unit_by_id[uid]["text"])
+                        if text is not None and unit_by_id[uid].get("resolved") is None and has_content(unit_by_id[uid]["text"])
                         and (not has_content(text) or not is_length_plausible(unit_by_id[uid]["text"], text))}
     cue_suspects = {uid for uid, text in results.items()
-                    if text is not None and (missing_cue_ids(unit_by_id[uid], text) or CORRUPT_MARKER_SIGNATURE.search(text)
+                    if text is not None and unit_by_id[uid].get("resolved") is None and (missing_cue_ids(unit_by_id[uid], text) or CORRUPT_MARKER_SIGNATURE.search(text)
                                              or has_marker_leak(unit_by_id[uid]["text"], text))}
-    marker_order, marker_text_by_id = [], {}
-    for unit in units:
-        for span in unit.get("spans") or []:
-            if is_cue_addressable_span(unit, span):
-                marker_order.append(span["marker_id"])
-                marker_text_by_id[span["marker_id"]] = span["text"]
-    marker_term_matches = build_cue_term_matches(units)
+    marker_index = []
+
+    def get_marker_index():
+        if not marker_index:
+            order, text_by_id = [], {}
+            for unit in units:
+                for span in unit.get("spans") or []:
+                    if is_cue_addressable_span(unit, span):
+                        order.append(span["marker_id"])
+                        text_by_id[span["marker_id"]] = span["text"]
+            marker_index.append((order, text_by_id, build_cue_term_matches(units)))
+        return marker_index[0]
 
     primary_suspects = length_suspects | cue_suspects | initial_missing_ids
     all_suspects = set()
@@ -1520,12 +1535,12 @@ def translate_units(units, chapters, cues, lang, target_lang, api_key, batch_cha
         all_suspects.add(uid)
         pos = unit_position.get(uid)
         if pos is not None:
-            if pos > 0:
-                all_suspects.add(unit_order[pos - 1])
-            if pos + 1 < len(unit_order):
-                all_suspects.add(unit_order[pos + 1])
+            for neighbor_pos in (pos - 1, pos + 1):
+                if 0 <= neighbor_pos < len(unit_order) and unit_by_id[unit_order[neighbor_pos]].get("resolved") is None:
+                    all_suspects.add(unit_order[neighbor_pos])
 
     if all_suspects:
+        marker_order, marker_text_by_id, marker_term_matches = get_marker_index()
         recovered = retry_windowed_all(units, sorted(all_suspects), lang, target_lang, api_key, batch_chars, concurrency, ladder=WINDOW_RADIUS_LADDER)
         if recovered:
             recovered = {rid: apply_term_replacements(text, unit_by_id[rid].get("term_matches") or [], target_lang)
@@ -1564,6 +1579,7 @@ def translate_units(units, chapters, cues, lang, target_lang, api_key, batch_cha
     leak_by_unit = {uid: leaked for uid, text in results.items() if text is not None
                     for leaked in [find_leaked_cue_ids(unit_by_id[uid], text, lang.current(), target_lang)] if leaked}
     if leak_by_unit:
+        marker_order, marker_text_by_id, marker_term_matches = get_marker_index()
         leak_recovered = retry_isolated_cues_all(
             leak_by_unit, marker_order, marker_text_by_id, marker_term_matches, lang, target_lang, api_key, batch_chars, concurrency,
             extra_valid=lambda orig, cand: not is_leaked_untranslated(orig, cand, lang.current(), target_lang),
@@ -1634,7 +1650,7 @@ def main():
         raw_context, truncated = truncate_context(raw_context, args.context_max_chars)
         if truncated:
             log(f"context truncated to {args.context_max_chars} chars (word boundary preserved)")
-        raw_context = resolve_context_language(raw_context, lang.requested, sample_subtitle_text(units))
+        raw_context = prepare_context(raw_context, lang, sample_subtitle_text(units), api_key, args.context_max_chars) if api_key else None
 
     if not api_key:
         result = {"success": False, "reason": "missing_api_key", "translations": {}, "skipped": [], "source_lang": lang.requested, "target_lang": target_lang}

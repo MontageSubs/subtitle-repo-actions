@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: bilingual_merge.py
-# Version: 2.9.5
+# Version: 2.10
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -95,6 +95,10 @@ def pip_install(package):
     return False
 
 
+def is_japanese_target(target_lang):
+    return (target_lang or "").split("-")[0].lower() == "ja"
+
+
 def is_chinese_target(target_lang):
     return (target_lang or "").split("-")[0].lower() in ("zh", "yue")
 
@@ -150,6 +154,40 @@ def ensure_jieba():
     jieba.setLogLevel(logging.ERROR)
     _jieba_module = jieba
     return _jieba_module
+
+
+_tiny_segmenter = None
+_tiny_segmenter_checked = False
+
+
+def ensure_tiny_segmenter():
+    global _tiny_segmenter, _tiny_segmenter_checked
+    if _tiny_segmenter_checked:
+        return _tiny_segmenter
+    _tiny_segmenter_checked = True
+    try:
+        import tinysegmenter
+    except ImportError:
+        if not pip_install("tinysegmenter"):
+            log("tinysegmenter unavailable, falling back to boundary heuristics")
+            return None
+        try:
+            import tinysegmenter
+        except ImportError as e:
+            log(f"tinysegmenter unavailable, falling back to boundary heuristics: {e}")
+            return None
+    _tiny_segmenter = tinysegmenter.TinySegmenter()
+    return _tiny_segmenter
+
+
+def segment_words(text, target_lang):
+    if is_chinese_target(target_lang):
+        jieba_module = ensure_jieba()
+        return list(jieba_module.cut(text)) if jieba_module is not None else None
+    if is_japanese_target(target_lang):
+        segmenter = ensure_tiny_segmenter()
+        return segmenter.tokenize(text) if segmenter is not None else None
+    return None
 
 
 ELLIPSIS_PATTERN = re.compile(r"\.{2,}|…+")
@@ -232,7 +270,6 @@ CJK_OPEN_QUOTE, CJK_CLOSE_QUOTE = "“", "”"
 CJK_ANGLE_OPEN_QUOTE, CJK_ANGLE_CLOSE_QUOTE = "「", "」"
 TARGET_QUOTE_PAIRS = {
     "zh": (CJK_OPEN_QUOTE, CJK_CLOSE_QUOTE),
-    "zh-hant": (CJK_ANGLE_OPEN_QUOTE, CJK_ANGLE_CLOSE_QUOTE),
     "yue": (CJK_ANGLE_OPEN_QUOTE, CJK_ANGLE_CLOSE_QUOTE),
 }
 MUSIC_NOTE_CHARS = "\u2669\u266a\u266b\u266c"
@@ -244,6 +281,8 @@ POSITION_TOP_TAG = "{\\an7}"
 
 
 def fix_music_spacing(text):
+    if not MUSIC_NOTE_PATTERN.search(text):
+        return text
     text = MUSIC_NOTE_LEADING_GAP_PATTERN.sub(r" \1", text)
     return MUSIC_NOTE_TRAILING_GAP_PATTERN.sub(r"\1 ", text)
 
@@ -259,8 +298,13 @@ def format_music_line(text):
     return WHITESPACE_COLLAPSE_PATTERN.sub(" ", fix_music_spacing(text)).strip()
 
 
+TRADITIONAL_CHINESE_PATTERN = re.compile(r"^zh-(?:hant|tw|hk|mo)(?![a-z])")
+
+
 def target_quote_pair(target_lang):
     lc = (target_lang or "").lower()
+    if TRADITIONAL_CHINESE_PATTERN.match(lc):
+        return CJK_ANGLE_OPEN_QUOTE, CJK_ANGLE_CLOSE_QUOTE
     return TARGET_QUOTE_PAIRS.get(lc) or TARGET_QUOTE_PAIRS.get(lc.split("-")[0])
 
 
@@ -270,6 +314,8 @@ def rectify_translation_quotes(translated_text, original_text, target_lang):
         return translated_text
         
     open_q, close_q = quotes
+    if open_q not in translated_text and close_q not in translated_text:
+        return translated_text
     source_has_quote = bool(re.search(r'["”“]', original_text))
     
     rep_close = close_q if source_has_quote else ""
@@ -326,13 +372,12 @@ WHITESPACE_TOKEN_PATTERN = re.compile(r"\S+\s*")
 
 
 def word_boundaries(text, target_lang):
-    if is_chinese_target(target_lang):
-        jieba_module = ensure_jieba()
-        if jieba_module is not None:
-            boundaries = [0]
-            for word in jieba_module.cut(text):
-                boundaries.append(boundaries[-1] + len(word))
-            return [b for b in boundaries if b in (0, len(text)) or (text[b - 1] != "·" and text[b] != "·")]
+    words = segment_words(text, target_lang)
+    if words is not None:
+        boundaries = [0]
+        for word in words:
+            boundaries.append(boundaries[-1] + len(word))
+        return [b for b in boundaries if b in (0, len(text)) or (text[b - 1] != "·" and text[b] != "·")]
     if re.search(r"\s", text):
         boundaries = [0] + [m.end() for m in WHITESPACE_TOKEN_PATTERN.finditer(text)]
         return sorted(set(boundaries) | {len(text)})
@@ -421,7 +466,34 @@ def align_cuts_to_candidates(order, expected, candidates, tolerance_of):
     return assignment
 
 
-def resolve_anchor_cuts(text, spans, boundary_types, protected, expected):
+class CandidateIndex:
+    def __init__(self, text, protected):
+        self.text = text
+        self.protected = protected
+        self._ends = {}
+        self._left_cuts = None
+
+    def ends(self, pattern):
+        ends = self._ends.get(pattern)
+        if ends is None:
+            ends = [m.end() for m in pattern.finditer(self.text)
+                    if not inside_protected_span(m.end(), self.protected) and not is_leading_punct_run(self.text, m.start())]
+            self._ends[pattern] = ends
+        return ends
+
+    def ends_between(self, pattern, lower, upper):
+        ends = self.ends(pattern)
+        return ends[bisect.bisect_right(ends, lower):bisect.bisect_left(ends, upper)]
+
+    def left_cuts_between(self, lower, upper):
+        if self._left_cuts is None:
+            self._left_cuts = [m.start() for m in LEFT_CUT_PATTERN.finditer(self.text)
+                               if not inside_protected_span(m.start(), self.protected)]
+        cuts = self._left_cuts
+        return cuts[bisect.bisect_right(cuts, lower):bisect.bisect_left(cuts, upper)]
+
+
+def resolve_anchor_cuts(index, boundary_types, expected):
     anchors = {}
     for boundary in {bt for bt in boundary_types if bt}:
         order_all = [i for i, bt in enumerate(boundary_types) if bt == boundary]
@@ -430,10 +502,7 @@ def resolve_anchor_cuts(text, spans, boundary_types, protected, expected):
             pending = [i for i in order_all if i not in anchors]
             if not pending:
                 break
-            candidates = sorted({
-                m.end() for m in pattern.finditer(text)
-                if m.end() not in used and not inside_protected_span(m.end(), protected) and not is_leading_punct_run(text, m.start())
-            })
+            candidates = [end for end in index.ends(pattern) if end not in used]
             def tolerance_of(k, pending=pending):
                 i = pending[k]
                 chunk = expected[i] - (expected[i - 1] if i > 0 else 0)
@@ -511,7 +580,8 @@ HARD_BREAK_PUNCT_TOLERANCE = 0.12
 HARD_BREAK_PROXIMITY_CHARS = 2
 
 
-def resolve_cut(text, cursor, expected, boundary, max_cut, protected=(), target_lang=None, anchor=None):
+def resolve_cut(index, cursor, expected, boundary, max_cut, target_lang=None, anchor=None):
+    text, protected = index.text, index.protected
     limit = len(text)
     ceiling = min(limit, max_cut)
     if anchor is not None and cursor < anchor < ceiling:
@@ -520,28 +590,20 @@ def resolve_cut(text, cursor, expected, boundary, max_cut, protected=(), target_
     if boundary:
         cut = None
         for pattern in BOUNDARY_SEARCH_PATTERNS[boundary]:
-            candidates = [m.end() for m in pattern.finditer(text, cursor)
-                          if cursor < m.end() < ceiling and not inside_protected_span(m.end(), protected)
-                          and not is_leading_punct_run(text, m.start())]
+            candidates = index.ends_between(pattern, cursor, ceiling)
             if candidates:
                 cut = min(candidates, key=lambda pos: abs(pos - expected))
                 break
         if cut is not None and abs(cut - expected) <= max(ORIGINAL_PUNCT_TOLERANCE.get(boundary, 0.20) * chunk, PUNCT_PROXIMITY_CHARS):
             return cut, "original"
-    strong = [m.end() for m in GENERAL_STRONG_PUNCT_PATTERN.finditer(text, cursor)
-              if cursor < m.end() < ceiling and not inside_protected_span(m.end(), protected)
-              and not is_leading_punct_run(text, m.start())]
-    strong += [m.start() for m in LEFT_CUT_PATTERN.finditer(text, cursor)
-               if cursor < m.start() < ceiling and not inside_protected_span(m.start(), protected)]
+    strong = index.ends_between(GENERAL_STRONG_PUNCT_PATTERN, cursor, ceiling) + index.left_cuts_between(cursor, ceiling)
     if strong:
         cut = min(strong, key=lambda pos: abs(pos - expected))
         strong_tol = max(HARD_BREAK_PUNCT_TOLERANCE * chunk, HARD_BREAK_PROXIMITY_CHARS) if boundary is None \
             else max(INFERRED_PUNCT_TOLERANCE * chunk, PUNCT_PROXIMITY_CHARS)
         if abs(cut - expected) <= strong_tol:
             return cut, "inferred"
-    weak = [m.end() for m in GENERAL_WEAK_PUNCT_PATTERN.finditer(text, cursor)
-            if cursor < m.end() < ceiling and not inside_protected_span(m.end(), protected)
-            and not is_leading_punct_run(text, m.start())]
+    weak = index.ends_between(GENERAL_WEAK_PUNCT_PATTERN, cursor, ceiling)
     if weak:
         cut = min(weak, key=lambda pos: abs(pos - expected))
         weak_tol = max(HARD_BREAK_PUNCT_TOLERANCE * chunk, HARD_BREAK_PROXIMITY_CHARS) if boundary is None \
@@ -602,10 +664,10 @@ def merge_bad_runs(bad, count):
     return runs
 
 
-def snap_or_interpolate(text, ideal, scope, protected, target_lang, tolerance):
+def snap_or_interpolate(index, ideal, scope, target_lang, tolerance):
+    text, protected = index.text, index.protected
     lo, hi = scope
-    candidates = [m.end() for m in GENERAL_STRONG_PUNCT_PATTERN.finditer(text)
-                  if lo < m.end() < hi and not inside_protected_span(m.end(), protected) and not is_leading_punct_run(text, m.start())]
+    candidates = index.ends_between(GENERAL_STRONG_PUNCT_PATTERN, lo, hi)
     near = [c for c in candidates if abs(c - ideal) <= tolerance]
     if near:
         return min(near, key=lambda c: abs(c - ideal))
@@ -616,7 +678,8 @@ def snap_or_interpolate(text, ideal, scope, protected, target_lang, tolerance):
     return escape_protected_span(round(ideal), protected)
 
 
-def rebalance_disproportionate_cuts(text, spans, cuts, locked, protected, target_lang):
+def rebalance_disproportionate_cuts(index, spans, cuts, locked, target_lang):
+    text = index.text
     if len(spans) < 2:
         return cuts
     lengths = [effective_length(s["text"]) for s in spans]
@@ -654,7 +717,7 @@ def rebalance_disproportionate_cuts(text, spans, cuts, locked, protected, target
             span_slots = max(hi - k, 1)
             ideal = max(cursor + 1, min(ideal, end_pos - span_slots))
             tol = max(REBALANCE_SNAP_TOLERANCE * (end_pos - start_pos) / (hi - lo), REBALANCE_SNAP_FLOOR)
-            cut = snap_or_interpolate(text, ideal, (cursor, end_pos), protected, target_lang, tol)
+            cut = snap_or_interpolate(index, ideal, (cursor, end_pos), target_lang, tol)
             cut = max(cursor + 1, min(cut, end_pos - span_slots))
             new_cuts[k] = cut
             cursor = cut
@@ -684,9 +747,10 @@ def snap_cuts_forward_to_punct(text, cuts, locked, tags, protected):
 def split_by_boundary(translated_text, spans, protected=(), target_lang=None, source_lang=None):
     boundary_types = [classify_boundary(span["text"]) for span in spans[:-1]]
     expected_positions = compute_expected_positions(translated_text, spans)
-    anchors = resolve_anchor_cuts(translated_text, spans, boundary_types, protected, expected_positions) \
-        if punctuation_anchors_enabled(source_lang, target_lang) else {}
+    index = CandidateIndex(translated_text, protected)
     marker_anchors = resolve_marker_anchors(translated_text, spans)
+    needs_punctuation_anchors = punctuation_anchors_enabled(source_lang, target_lang) and len(marker_anchors) < len(spans) - 1
+    anchors = resolve_anchor_cuts(index, boundary_types, expected_positions) if needs_punctuation_anchors else {}
     anchors.update(marker_anchors)
     expected_positions = refine_expected_positions(spans, anchors, expected_positions, len(translated_text))
     cursor, cuts, tags = 0, [], []
@@ -694,13 +758,13 @@ def split_by_boundary(translated_text, spans, protected=(), target_lang=None, so
     for i, boundary in enumerate(boundary_types):
         expected = expected_positions[i]
         max_cut = len(translated_text) - (len(spans) - 1 - i)
-        cut, tag = resolve_cut(translated_text, cursor, expected, boundary, max_cut, protected, target_lang, anchors.get(i))
+        cut, tag = resolve_cut(index, cursor, expected, boundary, max_cut, target_lang, anchors.get(i))
         tags.append("marker" if marker_anchors.get(i) == cut else tag)
         cuts.append(cut)
         cursor = cut
 
     locked = {i for i in range(len(cuts)) if tags[i] == "marker"}
-    cuts = rebalance_disproportionate_cuts(translated_text, spans, cuts, locked, protected, target_lang)
+    cuts = rebalance_disproportionate_cuts(index, spans, cuts, locked, target_lang)
     cuts = snap_cuts_forward_to_punct(translated_text, cuts, locked, tags, protected)
     parts, cursor = [], 0
     for cut in cuts:
@@ -744,7 +808,7 @@ def proportional_split(text, spans, target_lang):
     return parts
 
 
-def repair_empty_parts(parts, spans, protected=(), target_lang=None, source_lang=None):
+def repair_empty_parts(parts, spans, get_protected, target_lang=None, source_lang=None):
     parts = list(parts)
     for i, part in enumerate(parts):
         if has_content(part) or not has_content(spans[i]["text"]):
@@ -753,7 +817,7 @@ def repair_empty_parts(parts, spans, protected=(), target_lang=None, source_lang
         if not (0 <= neighbor < len(parts)):
             continue
         lo, hi = sorted((i, neighbor))
-        fixed, _ = split_by_boundary(parts[neighbor], spans[lo:hi + 1], protected, target_lang, source_lang)
+        fixed, _ = split_by_boundary(parts[neighbor], spans[lo:hi + 1], get_protected(), target_lang, source_lang)
         if not has_content(fixed[i - lo]):
             proportional = proportional_split(parts[neighbor], spans[lo:hi + 1], target_lang)
             if proportional and has_content(proportional[i - lo]):
@@ -782,14 +846,14 @@ def enforce_quote_closure(parts, translated_text, target_lang):
     return closed
 
 
-def split_translation(translated_text, spans, protected=(), target_lang=None, source_lang=None):
+def split_translation(translated_text, spans, get_protected, target_lang=None, source_lang=None):
     if len(spans) == 1:
         parts, method = [translated_text.strip()], "single"
     else:
-        parts, method = split_by_boundary(translated_text, spans, protected, target_lang, source_lang)
-    parts = [RESIDUAL_MARKER_PATTERN.sub(" ", p).strip() for p in parts]
+        parts, method = split_by_boundary(translated_text, spans, get_protected(), target_lang, source_lang)
+    parts = [RESIDUAL_MARKER_PATTERN.sub(" ", p).strip() if ("\u27e6" in p or "\u27e7" in p) else p.strip() for p in parts]
     parts = enforce_punctuation_placement(parts)
-    parts = repair_empty_parts(parts, spans, protected, target_lang, source_lang)
+    parts = repair_empty_parts(parts, spans, get_protected, target_lang, source_lang)
     return enforce_quote_closure(parts, translated_text, target_lang), method
 
 
@@ -798,7 +862,7 @@ BRACKET_CONTENT_PATTERN = re.compile(r"[(（\[【{][^()（）\[\]【】{}]*[)）
 
 
 def strip_unsourced_brackets(original_text, translated_text):
-    if BRACKET_CHAR_PATTERN.search(original_text):
+    if not BRACKET_CHAR_PATTERN.search(translated_text) or BRACKET_CHAR_PATTERN.search(original_text):
         return translated_text
     stripped = translated_text
     while BRACKET_CONTENT_PATTERN.search(stripped):
@@ -808,9 +872,13 @@ def strip_unsourced_brackets(original_text, translated_text):
 
 FULLWIDTH_TO_ASCII = {"！": "!", "？": "?"}
 EXCLAIM_QUESTION_RUN_PATTERN = re.compile(r"[！？!?]+")
+EXCLAIM_QUESTION_TEST_PATTERN = re.compile(r"[！？!?]")
 
 
 def normalize_exclaim_question(text):
+    if not EXCLAIM_QUESTION_TEST_PATTERN.search(text):
+        return text
+
     def substitute(match):
         run = "".join(FULLWIDTH_TO_ASCII.get(c, c) for c in match.group())
         if match.end() == len(text) or text[match.end()] == " ":
@@ -868,8 +936,14 @@ def build_bilingual_cues(cues, units, translations, target_lang, source_lang=Non
         original_text = "".join(span["text"] for span in spans)
         translated = strip_unsourced_brackets(original_text, strip_foreign_markers(translated))
         translated = rectify_translation_quotes(translated, original_text, target_lang)
-        protected = find_protected_spans(translated, glossary_terms, target_lang)
-        parts, method = split_translation(translated, spans, protected, target_lang, source_lang)
+        protected_holder = []
+
+        def get_protected(text=translated):
+            if not protected_holder:
+                protected_holder.append(find_protected_spans(text, glossary_terms, target_lang))
+            return protected_holder[0]
+
+        parts, method = split_translation(translated, spans, get_protected, target_lang, source_lang)
         if method not in ("single", "original_boundary", "inferred_punctuation", "marker_boundary", "mixed_boundary"):
             approx_splits.append({"unit_id": unit["id"], "cues": [span["id"] for span in spans], "method": method})
         for span, part in zip(spans, parts):
@@ -894,14 +968,17 @@ def build_bilingual_cues(cues, units, translations, target_lang, source_lang=Non
         else:
             translation = parts[0]
         if translation:
-            translation = DASH_REPLACE_PATTERN.sub(rf"\1{dash_style}", translation)
+            if "-" in translation:
+                translation = DASH_REPLACE_PATTERN.sub(rf"\1{dash_style}", translation)
             translation = normalize_exclaim_question(translation)
-            if is_all_music:
-                translation = POSITION_TOP_TAG + (translation if len(parts) > 1 else format_music_line(translation))
+            if is_all_music and len(parts) == 1:
+                translation = format_music_line(translation)
             duration_ms = parse_srt_timestamp_ms(cue["end"]) - parse_srt_timestamp_ms(cue["start"])
             metrics = evaluate_reading_speed(translation, duration_ms, target_lang)
             if metrics["over_cps"] or metrics["over_length"]:
                 quality_warnings.append({"cue_id": cue["id"], **metrics})
+            if is_all_music:
+                translation = POSITION_TOP_TAG + translation
         results.append({**cue, "translation": translation})
     return results, approx_splits, quality_warnings
 

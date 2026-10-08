@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: microsoft_client.py
-# Version: 1.9
+# Version: 1.10
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -64,6 +64,7 @@ SCRIPT_NAME = "microsoft_client"
 ENDPOINT = "https://edge.microsoft.com/translate/translatetext"
 DEFAULT_BATCH_CHARS = 4000
 DEFAULT_ARRAY_SIZE = 1
+CONTEXT_MAX_CHARS = 500
 DEFAULT_CONCURRENCY = 6
 REQUEST_TIMEOUT = 30
 LENGTH_RATIO_MIN = 0.15
@@ -323,21 +324,28 @@ def sample_subtitle_text(units, max_chars=500):
         if total >= max_chars: break
     return " ".join(pieces)[:max_chars]
 
-def resolve_context_language(raw_context, requested_source_lang, subtitle_sample):
+def translate_context(raw_context, reference_lang):
+    payload = call_microsoft_api([escape_html(raw_context)], "", normalize_microsoft_lang(reference_lang))
+    text = payload[0]["translations"][0]["text"] if payload and payload[0].get("translations") else ""
+    return extract_marker_free_response(text) or raw_context
+
+def prepare_context(raw_context, requested_source_lang, subtitle_sample, max_chars):
     if not raw_context: return None
-    context_detected = detect_language(raw_context)
-    if context_detected is None:
-        log("langdetect unavailable or inconclusive on context text, dropping context")
-        return None
     reference = requested_source_lang if requested_source_lang and requested_source_lang != "auto" else detect_language(subtitle_sample)
     if reference is None:
         log("could not determine subtitle source language locally, dropping context")
         return None
-    if primary_subtag(context_detected) != primary_subtag(reference):
-        log(f"context language ({context_detected}) does not match subtitle language ({reference}), dropping context")
-        return None
-    log(f"context language ({context_detected}) matches subtitle language, sending as provided")
-    return raw_context
+    context_detected = detect_language(raw_context)
+    if context_detected is not None and primary_subtag(context_detected) == primary_subtag(reference):
+        log(f"context language ({context_detected}) matches subtitle language, sending as provided")
+        return raw_context
+    log(f"context language ({context_detected or 'unknown'}) differs from subtitle language ({reference}), translating context to match the subtitle")
+    try:
+        translated = translate_context(raw_context, reference)
+    except Exception as e:
+        log(f"context translation failed, using the original text as-is: {e}")
+        return raw_context
+    return truncate_context(translated, max_chars)[0]
 
 def truncate_context(text, max_chars):
     if len(text) <= max_chars: return text, False
@@ -394,7 +402,7 @@ def escape_html(text):
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 def unescape_html(text):
-    return text.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&").replace("&quot;", '"').replace("&#39;", "'")
+    return text.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", '"').replace("&#39;", "'").replace("&amp;", "&")
 
 def has_content(text):
     return bool(text) and bool(CONTENT_CHAR_PATTERN.search(text))
@@ -508,19 +516,21 @@ def build_protected_spans(text, term_matches):
             merged.append(dict(span))
     return merged
 
+def escape_segment(text):
+    return escape_html(escape_formatting_tags(text))
+
 def protect_content_html(text, term_matches):
-    text = escape_formatting_tags(text)
     pieces, cursor = [], 0
     for span in build_protected_spans(text, term_matches):
-        pieces.append(escape_html(text[cursor:span["start"]]))
-        piece = escape_html(text[span["start"]:span["end"]])
+        pieces.append(escape_segment(text[cursor:span["start"]]))
+        piece = escape_segment(text[span["start"]:span["end"]])
         if span["wrap"]:
             target = escape_html(span["target"]) if span.get("target") else piece
             pieces.append(f'<mstrans:dictionary translation="{target}">{piece}</mstrans:dictionary>')
         else:
             pieces.append(piece)
         cursor = span["end"]
-    pieces.append(escape_html(text[cursor:]))
+    pieces.append(escape_segment(text[cursor:]))
     return "".join(pieces)
 
 def apply_term_replacements(text, term_matches, target_lang):
@@ -1054,29 +1064,38 @@ def retry_isolated_cues_all(missing_by_unit, marker_order, marker_text_by_id, ma
 
     return recovered_by_unit
 
+EDGE_NOTE_PATTERN = re.compile("^[\u2669\u266a\u266b\u266c\\s]+|[\u2669\u266a\u266b\u266c\\s]+$")
+
+
 def cue_term_matches_for_unit(unit):
     spans = unit.get("spans") or []
     term_matches = unit.get("term_matches") or []
-    if len(spans) <= 1:
-        return {span["marker_id"]: term_matches for span in spans}
+    if not term_matches:
+        return {span["marker_id"]: [] for span in spans}
     text, cursor, result = unit["text"], 0, {}
     for span in spans:
-        pos = text.find(span["text"], cursor)
-        if pos == -1:
+        visible = EDGE_NOTE_PATTERN.sub("", span["text"]) if span.get("kind") == "music" else span["text"]
+        start = text.find(visible, cursor)
+        if start == -1:
             result[span["marker_id"]] = []
             continue
-        start, end = pos, pos + len(span["text"])
+        end = start + len(visible)
         cursor = end
+        shift = span["text"].find(visible) - start
         result[span["marker_id"]] = [
-            {**match, "start": match["start"] - start, "end": match["end"] - start}
+            {**match, "start": match["start"] + shift, "end": match["end"] + shift}
             for match in term_matches if start <= match["start"] and match["end"] <= end
         ]
     return result
 
+
 def build_cue_term_matches(units):
     result = {}
     for unit in units:
-        result.update(cue_term_matches_for_unit(unit))
+        matches = cue_term_matches_for_unit(unit)
+        for span in unit.get("spans") or []:
+            if is_cue_addressable_span(unit, span):
+                result[span["marker_id"]] = matches[span["marker_id"]]
     return result
 
 def has_translatable_content(text, term_matches):
@@ -1127,7 +1146,7 @@ def translate_units(units, chapters, cues, lang, target_lang, batch_chars, concu
     missing_units = [unit for unit in pending if unit["id"] in initial_missing_ids]
     if missing_units:
         payloads = [protect_content_html(u["text"], u.get("term_matches") or []) for u in missing_units]
-        html_results = run_packed_jobs(payloads, batch_chars, lang, target_lang, concurrency)
+        html_results = run_packed_jobs_deduped(payloads, batch_chars, lang, target_lang, concurrency)
         for unit, html in zip(missing_units, html_results):
             if not html:
                 continue
@@ -1148,7 +1167,7 @@ def translate_units(units, chapters, cues, lang, target_lang, batch_chars, concu
 
     if untranslated_jobs:
         payloads = [protect_content_html(u["text"], u.get("term_matches") or []) for u in untranslated_jobs]
-        html_results = run_packed_jobs(payloads, batch_chars, lang, target_lang, concurrency)
+        html_results = run_packed_jobs_deduped(payloads, batch_chars, lang, target_lang, concurrency)
         for unit, html in zip(untranslated_jobs, html_results):
             if html:
                 retried = extract_marker_free_response(html)
@@ -1172,19 +1191,24 @@ def translate_units(units, chapters, cues, lang, target_lang, batch_chars, concu
             results[uid] = repair_corrupt_markers(text, "c", expected)
 
     length_suspects = {uid for uid, text in results.items()
-                        if text is not None and has_content(unit_by_id[uid]["text"])
+                        if text is not None and unit_by_id[uid].get("resolved") is None and has_content(unit_by_id[uid]["text"])
                         and (not has_content(text) or not is_length_plausible(unit_by_id[uid]["text"], text))}
     cue_suspects = {uid for uid, text in results.items()
-                    if text is not None and (missing_cue_ids(unit_by_id[uid], text) or CORRUPT_MARKER_SIGNATURE.search(text)
+                    if text is not None and unit_by_id[uid].get("resolved") is None and (missing_cue_ids(unit_by_id[uid], text) or CORRUPT_MARKER_SIGNATURE.search(text)
                                               or has_marker_leak(unit_by_id[uid]["text"], text))}
 
-    marker_order, marker_text_by_id = [], {}
-    for unit in units:
-        for span in unit.get("spans") or []:
-            if is_cue_addressable_span(unit, span):
-                marker_order.append(span["marker_id"])
-                marker_text_by_id[span["marker_id"]] = span["text"]
-    marker_term_matches = build_cue_term_matches(units)
+    marker_index = []
+
+    def get_marker_index():
+        if not marker_index:
+            order, text_by_id = [], {}
+            for unit in units:
+                for span in unit.get("spans") or []:
+                    if is_cue_addressable_span(unit, span):
+                        order.append(span["marker_id"])
+                        text_by_id[span["marker_id"]] = span["text"]
+            marker_index.append((order, text_by_id, build_cue_term_matches(units)))
+        return marker_index[0]
 
     primary_suspects = length_suspects | cue_suspects | initial_missing_ids
     all_suspects = set()
@@ -1192,12 +1216,12 @@ def translate_units(units, chapters, cues, lang, target_lang, batch_chars, concu
         all_suspects.add(uid)
         pos = unit_position.get(uid)
         if pos is not None:
-            if pos > 0:
-                all_suspects.add(unit_order[pos - 1])
-            if pos + 1 < len(unit_order):
-                all_suspects.add(unit_order[pos + 1])
+            for neighbor_pos in (pos - 1, pos + 1):
+                if 0 <= neighbor_pos < len(unit_order) and unit_by_id[unit_order[neighbor_pos]].get("resolved") is None:
+                    all_suspects.add(unit_order[neighbor_pos])
 
     if all_suspects:
+        marker_order, marker_text_by_id, marker_term_matches = get_marker_index()
         recovered = retry_windowed_all(units, sorted(all_suspects), lang, target_lang, batch_chars, concurrency, ladder=WINDOW_RADIUS_LADDER)
         if recovered:
             recovered = {rid: apply_term_replacements(text, unit_by_id[rid].get("term_matches") or [], target_lang)
@@ -1232,6 +1256,7 @@ def translate_units(units, chapters, cues, lang, target_lang, batch_chars, concu
     leak_by_unit = {uid: leaked for uid, text in results.items() if text is not None
                     for leaked in [find_leaked_cue_ids(unit_by_id[uid], text, lang.current(), target_lang)] if leaked}
     if leak_by_unit:
+        marker_order, marker_text_by_id, marker_term_matches = get_marker_index()
         leak_recovered = retry_isolated_cues_all(
             leak_by_unit, marker_order, marker_text_by_id, marker_term_matches, lang, target_lang, batch_chars, concurrency,
             extra_valid=lambda orig, cand: not is_leaked_untranslated(orig, cand, lang.current(), target_lang),
@@ -1263,7 +1288,7 @@ def main():
     parser.add_argument("--debug-raw-in", default=None)
     parser.add_argument("--debug-raw-out", default=None)
     parser.add_argument("--context-file", default=None)
-    parser.add_argument("--context-max-chars", type=int, default=3000)
+    parser.add_argument("--context-max-chars", type=int, default=CONTEXT_MAX_CHARS)
     args = parser.parse_args()
 
     DEBUG_MODE = args.debug or os.environ.get("DEBUG") == "1"
@@ -1288,7 +1313,7 @@ def main():
         raw_context, truncated = truncate_context(raw_context, args.context_max_chars)
         if truncated:
             log(f"context truncated to {args.context_max_chars} chars (word boundary preserved)")
-        raw_context = resolve_context_language(raw_context, requested_lang, sample_subtitle_text(units))
+        raw_context = prepare_context(raw_context, requested_lang, sample_subtitle_text(units), args.context_max_chars)
 
     if not units:
         result = {"success": False, "reason": "no_units", "translations": {}, "skipped": []}
