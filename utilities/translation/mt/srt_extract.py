@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: srt_extract.py
-# Version: 2.7
+# Version: 2.7.1
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -194,11 +194,21 @@ LEADING_NON_LETTER_PATTERN = re.compile(r"^[^A-Za-z]*")
 STYLE_TAG_LEADING_PATTERN = re.compile(rf"^{STYLE_OPEN_ALT}+", re.IGNORECASE)
 EDGE_NOTE_PATTERN = re.compile(f"^[{MUSIC_NOTE_CHARS}\\s]+|[{MUSIC_NOTE_CHARS}\\s]+$")
 
-LATIN_SOURCE_LANGS = {"en", "es", "fr", "de", "it", "pt", "nl", "pl", "sv", "da", "no", "fi", "ro", "cs", "hu", "tr", "id", "vi", "ms", "tl", "ca", "eu", "gl", "la"}
+LATIN_SOURCE_LANGS = {
+    "en", "es", "fr", "de", "it", "pt", "nl", "pl", "sv", "da", "no", "fi", "ro", "cs", "hu", "tr", "id", "vi",
+    "ms", "tl", "ca", "eu", "gl", "la", "hr", "sk", "sl", "lt", "lv", "et", "sq", "cy", "is", "af",
+}
+LANGUAGE_ALIASES = {"nb": "no", "nn": "no", "fil": "tl", "in": "id"}
+SDH_LANGS = {"en"}
+
+
+def base_language(lang):
+    base = (lang or "en").strip().lower().replace("_", "-").split("-")[0]
+    return LANGUAGE_ALIASES.get(base, base)
 
 
 def is_latin_source(source_lang):
-    return (source_lang or "en").split("-")[0].lower() in LATIN_SOURCE_LANGS
+    return base_language(source_lang) in LATIN_SOURCE_LANGS
 
 
 COLON = ":"
@@ -310,6 +320,10 @@ def strip_speaker_tags(lines):
     return [strip_speaker_tag_line(line, lines, i) for i, line in enumerate(lines)]
 
 
+EMPTY_STYLE_WRAP_PATTERN = re.compile(r"<(i|b|u)>\s*</\1>", re.IGNORECASE)
+DANGLING_DASH_PATTERN = re.compile(r"^[-\u2013\u2014]+\s+(?=[-\u2013\u2014])|^[-\u2013\u2014]+$")
+
+
 def strip_sdh(text):
     original = text
     while True:
@@ -317,7 +331,12 @@ def strip_sdh(text):
         if new_text == text:
             break
         text = new_text
-    cleaned = WHITESPACE_PATTERN.sub(" ", text).strip()
+    while True:
+        new_text = EMPTY_STYLE_WRAP_PATTERN.sub("", text)
+        if new_text == text:
+            break
+        text = new_text
+    cleaned = DANGLING_DASH_PATTERN.sub("", WHITESPACE_PATTERN.sub(" ", text).strip())
     if not cleaned and MUSIC_NOTE_PATTERN.search(original):
         return " ".join(MUSIC_NOTE_PATTERN.findall(original))
     return cleaned
@@ -374,10 +393,10 @@ def collapse_adjacent_style_wraps(lines):
     return lines
 
 
-def fold_text(raw, strip_sdh_enabled=False, latin_source=True):
+def fold_text(raw, strip_sdh_enabled=False):
     lines = [WHITESPACE_PATTERN.sub(" ", strip_tags_preserving_style(raw_line)).strip() for raw_line in raw.splitlines()]
     lines = [line for line in lines if line]
-    if strip_sdh_enabled and latin_source and lines and not any(MUSIC_NOTE_PATTERN.search(line) for line in lines):
+    if strip_sdh_enabled and lines and not any(MUSIC_NOTE_PATTERN.search(line) for line in lines):
         lines = strip_speaker_tags(lines)
     lines = collapse_adjacent_style_wraps(lines)
     return " ".join(line for line in lines if line)
@@ -403,7 +422,7 @@ def split_full_wrap(text):
     return f"{leading}{match.group(2).strip()}{trailing}", match.group(1).lower()
 
 
-def parse_srt(content, strip_sdh_enabled=True, latin_source=True):
+def parse_srt(content, strip_sdh_enabled=True):
     content = content.replace("\r\n", "\n").replace("\r", "\n")
     cues = []
     sdh_stats = {"dropped": 0, "stripped": 0}
@@ -420,7 +439,7 @@ def parse_srt(content, strip_sdh_enabled=True, latin_source=True):
             continue
         time_match = TIME_LINE_PATTERN.match(lines[time_line_idx].strip())
         cue_id = len(cues) + 1
-        text = fold_text("\n".join(lines[time_line_idx + 1:]), strip_sdh_enabled, latin_source)
+        text = fold_text("\n".join(lines[time_line_idx + 1:]), strip_sdh_enabled)
         if strip_sdh_enabled:
             cleaned = strip_sdh(text)
             if cleaned != text:
@@ -747,7 +766,7 @@ def build_units(cues, glossary, latin_source=True):
 
 def extract(content, glossary, strip_sdh_enabled=True, source_lang="en"):
     latin_source = is_latin_source(source_lang)
-    cues, sdh_stats = parse_srt(content, strip_sdh_enabled, latin_source)
+    cues, sdh_stats = parse_srt(content, strip_sdh_enabled and base_language(source_lang) in SDH_LANGS)
     if not cues:
         return {"success": False, "reason": "no_cues_parsed", "cues": [], "units": [], "chapters": [], "sdh_removed": sdh_stats, "marker_merges": 0}
     units, chapters, marker_merges = build_units(cues, glossary, latin_source)

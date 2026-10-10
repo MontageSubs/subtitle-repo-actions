@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: bilingual_merge.py
-# Version: 2.10
+# Version: 2.10.1
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -103,7 +103,28 @@ def is_chinese_target(target_lang):
     return (target_lang or "").split("-")[0].lower() in ("zh", "yue")
 
 
-READING_SPEED_LIMITS = {"cjk": {"cps": 9, "max_chars_per_line": 16}, "default": {"cps": 17, "max_chars_per_line": 42}}
+LANGUAGE_ALIASES = {"cantonese": "yue", "iw": "he", "in": "id", "nb": "no", "nn": "no", "fil": "tl"}
+TRADITIONAL_REGIONS = {"tw", "hk", "mo"}
+
+
+def language_key(code):
+    language, *subtags = (code or "").strip().lower().replace("_", "-").split("-")
+    if language != "zh":
+        return LANGUAGE_ALIASES.get(language, language)
+    if "hant" in subtags:
+        return "zh-hant"
+    if "hans" in subtags:
+        return "zh-hans"
+    return "zh-hant" if TRADITIONAL_REGIONS.intersection(subtags) else "zh-hans"
+
+
+READING_PROFILES = {
+    "zh-hans": (9, 16, "weighted"), "zh-hant": (9, 16, "weighted"), "yue": (9, 16, "weighted"),
+    "ja": (4, 13, "weighted"), "ko": (12, 16, "weighted"),
+    "en": (20, 42, "plain"), "hi": (22, 42, "plain"), "ru": (17, 39, "plain"), "th": (17, 35, "plain"),
+}
+DEFAULT_READING_PROFILE = (17, 42, "plain")
+MARKUP_PATTERN = re.compile(r"\{[^}]*\}|</?[a-zA-Z][^>]*>")
 
 
 def parse_srt_timestamp_ms(value):
@@ -113,12 +134,12 @@ def parse_srt_timestamp_ms(value):
 
 
 def evaluate_reading_speed(text, duration_ms, target_lang):
-    limits = READING_SPEED_LIMITS["cjk" if is_chinese_target(target_lang) else "default"]
-    lines = [line for line in text.split("\n") if line]
-    longest_line = max((effective_length(line) for line in lines), default=0)
-    duration_seconds = max(duration_ms / 1000, 0.001)
-    cps = effective_length(text.replace("\n", " ")) / duration_seconds
-    return {"cps": cps, "over_cps": cps > limits["cps"], "over_length": longest_line > limits["max_chars_per_line"]}
+    max_cps, max_chars_per_line, metric = READING_PROFILES.get(language_key(target_lang), DEFAULT_READING_PROFILE)
+    measure = effective_length if metric == "weighted" else len
+    lines = [line for line in (WHITESPACE_COLLAPSE_PATTERN.sub(" ", MARKUP_PATTERN.sub("", raw)).strip() for raw in text.replace("\\N", "\n").split("\n")) if line]
+    longest_line = max((measure(line) for line in lines), default=0)
+    cps = measure(" ".join(lines)) / max(duration_ms / 1000, 0.001)
+    return {"cps": cps, "over_cps": cps > max_cps, "over_length": longest_line > max_chars_per_line}
 
 
 LATIN_PUNCT_SOURCE_LANGS = {
@@ -298,14 +319,11 @@ def format_music_line(text):
     return WHITESPACE_COLLAPSE_PATTERN.sub(" ", fix_music_spacing(text)).strip()
 
 
-TRADITIONAL_CHINESE_PATTERN = re.compile(r"^zh-(?:hant|tw|hk|mo)(?![a-z])")
-
-
 def target_quote_pair(target_lang):
-    lc = (target_lang or "").lower()
-    if TRADITIONAL_CHINESE_PATTERN.match(lc):
+    key = language_key(target_lang)
+    if key == "zh-hant":
         return CJK_ANGLE_OPEN_QUOTE, CJK_ANGLE_CLOSE_QUOTE
-    return TARGET_QUOTE_PAIRS.get(lc) or TARGET_QUOTE_PAIRS.get(lc.split("-")[0])
+    return TARGET_QUOTE_PAIRS.get(key) or TARGET_QUOTE_PAIRS.get(key.split("-")[0])
 
 
 def rectify_translation_quotes(translated_text, original_text, target_lang):
@@ -371,13 +389,73 @@ FALLBACK_BOUNDARY_PATTERN = re.compile(r"[，,、；;。.!?…\s]+")
 WHITESPACE_TOKEN_PATTERN = re.compile(r"\S+\s*")
 
 
+NAME_JOINERS = "·•‧"
+LONG_NAME_CHARS = 10
+CHINESE_BREAK_RULES = {
+    "zh-hans": (
+        "的 地 得 了 着 过 吗 呢 吧 啊 呀 哇 啦 罢 哩 呗 嘞 咯 哈 哟 哎 耶 们 等等",
+        "在 从 向 往 对 给 把 被 与 和 跟 同 随 自 于 由 按 按照 根据 为 为了 朝 凭 借 沿 沿着 趁 趁着 这 这个 这些 那 那个 那些 哪 各个 每 以及 关于 有关 对于 并且 而且 但是 然而 或者 还是 因而 所以 虽然 尽管 不仅 不但 如果 要是 即使 哪怕 只有 只要 因为 既然",
+    ),
+    "zh-hant": (
+        "的 地 得 了 著 過 嗎 呢 吧 啊 呀 哇 啦 罷 哩 唄 嘞 咯 哈 喲 哎 耶 們 等等",
+        "在 從 向 往 對 給 把 被 與 和 跟 同 隨 自 於 由 按 按照 根據 為 為了 朝 憑 藉 沿 沿著 趁 趁著 這 這個 這些 那 那個 那些 哪 各 每 以及 關於 有關 對於 並且 而且 但是 然而 或者 還是 因而 所以 雖然 儘管 不僅 不但 如果 要是 即使 哪怕 只有 只要 因為 既然",
+    ),
+    "yue": (
+        "嘅 咗 緊 過 喇 咩 呢 咪 呀 喎 㗎 啫 囉 哩 晒 埋 掂 倒 翻 返 添 咋 嘞 啩 啝 先 定 哋",
+        "喺 喺度 由 向 畀 同 將 自 跟 到 由得 為咗 趁 照 順 呢 呢個 呢啲 嗰 嗰個 嗰啲 邊個 邊度 點解 關於 同埋 而且 但係 不過 或者 所以 如果 同埋 抑或 因為 既然 縱使 雖然 就算 只要",
+    ),
+}
+
+
+def break_rule(target_lang):
+    rule = CHINESE_BREAK_RULES.get(language_key(target_lang))
+    return tuple(set(words.split()) for words in rule) if rule else None
+
+
+def dotted_name_runs(pieces):
+    starts = [sum(map(len, pieces[:i])) for i in range(len(pieces))]
+    runs, index = [], 1
+    while index + 1 < len(pieces):
+        if pieces[index] not in NAME_JOINERS:
+            index += 1
+            continue
+        last = index + 1
+        while last + 2 < len(pieces) and pieces[last + 1] in NAME_JOINERS:
+            last += 2
+        runs.append((starts[index - 1], starts[last] + len(pieces[last])))
+        index = last + 1
+    return runs
+
+
+def allowed_boundaries(pieces, rule, text_length):
+    no_start, no_end = rule if rule else (set(), set())
+    runs = dotted_name_runs(pieces) if rule else []
+    sealed = [r for r in runs if r[1] - r[0] <= LONG_NAME_CHARS]
+    long_runs = [r for r in runs if r[1] - r[0] > LONG_NAME_CHARS]
+    inside = lambda spans, pos: any(lo < pos < hi for lo, hi in spans)
+    open_cuts, before, last, position = [], [], None, 0
+    for piece in pieces:
+        if piece.strip():
+            last = piece
+        before.append(last)
+    after, nxt = [None] * len(pieces), None
+    for i in range(len(pieces) - 1, -1, -1):
+        after[i] = nxt
+        if pieces[i].strip():
+            nxt = pieces[i]
+    for i, piece in enumerate(pieces):
+        position += len(piece)
+        after_joiner = piece in NAME_JOINERS
+        if position < text_length and not inside(sealed, position) and (after_joiner or not inside(long_runs, position)):
+            open_cuts.append((position, i))
+    ruled = [(p, i) for p, i in open_cuts if before[i] not in no_end and after[i] not in no_start] if rule else open_cuts
+    return [p for p, _ in (ruled or open_cuts)]
+
+
 def word_boundaries(text, target_lang):
     words = segment_words(text, target_lang)
     if words is not None:
-        boundaries = [0]
-        for word in words:
-            boundaries.append(boundaries[-1] + len(word))
-        return [b for b in boundaries if b in (0, len(text)) or (text[b - 1] != "·" and text[b] != "·")]
+        return [0, *allowed_boundaries(words, break_rule(target_lang), len(text)), len(text)]
     if re.search(r"\s", text):
         boundaries = [0] + [m.end() for m in WHITESPACE_TOKEN_PATTERN.finditer(text)]
         return sorted(set(boundaries) | {len(text)})
@@ -576,8 +654,8 @@ def escape_protected_span(pos, protected):
     return pos
 
 
-HARD_BREAK_PUNCT_TOLERANCE = 0.12
-HARD_BREAK_PROXIMITY_CHARS = 2
+HARD_BREAK_PUNCT_TOLERANCE = 0.25
+HARD_BREAK_PROXIMITY_CHARS = 4
 
 
 def resolve_cut(index, cursor, expected, boundary, max_cut, target_lang=None, anchor=None):
