@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: bilingual_merge.py
-# Version: 2.10.1
+# Version: 2.10.2
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -68,6 +68,7 @@
 
 import argparse
 import bisect
+import functools
 import json
 import logging
 import os
@@ -107,6 +108,7 @@ LANGUAGE_ALIASES = {"cantonese": "yue", "iw": "he", "in": "id", "nb": "no", "nn"
 TRADITIONAL_REGIONS = {"tw", "hk", "mo"}
 
 
+@functools.lru_cache(maxsize=256)
 def language_key(code):
     language, *subtags = (code or "").strip().lower().replace("_", "-").split("-")
     if language != "zh":
@@ -135,10 +137,16 @@ def parse_srt_timestamp_ms(value):
 
 def evaluate_reading_speed(text, duration_ms, target_lang):
     max_cps, max_chars_per_line, metric = READING_PROFILES.get(language_key(target_lang), DEFAULT_READING_PROFILE)
-    measure = effective_length if metric == "weighted" else len
     lines = [line for line in (WHITESPACE_COLLAPSE_PATTERN.sub(" ", MARKUP_PATTERN.sub("", raw)).strip() for raw in text.replace("\\N", "\n").split("\n")) if line]
-    longest_line = max((measure(line) for line in lines), default=0)
-    cps = measure(" ".join(lines)) / max(duration_ms / 1000, 0.001)
+    joined_length = len(" ".join(lines))
+    if metric == "weighted":
+        weights = [content_weight(line) for line in lines]
+        longest_line = max((weight or len(line) for weight, line in zip(weights, lines)), default=0)
+        length = sum(weights) or joined_length
+    else:
+        longest_line = max(map(len, lines), default=0)
+        length = joined_length
+    cps = length / max(duration_ms / 1000, 0.001)
     return {"cps": cps, "over_cps": cps > max_cps, "over_length": longest_line > max_chars_per_line}
 
 
@@ -359,11 +367,14 @@ def space_after_ellipsis(match):
 
 
 def normalize_translation(text, target_lang):
-    text = DASH_ARTIFACT_PATTERN.sub("...", text)
-    text = ELLIPSIS_PATTERN.sub(space_after_ellipsis, text)
+    if "—" in text or "--" in text:
+        text = DASH_ARTIFACT_PATTERN.sub("...", text)
+    if ".." in text or "…" in text:
+        text = ELLIPSIS_PATTERN.sub(space_after_ellipsis, text)
     if is_chinese_target(target_lang):
         text = CJK_TERMINATOR_PATTERN.sub(strip_terminator, text)
-        text = HALFWIDTH_COMMA_PATTERN.sub(strip_terminator, text)
+        if "," in text:
+            text = HALFWIDTH_COMMA_PATTERN.sub(strip_terminator, text)
     text = fix_music_spacing(text)
     text = WHITESPACE_COLLAPSE_PATTERN.sub(" ", text).strip()
     return enforce_line_edges(text)
@@ -375,12 +386,13 @@ OTHER_WORD_PATTERN = re.compile(r"[^\W_a-zA-Z0-9]", re.UNICODE)
 PUNCT_WEIGHT_PATTERN = re.compile(r"[，,、；;。.!?！？：:…]")
 
 
+def content_weight(text):
+    return len(LATIN_WORD_PATTERN.findall(text)) * 2.5 + len(DIGIT_PATTERN.findall(text)) * 0.5 + len(OTHER_WORD_PATTERN.findall(text))
+
+
 def effective_length(text):
     text = STYLE_TAG_PATTERN.sub("", text)
-    latin_words = len(LATIN_WORD_PATTERN.findall(text))
-    digits = len(DIGIT_PATTERN.findall(text))
-    others = len(OTHER_WORD_PATTERN.findall(text))
-    return (latin_words * 2.5) + (digits * 0.5) + others or len(text)
+    return content_weight(text) or len(text)
 
 
 FALLBACK_BOUNDARY_PATTERN = re.compile(r"[，,、；;。.!?…\s]+")
@@ -389,7 +401,7 @@ FALLBACK_BOUNDARY_PATTERN = re.compile(r"[，,、；;。.!?…\s]+")
 WHITESPACE_TOKEN_PATTERN = re.compile(r"\S+\s*")
 
 
-NAME_JOINERS = "·•‧"
+NAME_JOINERS = frozenset("·•‧")
 LONG_NAME_CHARS = 10
 CHINESE_BREAK_RULES = {
     "zh-hans": (
@@ -413,43 +425,43 @@ def break_rule(target_lang):
 
 
 def dotted_name_runs(pieces):
-    starts = [sum(map(len, pieces[:i])) for i in range(len(pieces))]
-    runs, index = [], 1
+    runs, previous_start, at, index = [], 0, len(pieces[0]) if pieces else 0, 1
     while index + 1 < len(pieces):
-        if pieces[index] not in NAME_JOINERS:
-            index += 1
+        piece = pieces[index]
+        if piece not in NAME_JOINERS:
+            previous_start, at, index = at, at + len(piece), index + 1
             continue
         last = index + 1
+        end = at + len(piece) + len(pieces[last])
         while last + 2 < len(pieces) and pieces[last + 1] in NAME_JOINERS:
+            end += len(pieces[last + 1]) + len(pieces[last + 2])
             last += 2
-        runs.append((starts[index - 1], starts[last] + len(pieces[last])))
-        index = last + 1
+        runs.append((previous_start, end))
+        previous_start, at, index = end - len(pieces[last]), end, last + 1
     return runs
 
 
+def next_content_piece(pieces, start):
+    return next((piece for piece in pieces[start:] if piece.strip()), "")
+
+
 def allowed_boundaries(pieces, rule, text_length):
-    no_start, no_end = rule if rule else (set(), set())
+    no_start, no_end = rule if rule else (frozenset(), frozenset())
     runs = dotted_name_runs(pieces) if rule else []
-    sealed = [r for r in runs if r[1] - r[0] <= LONG_NAME_CHARS]
-    long_runs = [r for r in runs if r[1] - r[0] > LONG_NAME_CHARS]
-    inside = lambda spans, pos: any(lo < pos < hi for lo, hi in spans)
-    open_cuts, before, last, position = [], [], None, 0
-    for piece in pieces:
-        if piece.strip():
-            last = piece
-        before.append(last)
-    after, nxt = [None] * len(pieces), None
-    for i in range(len(pieces) - 1, -1, -1):
-        after[i] = nxt
-        if pieces[i].strip():
-            nxt = pieces[i]
-    for i, piece in enumerate(pieces):
+    inside = lambda position, long: any(lo < position < hi and (hi - lo > LONG_NAME_CHARS) == long for lo, hi in runs)
+    open_cuts, ruled_cuts, position, before = [], [], 0, ""
+    for index, piece in enumerate(pieces):
         position += len(piece)
-        after_joiner = piece in NAME_JOINERS
-        if position < text_length and not inside(sealed, position) and (after_joiner or not inside(long_runs, position)):
-            open_cuts.append((position, i))
-    ruled = [(p, i) for p, i in open_cuts if before[i] not in no_end and after[i] not in no_start] if rule else open_cuts
-    return [p for p, _ in (ruled or open_cuts)]
+        if piece.strip():
+            before = piece
+        if position >= text_length:
+            continue
+        if runs and (inside(position, False) or (piece not in NAME_JOINERS and inside(position, True))):
+            continue
+        open_cuts.append(position)
+        if rule and before not in no_end and next_content_piece(pieces, index + 1) not in no_start:
+            ruled_cuts.append(position)
+    return ruled_cuts if rule and ruled_cuts else open_cuts
 
 
 def word_boundaries(text, target_lang):
