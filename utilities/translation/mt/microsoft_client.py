@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: microsoft_client.py
-# Version: 1.10.1
+# Version: 1.10.2
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -175,12 +175,16 @@ FORMAT_TAG_ESCAPE_PATTERNS = [
     (re.compile(r"\s*</b>\s*", re.IGNORECASE), "\u27e6/b\u27e7"),
     (re.compile(r"\s*<i\b[^>]*>\s*", re.IGNORECASE), "\u27e6i\u27e7"),
     (re.compile(r"\s*</i>\s*", re.IGNORECASE), "\u27e6/i\u27e7"),
+    (re.compile(r"\s*<u\b[^>]*>\s*", re.IGNORECASE), "\u27e6u\u27e7"),
+    (re.compile(r"\s*</u>\s*", re.IGNORECASE), "\u27e6/u\u27e7"),
 ]
 FORMAT_TAG_RESTORE_PATTERNS = [
     (re.compile(r"\u27e6\s*b\s*\u27e7", re.IGNORECASE), "<b>"),
     (re.compile(r"\u27e6\s*/\s*b\s*\u27e7", re.IGNORECASE), "</b>"),
     (re.compile(r"\u27e6\s*i\s*\u27e7", re.IGNORECASE), "<i>"),
     (re.compile(r"\u27e6\s*/\s*i\s*\u27e7", re.IGNORECASE), "</i>"),
+    (re.compile(r"\u27e6\s*u\s*\u27e7", re.IGNORECASE), "<u>"),
+    (re.compile(r"\u27e6\s*/\s*u\s*\u27e7", re.IGNORECASE), "</u>"),
 ]
 
 def escape_formatting_tags(text):
@@ -190,16 +194,16 @@ def escape_formatting_tags(text):
         text = pattern.sub(repl, text)
     return text
 
-STYLE_MARKER_MISSING_OPEN_PATTERN = re.compile(r"(?<!\u27e6)/(b|i)\u27e7", re.IGNORECASE)
-STYLE_MARKER_MISSING_CLOSE_PATTERN = re.compile(r"\u27e6(b|i)(?!\u27e7)", re.IGNORECASE)
-STYLE_LITERAL_TAG_PATTERN = re.compile(r"</?(b|i)>", re.IGNORECASE)
+STYLE_MARKER_MISSING_OPEN_PATTERN = re.compile(r"(?<!\u27e6)/(b|i|u)\u27e7", re.IGNORECASE)
+STYLE_MARKER_MISSING_CLOSE_PATTERN = re.compile(r"\u27e6(b|i|u)(?!\u27e7)", re.IGNORECASE)
+STYLE_LITERAL_TAG_PATTERN = re.compile(r"</?(b|i|u)>", re.IGNORECASE)
 
 def repair_style_markers(text):
     text = STYLE_MARKER_MISSING_OPEN_PATTERN.sub(lambda m: f"\u27e6/{m.group(1).lower()}\u27e7", text)
     return STYLE_MARKER_MISSING_CLOSE_PATTERN.sub(lambda m: f"\u27e6{m.group(1).lower()}\u27e7", text)
 
 def style_tags_balanced(text):
-    depth = {"b": 0, "i": 0}
+    depth = {"b": 0, "i": 0, "u": 0}
     for m in STYLE_LITERAL_TAG_PATTERN.finditer(text):
         token = m.group(0).lower()
         tag = token.strip("</>")

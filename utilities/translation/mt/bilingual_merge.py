@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: bilingual_merge.py
-# Version: 2.10.2
+# Version: 2.10.3
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -226,7 +226,7 @@ HALFWIDTH_COMMA_PATTERN = re.compile(r"(?<!\d)[,](?!\d)")
 WHITESPACE_COLLAPSE_PATTERN = re.compile(r"\s+")
 NON_WORD_PATTERN = re.compile(r"[^\w]", re.UNICODE)
 NO_LINE_END_CHARS = set("“「『（([{＜〈《【〔„‚«‹¿¡'\"‘")
-NO_LINE_START_CHARS = set("”」』）)]}＞〉》】〕»›、，,。.！!？?；;：:'\"’")
+NO_LINE_START_CHARS = set("”」』）)]}＞〉》】〕»›、，,。.！!？?；;：:·'\"’")
 BOUNDARY_ORDER = ("trail_off", "comma", "period", "colon")
 BOUNDARY_CLASSIFY_PATTERNS = {
     "trail_off": re.compile(r"(\.{2,}|-{2,}|—+|…+)\s*$"),
