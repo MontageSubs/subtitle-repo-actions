@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: srt_extract.py
-# Version: 2.7.1
+# Version: 2.8.0
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -40,6 +40,16 @@
 #       followed by the same opening tag at the start of the next line
 #       is collapsed into a single continuous wrap across the join.
 #
+#     - SDH stripping works per raw line before lines are folded: bracketed
+#       cues are removed first, speaker labels second, so a leading SDH line
+#       no longer blocks label detection. Style tags are isolated per line
+#       beforehand so wrappers never pollute label/uppercase checks.
+#     - When labels are stripped and a cue holds two or more speakers, a
+#       leading '- ' is restored per turn and handled as a native dash.
+#     - Every dash segment detects its own full style wrap.
+#     - Segments without any letter or digit (e.g. '♪ ♪', '...') pass through
+#       as `resolved` and are never sent for translation.
+#
 # 功能特性：
 #     - 解析 SRT 字幕结构，并对文本和时间戳进行标准化。
 #     - 拆分以前导破折号 ('- ') 标记的多发言者对话行。
@@ -55,6 +65,15 @@
 #       进行随意拆分。
 #     - 场景切换判定的间隔阈值（SCENE_CHANGE_MS，默认 30000）可通过
 #       --scene-change-ms 配置。
+#
+#     - SDH 剥离在折叠前按原生行进行：先移除括号类内容、再移除说话人标签，
+#       前导 SDH 行不再阻断标签识别；并预先将样式标签按行隔离，避免包裹
+#       标签污染标签/大写判断。
+#     - 剥离标签后若同一字幕块存在两位及以上说话人，按发言轮次补回行首
+#       '- '，并按原生破折号继续处理。
+#     - 每个破折号分段独立识别整句样式包裹。
+#     - 不含字母或数字的分段（如 '♪ ♪'、'...'）以 `resolved` 原样透传，
+#       不发送翻译。
 #
 # Usage / 用法:
 #     python srt_extract.py --input en.srt --glossary GLOSSARY.md --output extract.json
@@ -156,6 +175,9 @@ SCRIPT_NAME = "srt_extract"
 TIME_LINE_PATTERN = re.compile(r"(\d{2}:\d{2}:\d{2}[,.]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,.]\d{3})")
 TAG_PATTERN = re.compile(r"<[^>]+>|\{[^}]*\}")
 STYLE_TAG_PATTERN = re.compile(r"</?(i|b|u)>", re.IGNORECASE)
+STYLE_TAG_TOKEN_PATTERN = re.compile(r"<(/?)(i|b|u)>", re.IGNORECASE)
+ADJACENT_STYLE_WRAP_PATTERN = re.compile(r"</(i|b|u)>(\s*)<\1>", re.IGNORECASE)
+LEADING_STYLE_OPEN_PATTERN = re.compile(r"(?:<(?:i|b|u)>)*", re.IGNORECASE)
 STYLE_TAG_PLACEHOLDER_PATTERN = re.compile(r"\u0001(\d+)\u0001")
 STYLE_TAG_ALT = r"(?:</?(?:i|b|u)>)"
 STYLE_OPEN_ALT = r"(?:<(?:i|b|u)>)"
@@ -188,6 +210,9 @@ MARKER_TEMPLATE = "\u27e6c{}\u27e7"
 MUSIC_NOTE_CHARS = "\u2669\u266a\u266b\u266c"
 MUSIC_NOTE_PATTERN = re.compile(f"[{MUSIC_NOTE_CHARS}]")
 INNER_B = r"\[\]\(\)\{\}\uff08\uff09\u3010\u3011"
+OPEN_BRACKETS = "[({\uff08\u3010"
+CLOSE_BRACKETS = "])}\uff09\u3011"
+BRACKET_RESIDUE_PATTERN = re.compile(r"(<[ibu]>)\s+|\s+(</[ibu]>)|\s+(:)", re.IGNORECASE)
 SDH_BRACKET_PATTERN = re.compile(r"\[[^" + INNER_B + r"]*\]|\([^" + INNER_B + r"]*\)|\{[^" + INNER_B + r"]*\}|\uff08[^" + INNER_B + r"]*\uff09|\u3010[^" + INNER_B + r"]*\u3011")
 LEADING_ELLIPSIS_PATTERN = re.compile(rf"^{STYLE_OPEN_ALT}*(\.{{2,}}|\u2026)", re.IGNORECASE)
 LEADING_NON_LETTER_PATTERN = re.compile(r"^[^A-Za-z]*")
@@ -254,6 +279,19 @@ def strip_letter_stutter(text):
     return STUTTER_PREFIX_PATTERN.sub("", text)
 
 
+SENTENCE_END_CHARS = (".", "!", "?", "\u266a", "\u266b", "--", "\u2014")
+LEADING_DASH_PATTERN = re.compile(r"^\s*[-\u2013\u2014]")
+LABEL_LEAD_PATTERN = re.compile(r"^[-\u2013\u2014\s]*")
+
+
+def to_plain(line):
+    return STYLE_TAG_PATTERN.sub("", line) if "<" in line else line
+
+
+def style_tags_of(text):
+    return "".join(match.group(0) for match in STYLE_TAG_PATTERN.finditer(text))
+
+
 def is_all_uppercase(text):
     return any(c.isalpha() for c in text) and text.upper() == text
 
@@ -276,70 +314,136 @@ def is_trailing_colon_only(line):
     return COLON not in line.rstrip(COLON)
 
 
-def should_remove_narrator(pre):
-    lowered = pre.lower()
-    if len(pre) > 30 or "http" in lowered or ", " in pre:
+def should_remove_narrator(label):
+    lowered = label.lower()
+    if len(label) > 30 or "http" in lowered or ", " in label:
         return False
-    if len(pre) > 15 and any(phrase in lowered for phrase in NARRATOR_BLOCK_PHRASES):
-        return False
-    return True
+    return not (len(label) > 15 and any(phrase in lowered for phrase in NARRATOR_BLOCK_PHRASES))
 
 
-def strip_speaker_tag_line(line, lines, index):
-    if COLON not in line:
-        return line
-    index_of_colon = line.index(COLON)
-    is_last_line = index == len(lines) - 1
-    if index_of_colon <= 0 or is_inside_colon_brackets(line, index_of_colon):
-        return line
-    if is_last_line and is_trailing_colon_only(line) and line.count(" ") > 1:
-        return line
-    pre = line[:index_of_colon]
-    if not is_all_uppercase(pre):
-        return line
-    if is_between_digits(line, index_of_colon):
-        return line
-    if not should_remove_narrator(pre):
-        return line
-    if len(lines) == 2 and index == 1:
-        first_line = lines[0].rstrip('"')
-        if not first_line.endswith((".", "!", "?", "\u266a", "\u266b", "--", "\u2014")):
-            return line
-    content = line[index_of_colon + 1:].strip()
-    if not content:
-        return ""
-    if content[0].islower():
-        content = content[0].upper() + content[1:]
-    return content
+def capitalize_first(text):
+    tags = LEADING_STYLE_OPEN_PATTERN.match(text).group(0)
+    rest = text[len(tags):]
+    return tags + rest[0].upper() + rest[1:] if rest and rest[0].islower() else text
+
+
+def tag_speaker_line(line, plain_lines, index, previous_speaker):
+    plain = plain_lines[index]
+    colon_index = plain.find(COLON)
+    if colon_index <= 0 or is_inside_colon_brackets(plain, colon_index):
+        return line, None
+    if index == len(plain_lines) - 1 and is_trailing_colon_only(plain) and plain.count(" ") > 1:
+        return line, None
+    prefix = plain[:colon_index]
+    label = prefix[LABEL_LEAD_PATTERN.match(prefix).end():].strip()
+    if not is_all_uppercase(label) or is_between_digits(plain, colon_index) or not should_remove_narrator(label):
+        return line, None
+    if len(plain_lines) == 2 and index == 1 and previous_speaker is None \
+            and not plain_lines[0].rstrip('"').endswith(SENTENCE_END_CHARS):
+        return line, None
+    raw_colon = line.index(COLON)
+    content = style_tags_of(line[:raw_colon]) + line[raw_colon + 1:].strip()
+    speaker = " ".join(label.split())
+    dash = "- " if LEADING_DASH_PATTERN.match(prefix) else ""
+    body = content if speaker == previous_speaker else capitalize_first(content)
+    return (dash + body if to_plain(content).strip() else ""), speaker
+
+
+def insert_turn_dashes(entries):
+    turn_starts, kept = [], []
+    current, turn_pending = None, True
+    for text, speaker in entries:
+        if speaker and speaker != current:
+            current, turn_pending = speaker, True
+        if not text:
+            continue
+        if turn_pending:
+            turn_starts.append(len(kept))
+        turn_pending = False
+        kept.append(text)
+    if len(turn_starts) < 2:
+        return kept
+    for at in turn_starts:
+        if not LEADING_DASH_PATTERN.match(to_plain(kept[at])):
+            kept[at] = f"- {kept[at]}"
+    return kept
 
 
 def strip_speaker_tags(lines):
-    joined = "\n".join(lines)
+    plain_lines = [to_plain(line) for line in lines]
+    joined = "\n".join(plain_lines)
     if len(joined) > 10 and joined.endswith(COLON) and not is_all_uppercase(joined):
         return lines
-    return [strip_speaker_tag_line(line, lines, i) for i, line in enumerate(lines)]
+    entries, previous_speaker = [], None
+    for index, line in enumerate(lines):
+        text, speaker = tag_speaker_line(line, plain_lines, index, previous_speaker)
+        entries.append((text, speaker))
+        previous_speaker = speaker or previous_speaker
+    return insert_turn_dashes(entries) if any(speaker for _, speaker in entries) else lines
 
 
 EMPTY_STYLE_WRAP_PATTERN = re.compile(r"<(i|b|u)>\s*</\1>", re.IGNORECASE)
-DANGLING_DASH_PATTERN = re.compile(r"^[-\u2013\u2014]+\s+(?=[-\u2013\u2014])|^[-\u2013\u2014]+$")
+DANGLING_DASH_PATTERN = re.compile(r"(?:</?[ibu]>|[-\u2013\u2014\s])*", re.IGNORECASE)
 
 
 def strip_sdh(text):
-    original = text
+    current = text
     while True:
-        new_text = SDH_BRACKET_PATTERN.sub("", text)
-        if new_text == text:
+        new_text = SDH_BRACKET_PATTERN.sub("", current)
+        if new_text == current:
             break
-        text = new_text
+        current = new_text
+    if current != text:
+        current = BRACKET_RESIDUE_PATTERN.sub(lambda m: "".join(g or "" for g in m.groups()), current)
     while True:
-        new_text = EMPTY_STYLE_WRAP_PATTERN.sub("", text)
-        if new_text == text:
+        new_text = EMPTY_STYLE_WRAP_PATTERN.sub("", current)
+        if new_text == current:
             break
-        text = new_text
-    cleaned = DANGLING_DASH_PATTERN.sub("", WHITESPACE_PATTERN.sub(" ", text).strip())
-    if not cleaned and MUSIC_NOTE_PATTERN.search(original):
-        return " ".join(MUSIC_NOTE_PATTERN.findall(original))
+        current = new_text
+    collapsed = WHITESPACE_PATTERN.sub(" ", current).strip()
+    cleaned = "" if DANGLING_DASH_PATTERN.fullmatch(collapsed) else collapsed
+    if not cleaned and MUSIC_NOTE_PATTERN.search(text):
+        return " ".join(MUSIC_NOTE_PATTERN.findall(text))
     return cleaned
+
+
+def has_open_bracket(line):
+    return any(line.count(open_char) > line.count(close_char) for open_char, close_char in zip(OPEN_BRACKETS, CLOSE_BRACKETS))
+
+
+def join_open_brackets(lines):
+    joined = []
+    for line in lines:
+        if joined and has_open_bracket(joined[-1]) and any(close_char in line for close_char in CLOSE_BRACKETS):
+            joined[-1] = f"{joined[-1]} {line}"
+        else:
+            joined.append(line)
+    return joined
+
+
+def isolate_style_lines(lines):
+    if not any("<" in line for line in lines):
+        return lines
+    open_tags, isolated = [], []
+    for line in lines:
+        carried = "".join(f"<{tag}>" for tag in open_tags)
+        for match in STYLE_TAG_TOKEN_PATTERN.finditer(line):
+            tag = match.group(2).lower()
+            if not match.group(1):
+                open_tags.append(tag)
+            elif tag in open_tags:
+                del open_tags[len(open_tags) - 1 - open_tags[::-1].index(tag)]
+        pending = "".join(f"</{tag}>" for tag in reversed(open_tags))
+        isolated.append(carried + line + pending)
+    return isolated
+
+
+def strip_cue_sdh(lines):
+    has_music = any(MUSIC_NOTE_PATTERN.search(line) for line in lines)
+    isolated = isolate_style_lines(join_open_brackets(lines))
+    bracket_free = [cleaned for cleaned in map(strip_sdh, isolated) if cleaned]
+    processed = bracket_free if has_music else strip_speaker_tags(bracket_free)
+    return lines if processed == isolated else processed
 
 
 def is_music_segment(text):
@@ -378,28 +482,13 @@ def strip_tags_preserving_style(line):
     return STYLE_TAG_PLACEHOLDER_PATTERN.sub(lambda m: preserved[int(m.group(1))], stripped)
 
 
-STYLE_CLOSE_AT_END_PATTERN = re.compile(r"</(i|b|u)>$", re.IGNORECASE)
-STYLE_OPEN_AT_START_PATTERN = re.compile(r"^<(i|b|u)>", re.IGNORECASE)
+def collapse_adjacent_style_wraps(text):
+    return ADJACENT_STYLE_WRAP_PATTERN.sub(r"\2", text) if "</" in text else text
 
 
-def collapse_adjacent_style_wraps(lines):
-    lines = list(lines)
-    for i in range(len(lines) - 1):
-        end_match = STYLE_CLOSE_AT_END_PATTERN.search(lines[i])
-        start_match = STYLE_OPEN_AT_START_PATTERN.match(lines[i + 1])
-        if end_match and start_match and end_match.group(1).lower() == start_match.group(1).lower():
-            lines[i] = lines[i][:end_match.start()]
-            lines[i + 1] = lines[i + 1][start_match.end():]
-    return lines
-
-
-def fold_text(raw, strip_sdh_enabled=False):
+def split_cue_lines(raw):
     lines = [WHITESPACE_PATTERN.sub(" ", strip_tags_preserving_style(raw_line)).strip() for raw_line in raw.splitlines()]
-    lines = [line for line in lines if line]
-    if strip_sdh_enabled and lines and not any(MUSIC_NOTE_PATTERN.search(line) for line in lines):
-        lines = strip_speaker_tags(lines)
-    lines = collapse_adjacent_style_wraps(lines)
-    return " ".join(line for line in lines if line)
+    return [line for line in lines if line]
 
 
 EDGE_NOTE_LEADING_PATTERN = re.compile(f"^[{MUSIC_NOTE_CHARS}\\s]+")
@@ -439,12 +528,13 @@ def parse_srt(content, strip_sdh_enabled=True):
             continue
         time_match = TIME_LINE_PATTERN.match(lines[time_line_idx].strip())
         cue_id = len(cues) + 1
-        text = fold_text("\n".join(lines[time_line_idx + 1:]), strip_sdh_enabled)
+        cue_lines = split_cue_lines("\n".join(lines[time_line_idx + 1:]))
         if strip_sdh_enabled:
-            cleaned = strip_sdh(text)
-            if cleaned != text:
-                sdh_stats["dropped" if not cleaned else "stripped"] += 1
-            text = cleaned
+            cleaned = strip_cue_sdh(cue_lines)
+            if cleaned != cue_lines:
+                sdh_stats["stripped" if cleaned else "dropped"] += 1
+            cue_lines = cleaned
+        text = collapse_adjacent_style_wraps(" ".join(cue_lines))
         if text:
             cues.append({"id": cue_id, "start": time_match.group(1), "end": time_match.group(2), "text": text})
     return cues, sdh_stats
@@ -503,7 +593,7 @@ def is_isolated_short(text, latin_source=True):
 
 def assign_merge_sides(segments, latin_source=True):
     for i, seg in enumerate(segments):
-        if seg["resolved"] or is_music_segment(seg["text"]) or not is_isolated_short(seg["text"], latin_source):
+        if seg["resolved"] is not None or is_music_segment(seg["text"]) or not is_isolated_short(seg["text"], latin_source):
             continue
         if i + 1 < len(segments) and not is_music_segment(segments[i + 1]["text"]):
             gap_next = time_to_ms(segments[i + 1]["start"]) - time_to_ms(seg["end"])
@@ -579,15 +669,28 @@ def find_pure_glossary_line(text, glossary, latin_source=True):
     return resolved
 
 
+def has_content_chars(text):
+    return any(char.isalnum() or char == "_" for char in text)
+
+
+def resolve_segment(text, glossary, latin_source):
+    if not has_content_chars(text):
+        return text
+    resolved = find_pure_glossary_line(text, glossary, latin_source)
+    if not resolved and latin_source:
+        resolved = find_stutter_resolution(text, glossary)
+    return resolved or None
+
+
 def build_segments(cues, glossary, latin_source=True):
     segments = []
     for cue in cues:
-        working_text, style_wrap = split_full_wrap(cue["text"])
-        for dash_index, part in enumerate(split_dialogue(working_text)):
-            resolved = find_pure_glossary_line(part, glossary, latin_source)
-            if not resolved and latin_source:
-                resolved = find_stutter_resolution(part, glossary)
-            text = part if resolved or not latin_source else strip_letter_stutter(part)
+        body, cue_wrap = split_full_wrap(cue["text"])
+        parts = split_dialogue(body)
+        for dash_index, part in enumerate(parts):
+            text, style_wrap = (part, cue_wrap) if cue_wrap or len(parts) == 1 else split_full_wrap(part)
+            resolved = resolve_segment(text, glossary, latin_source)
+            text = text if resolved is not None or not latin_source else strip_letter_stutter(text)
             segments.append({"cue_id": cue["id"], "text": text, "start": cue["start"], "end": cue["end"],
                               "resolved": resolved, "dash_index": dash_index, "style_wrap": style_wrap})
     return assign_merge_sides(segments, latin_source)
@@ -602,7 +705,7 @@ def group_segments(segments, latin_source=True):
     quote_pending = False
     quote_span = 0
     for seg in segments:
-        if seg["resolved"]:
+        if seg["resolved"] is not None:
             if current:
                 groups.append(current)
                 current = []
@@ -739,12 +842,30 @@ def chapterize(groups):
     return chapters
 
 
+def is_passthrough(group):
+    return len(group) == 1 and group[0]["resolved"] is not None
+
+
+def fuse_music_groups(groups):
+    fused, open_group = [], None
+    for group in groups:
+        if is_passthrough(group):
+            fused.append(group)
+            open_group = None
+        elif open_group is not None:
+            open_group.extend(group)
+        else:
+            open_group = list(group)
+            fused.append(open_group)
+    return fused
+
+
 def build_units(cues, glossary, latin_source=True):
     groups = group_segments(build_segments(cues, glossary, latin_source), latin_source)
     units, chapters, marker_merges, unit_id = [], [], 0, 0
     for chapter_index, raw_chapter in enumerate(chapterize(groups), start=1):
         is_music_chapter = raw_chapter["kind"] == "music"
-        member_groups = [[seg for group in raw_chapter["groups"] for seg in group]] if is_music_chapter else raw_chapter["groups"]
+        member_groups = fuse_music_groups(raw_chapter["groups"]) if is_music_chapter else raw_chapter["groups"]
         unit_ids = []
         for group in member_groups:
             unit_id += 1
@@ -754,7 +875,7 @@ def build_units(cues, glossary, latin_source=True):
                        "kind": "music" if is_music_segment(s["text"]) else "dialogue"} for s in group]
             assign_marker_ids(spans)
             marker_merges += sum(1 for s in group if s.get("marker_boundary"))
-            if len(group) == 1 and group[0]["resolved"]:
+            if is_passthrough(group):
                 units.append({"id": unit_id, "spans": spans, "text": "", "term_matches": [], "resolved": group[0]["resolved"]})
             else:
                 text = join_group_text(group, spans, is_music_chapter)
