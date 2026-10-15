@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: bilingual_merge.py
-# Version: 2.10.3
+# Version: 2.11.0
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -101,10 +101,10 @@ def is_japanese_target(target_lang):
 
 
 def is_chinese_target(target_lang):
-    return (target_lang or "").split("-")[0].lower() in ("zh", "yue")
+    return language_key(target_lang).split("-")[0] in ("zh", "yue")
 
 
-LANGUAGE_ALIASES = {"cantonese": "yue", "iw": "he", "in": "id", "nb": "no", "nn": "no", "fil": "tl"}
+LANGUAGE_ALIASES = {"cantonese": "yue", "lzh": "zh-hant", "iw": "he", "in": "id", "nb": "no", "nn": "no", "fil": "tl"}
 TRADITIONAL_REGIONS = {"tw", "hk", "mo"}
 
 

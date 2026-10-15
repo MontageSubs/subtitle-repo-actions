@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: google_client.py
-# Version: 2.19.1
+# Version: 2.20.0
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -307,16 +307,63 @@ SCRIPT_LEAK_PATTERNS = {
     name: re.compile(f"[{chars}]{{2,}}" if name in WORD_BASED_SCRIPTS else f"[{chars}]")
     for name, chars in SCRIPT_CHAR_RANGES.items()
 }
+PROVIDER_LANGUAGES = (
+    "ab ace ach af sq alz am ar hy as awa ay az ban bm ba eu btx bts bbc be bem bn bew bho bik bs br "
+    "bg bua yue ca ceb ny zh-CN>zh-Hans|zh zh-TW>zh-Hant cv co crh hr cs da din dv doi dov nl dz en "
+    "eo et ee fj fil|tl fi fr fr-FR fr-CA fy ff gaa gl lg ka de el gn gu ht cnh ha haw iw>he|he hil "
+    "hi hmn hu hrx is ig ilo id ga it ja jw>jv|jv kn pam kk km cgg rw ktu gom ko kri ku ckb ky lo ltg "
+    "la lv lij li ln lt lmo luo lb mk mai mak mg ms ms-Arab ml mt mi mr chm mni-Mtei min lus mn my nr "
+    "new ne nso no nus oc or om pag pap ps fa pl pt pt-PT pt-BR pa pa-Arab qu rom ro rn ru sm sg sa "
+    "gd sr st crs shn sn scn szl sd si sk sl so es su sw ss sv tg ta tt te tet th ti ts tn tr tk ak "
+    "uk ur ug uz vi cy xh yi yo yua zu"
+)
+
+LEGACY_TAG_PAIRS = (
+    "tl>fil lug>lg mww>hmn kmr>ku zh-cn>zh-Hans zh-sg>zh-Hans zh-tw>zh-Hant zh-hk>zh-Hant "
+    "zh-mo>zh-Hant nb>no nn>no iw>he jw>jv nya>ny run>rn mni>mni-Mtei sr-cyrl>sr mn-cyrl>mn in>id"
+)
+
+LEGACY_TAGS = dict(pair.split(">") for pair in LEGACY_TAG_PAIRS.split(" "))
+
+
+def normalize_language_tag(code):
+    return (code or "").strip().lower().replace("_", "-")
+
+
+def build_language_index(raw):
+    native_by_tag = {}
+    native_by_base = {}
+    for entry in raw.split(" "):
+        head = entry.rstrip("!?").split("|")[0]
+        code, _, tag = head.partition(">")
+        key = normalize_language_tag(tag or code)
+        base = key.split("-")[0]
+        native_by_tag[key] = code
+        if base not in native_by_base or key == base:
+            native_by_base[base] = code
+    return native_by_tag, native_by_base
+
+
+LANGUAGE_INDEX = build_language_index(PROVIDER_LANGUAGES)
+
+
+def resolve_provider_language(code):
+    native_by_tag, native_by_base = LANGUAGE_INDEX
+    key = normalize_language_tag(code)
+    key = LEGACY_TAGS.get(key, key)
+    return native_by_tag.get(key) or native_by_base.get(key.split("-")[0])
+
+
 LANGUAGE_SCRIPTS = {
     "en": "latin", "es": "latin", "fr": "latin", "de": "latin", "it": "latin", "pt": "latin",
     "nl": "latin", "pl": "latin", "sv": "latin", "da": "latin", "no": "latin", "fi": "latin",
     "ro": "latin", "cs": "latin", "hu": "latin", "tr": "latin", "id": "latin", "vi": "latin",
     "ms": "latin", "tl": "latin", "ca": "latin", "eu": "latin", "gl": "latin", "la": "latin",
-    "zh": "cjk", "ja": "cjk", "ko": "cjk", "yue": "cjk",
+    "zh": "cjk", "ja": "cjk", "ko": "cjk", "yue": "cjk", "lzh": "cjk",
     "ru": "cyrillic", "uk": "cyrillic", "bg": "cyrillic",
     "ar": "arabic", "fa": "arabic", "ur": "arabic",
     "hi": "devanagari", "ne": "devanagari", "mr": "devanagari",
-    "th": "thai", "he": "hebrew", "el": "greek",
+    "th": "thai", "he": "hebrew", "iw": "hebrew", "el": "greek", "fil": "latin", "nb": "latin",
 }
 
 
@@ -1640,8 +1687,9 @@ def main():
     chapters = payload.get("chapters", [])
     cues = payload.get("cues", [])
     requested_lang = (args.source_lang or payload.get("source_lang") or "auto").strip()
-    lang = LanguageResolver("auto" if requested_lang.lower() == "auto" else requested_lang)
-    target_lang = args.target_lang or payload.get("target_lang", "zh-CN")
+    lang = LanguageResolver("auto" if requested_lang.lower() == "auto" else resolve_provider_language(requested_lang) or requested_lang)
+    requested_target = args.target_lang or payload.get("target_lang", "zh-CN")
+    target_lang = resolve_provider_language(requested_target) or requested_target
     api_key = args.api_key or os.environ.get(API_KEY_ENV)
 
     raw_context = None

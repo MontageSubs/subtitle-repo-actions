@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: microsoft_client.py
-# Version: 1.10.2
+# Version: 1.11.0
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -246,16 +246,61 @@ SCRIPT_LEAK_PATTERNS = {
     name: re.compile(f"[{chars}]{{2,}}" if name in WORD_BASED_SCRIPTS else f"[{chars}]")
     for name, chars in SCRIPT_CHAR_RANGES.items()
 }
+PROVIDER_LANGUAGES = (
+    "af sq am ar hy as az ba bn bho brx bs bg yue ca hne lzh zh-Hans zh-Hant sn hr cs da prs dv doi "
+    "nl en et fo fj fil fi fr fr-ca gl ka de el gu ht ha he hi mww>hmn hu is ig id ikt iu iu-Latn ga "
+    "it ja kn ks kk km rw tlh-Latn tlh-Piqd gom ko ku>ckb kmr>ku ky lo lv lt ln dsb lug>lg mk mai mg "
+    "ms ml mt mni>mni-Mtei mi mr mn-Cyrl>mn mn-Mong my ne nb>no nya>ny or ps fa pl pt>pt-BR pt-pt pa "
+    "otq ro run>rn ru sm sr-Cyrl>sr sr-Latn st nso tn sd si sk sl so es sw sv ty ta tt te th bo ti to "
+    "tr tk uk hsb ur ug uz vi cy xh yo yua zu"
+)
+
+LEGACY_TAG_PAIRS = (
+    "tl>fil lug>lg mww>hmn kmr>ku zh-cn>zh-Hans zh-sg>zh-Hans zh-tw>zh-Hant zh-hk>zh-Hant "
+    "zh-mo>zh-Hant nb>no nn>no iw>he jw>jv nya>ny run>rn mni>mni-Mtei sr-cyrl>sr mn-cyrl>mn in>id"
+)
+
+LEGACY_TAGS = dict(pair.split(">") for pair in LEGACY_TAG_PAIRS.split(" "))
+
+
+def normalize_language_tag(code):
+    return (code or "").strip().lower().replace("_", "-")
+
+
+def build_language_index(raw):
+    native_by_tag = {}
+    native_by_base = {}
+    for entry in raw.split(" "):
+        head = entry.rstrip("!?").split("|")[0]
+        code, _, tag = head.partition(">")
+        key = normalize_language_tag(tag or code)
+        base = key.split("-")[0]
+        native_by_tag[key] = code
+        if base not in native_by_base or key == base:
+            native_by_base[base] = code
+    return native_by_tag, native_by_base
+
+
+LANGUAGE_INDEX = build_language_index(PROVIDER_LANGUAGES)
+
+
+def resolve_provider_language(code):
+    native_by_tag, native_by_base = LANGUAGE_INDEX
+    key = normalize_language_tag(code)
+    key = LEGACY_TAGS.get(key, key)
+    return native_by_tag.get(key) or native_by_base.get(key.split("-")[0])
+
+
 LANGUAGE_SCRIPTS = {
     "en": "latin", "es": "latin", "fr": "latin", "de": "latin", "it": "latin", "pt": "latin",
     "nl": "latin", "pl": "latin", "sv": "latin", "da": "latin", "no": "latin", "fi": "latin",
     "ro": "latin", "cs": "latin", "hu": "latin", "tr": "latin", "id": "latin", "vi": "latin",
     "ms": "latin", "tl": "latin", "ca": "latin", "eu": "latin", "gl": "latin", "la": "latin",
-    "zh": "cjk", "ja": "cjk", "ko": "cjk", "yue": "cjk",
+    "zh": "cjk", "ja": "cjk", "ko": "cjk", "yue": "cjk", "lzh": "cjk",
     "ru": "cyrillic", "uk": "cyrillic", "bg": "cyrillic",
     "ar": "arabic", "fa": "arabic", "ur": "arabic",
     "hi": "devanagari", "ne": "devanagari", "mr": "devanagari",
-    "th": "thai", "he": "hebrew", "el": "greek",
+    "th": "thai", "he": "hebrew", "iw": "hebrew", "el": "greek", "fil": "latin", "nb": "latin",
 }
 
 def log(message):
@@ -361,11 +406,8 @@ def truncate_context(text, max_chars):
     return cut.rstrip(), True
 
 def normalize_microsoft_lang(lang_code):
-    lc = (lang_code or "").lower()
-    if lc in ("zh", "zh-cn", "zh-hans", "zh-sg"): return "zh-Hans"
-    if lc in ("zh-tw", "zh-hk", "zh-mo", "zh-hant"): return "zh-Hant"
-    if lc == "auto": return ""
-    return lang_code
+    if not lang_code or lang_code.lower() == "auto": return ""
+    return resolve_provider_language(lang_code) or lang_code
 
 class LanguageResolver:
     def __init__(self, requested):
@@ -381,7 +423,7 @@ class LanguageResolver:
         if not self.is_auto:
             return normalize_microsoft_lang(self.requested)
         with self._lock:
-            return normalize_microsoft_lang(self._detected) if self._detected else ""
+            return self._detected or ""
 
     def observe(self, detected):
         if not self.is_auto or not detected: return
