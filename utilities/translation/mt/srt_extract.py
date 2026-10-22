@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: srt_extract.py
-# Version: 2.8.0
+# Version: 2.8.1
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -95,6 +95,7 @@ import json
 import re
 import subprocess
 import sys
+import unicodedata
 
 BOM_SIGNATURES = [
     ("utf-32-le", codecs.BOM_UTF32_LE), ("utf-32-be", codecs.BOM_UTF32_BE),
@@ -180,27 +181,20 @@ ADJACENT_STYLE_WRAP_PATTERN = re.compile(r"</(i|b|u)>(\s*)<\1>", re.IGNORECASE)
 LEADING_STYLE_OPEN_PATTERN = re.compile(r"(?:<(?:i|b|u)>)*", re.IGNORECASE)
 STYLE_TAG_PLACEHOLDER_PATTERN = re.compile(r"\u0001(\d+)\u0001")
 STYLE_TAG_ALT = r"(?:</?(?:i|b|u)>)"
-STYLE_OPEN_ALT = r"(?:<(?:i|b|u)>)"
 STYLE_CLOSE_ALT = r"(?:</(?:i|b|u)>)"
 FULL_WRAP_PATTERN = re.compile(r"^<(i|b|u)>(.*)</\1>$", re.IGNORECASE | re.DOTALL)
 WHITESPACE_PATTERN = re.compile(r"\s+")
-CLOSE_QUOTE_CHARS = "\"'\u201d\u2019\u00bb\u203a\u300d\u300f\u301e\u301f"
-CLOSE_BRACKET_CHARS = ")\\]}>\uff09\uff3d\uff5d\uff1e\u3015\u3017\u3019\u301b\u3009\u300b\u3011\u27e9\u27eb"
-DECORATION_CHARS = "*\u2020\u2021\u203b\u2605\u2606"
-CLOSING_WRAP_ALT = rf"[{CLOSE_QUOTE_CHARS}{CLOSE_BRACKET_CHARS}{DECORATION_CHARS}]*"
-TERMINAL_PUNCT_PATTERN = re.compile(rf"[.!?\u2026\u22ef\u3002\uff01\uff1f]{CLOSING_WRAP_ALT}{STYLE_CLOSE_ALT}*\s*$", re.IGNORECASE)
-TRAILING_ELLIPSIS_PATTERN = re.compile(rf"(\.{{2,}}|\u2026|\u22ef){STYLE_CLOSE_ALT}*\s*$", re.IGNORECASE)
-TRAILING_CUTOFF_PATTERN = re.compile(rf"-{{2,}}{CLOSING_WRAP_ALT}{STYLE_CLOSE_ALT}*\s*$", re.IGNORECASE)
-TRAILING_SINGLE_CUTOFF_PATTERN = re.compile(rf"(?<!-)-{CLOSING_WRAP_ALT}{STYLE_CLOSE_ALT}*\s*$", re.IGNORECASE)
 DIALOGUE_DASH_PATTERN = re.compile(rf"(?:^|(?<=\s)){STYLE_TAG_ALT}*-(?!-){STYLE_TAG_ALT}*\s?", re.IGNORECASE)
 STUTTER_WORD_PATTERN = re.compile(r"(?<![A-Za-z])([A-Za-z])-\1(?![A-Za-z])", re.IGNORECASE)
 STUTTER_PREFIX_PATTERN = re.compile(r"(?<![A-Za-z])([A-Za-z])-(?=\1[a-z])", re.IGNORECASE)
-SHORT_REPLY_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9]")
+LATIN_LETTER_CLASS = "A-Za-z\u00aa\u00ba\u00c0-\u00d6\u00d8-\u00f6\u00f8-\u02b8\u1e00-\u1eff\u2c60-\u2c7f\ua720-\ua7ff\uff21-\uff3a\uff41-\uff5a"
+SHORT_REPLY_TOKEN_PATTERN = re.compile(rf"[{LATIN_LETTER_CLASS}\d]")
 SHORT_REPLY_MAX_TOKENS = 3
-STUTTER_RESIDUAL_PATTERN = re.compile(r"[A-Za-z]")
+STUTTER_RESIDUAL_PATTERN = re.compile(rf"[{LATIN_LETTER_CLASS}]")
 TRAILING_MARK_PATTERN = re.compile(rf"[!?…]+{STYLE_CLOSE_ALT}*$", re.IGNORECASE)
 GAP_THRESHOLD_MS = 200
-WORD_TOKEN_PATTERN = re.compile(r"[A-Za-z]+(?:['’][A-Za-z]+)*")
+MAX_OVERLAP_MS = 1000
+WORD_TOKEN_PATTERN = re.compile(rf"[{LATIN_LETTER_CLASS}]+(?:['’][{LATIN_LETTER_CLASS}]+)*")
 ISOLATED_MERGE_MAX_WORDS = 0
 ISOLATED_MAX_CHARS_NON_LATIN = 4
 SCENE_ADJACENCY_MS = 1500
@@ -214,9 +208,6 @@ OPEN_BRACKETS = "[({\uff08\u3010"
 CLOSE_BRACKETS = "])}\uff09\u3011"
 BRACKET_RESIDUE_PATTERN = re.compile(r"(<[ibu]>)\s+|\s+(</[ibu]>)|\s+(:)", re.IGNORECASE)
 SDH_BRACKET_PATTERN = re.compile(r"\[[^" + INNER_B + r"]*\]|\([^" + INNER_B + r"]*\)|\{[^" + INNER_B + r"]*\}|\uff08[^" + INNER_B + r"]*\uff09|\u3010[^" + INNER_B + r"]*\u3011")
-LEADING_ELLIPSIS_PATTERN = re.compile(rf"^{STYLE_OPEN_ALT}*(\.{{2,}}|\u2026)", re.IGNORECASE)
-LEADING_NON_LETTER_PATTERN = re.compile(r"^[^A-Za-z]*")
-STYLE_TAG_LEADING_PATTERN = re.compile(rf"^{STYLE_OPEN_ALT}+", re.IGNORECASE)
 EDGE_NOTE_PATTERN = re.compile(f"^[{MUSIC_NOTE_CHARS}\\s]+|[{MUSIC_NOTE_CHARS}\\s]+$")
 
 LATIN_SOURCE_LANGS = {
@@ -446,26 +437,185 @@ def strip_cue_sdh(lines):
     return lines if processed == isolated else processed
 
 
+BLANK_CHARS = frozenset("\t\n\v\f\r \u00a0\u1680\u2028\u2029\u202f\u205f\u3000\ufeff") | frozenset(chr(code) for code in range(0x2000, 0x200b))
+TERMINAL_CHARS = frozenset(".!?\u2026\u22ef\u3002\uff01\uff1f\u203c\u2047\u2048\u2049\u061f\u06d4\u0964\u0965\u0589\u037e\u104b\u1362")
+CONTINUATION_CHARS = frozenset(",;:\u3001\uff0c\uff1b\uff1a")
+NOTE_CHARS = frozenset("\u266a\u266b\u2669\u266c*\u2020\u2021\u203b\u2605\u2606")
+BRACKET_CLOSE_CHARS = frozenset(")]}\uff09\uff3d\uff5d\u3015\u3017\u3019\u301b\u3009\u300b\u3011\u27e9\u27eb")
+CLOSER_CHARS = BRACKET_CLOSE_CHARS | frozenset("\uff1e\u201d\u2019\u00bb\u203a\u300d\u300f\u301e\u301f")
+QUOTE_CHARS = frozenset("\"'")
+BRACKET_OPEN_CHARS = frozenset("([{\uff08\uff3b\uff5b\u3014\u3016\u3018\u301a\u3008\u300a\u3010\u27e8\u27ea")
+STYLE_TAG_LETTERS = "ibuIBU"
+TAIL_TERMINAL, TAIL_ELLIPSIS, TAIL_CONTINUATION, TAIL_DASH, TAIL_CLOSED = 1, 2, 4, 8, 16
+TAIL_END_SHIFT = 8
+HEAD_ELLIPSIS, HEAD_LOWER, HEAD_UPPER, HEAD_CLOSER = 1, 2, 4, 8
+
+
+def style_tag_length(text, index):
+    if text[index:index + 1] != "<":
+        return 0
+    first, second, third = text[index + 1:index + 2], text[index + 2:index + 3], text[index + 3:index + 4]
+    if first and first in STYLE_TAG_LETTERS and second == ">":
+        return 3
+    return 4 if first == "/" and second and second in STYLE_TAG_LETTERS and third == ">" else 0
+
+
+def skip_leading(text):
+    index = 0
+    while index < len(text):
+        if text[index] in BLANK_CHARS or text[index] in NOTE_CHARS:
+            index += 1
+            continue
+        tag = style_tag_length(text, index)
+        if not tag:
+            break
+        index += tag
+    return index
+
+
+def classify_tail(text):
+    content, closed = len(text), False
+    while content > 0:
+        char = text[content - 1]
+        if char in BLANK_CHARS or char in NOTE_CHARS:
+            content -= 1
+        elif char in CLOSER_CHARS or char in QUOTE_CHARS:
+            closed = True
+            content -= 1
+        elif char == ">" and content >= 4 and style_tag_length(text, content - 4) == 4:
+            content -= 4
+        else:
+            break
+    last, before = text[content - 1:content], text[content - 2:content - 1]
+    flags = 0
+    if last in ("\u2026", "\u22ef"):
+        flags = TAIL_ELLIPSIS
+    elif last == ".":
+        flags = TAIL_ELLIPSIS if before == "." else TAIL_TERMINAL
+    elif last == "-":
+        flags = TAIL_TERMINAL if before == "-" else TAIL_DASH
+    elif last and last in TERMINAL_CHARS:
+        flags = TAIL_TERMINAL
+    elif last and last in CONTINUATION_CHARS:
+        flags = TAIL_CONTINUATION
+    return (flags | TAIL_CLOSED if closed else flags) | (content << TAIL_END_SHIFT)
+
+
+def classify_head(text):
+    index = skip_leading(text)
+    lead = index
+    while text[lead:lead + 1] in QUOTE_CHARS and lead < len(text):
+        lead += 1
+    first = text[lead:lead + 1]
+    flags = 0
+    if first == "\u2026" or (first == "." and text[lead + 1:lead + 2] == "."):
+        flags = HEAD_ELLIPSIS
+    elif first and first in CLOSER_CHARS:
+        flags = HEAD_CLOSER
+    while index < len(text):
+        tag = style_tag_length(text, index)
+        if tag:
+            index += tag
+            continue
+        category = unicodedata.category(text[index])
+        if category == "Ll":
+            return flags | HEAD_LOWER
+        if category in ("Lu", "Lt"):
+            return flags | HEAD_UPPER
+        if category[0] == "L":
+            return flags
+        index += 1
+    return flags
+
+
+def ends_with_any(text, end, words, max_length):
+    return any(text[end - length:end] in words for length in range(min(max_length, end), 0, -1))
+
+
+def continues_by_punctuation(previous, current, gap_ms):
+    tail, head = previous["tail"], current["head"]
+    if tail & TAIL_TERMINAL:
+        return False
+    contiguous = gap_ms <= GAP_THRESHOLD_MS
+    if tail & TAIL_DASH:
+        return contiguous and bool(head & HEAD_LOWER)
+    if tail & TAIL_ELLIPSIS:
+        if head & HEAD_ELLIPSIS:
+            return gap_ms <= SCENE_ADJACENCY_MS
+        if head & HEAD_UPPER:
+            return False
+    elif tail & TAIL_CONTINUATION and gap_ms <= SCENE_ADJACENCY_MS:
+        return True
+    return contiguous or bool(head & HEAD_LOWER)
+
+
+def index_by_first_char(words):
+    by_char = {}
+    for word in words:
+        by_char.setdefault(word[0], []).append(word)
+    return lambda text, index: any(text.startswith(word, index) for word in by_char.get(text[index:index + 1], ()))
+
+
+def make_cjk_continuation(clause_links, open_endings, sentence_starts, continuation_starts, turn_starts):
+    clause_links, open_endings, turn_starts = frozenset(clause_links), frozenset(open_endings), frozenset(turn_starts)
+    link_length = max(map(len, clause_links), default=0)
+    open_length = max(map(len, open_endings), default=0)
+    starts_sentence_with = index_by_first_char(sentence_starts)
+    continues_with = index_by_first_char(continuation_starts)
+
+    def starts_new_sentence(text):
+        index = skip_leading(text)
+        return text[index:index + 1] in turn_starts or starts_sentence_with(text, index)
+
+    def continues(previous, current, gap_ms):
+        tail = previous["tail"]
+        if tail & (TAIL_TERMINAL | TAIL_ELLIPSIS | TAIL_CLOSED | TAIL_DASH) or gap_ms > SCENE_ADJACENCY_MS:
+            return False
+        end = tail >> TAIL_END_SHIFT
+        linked = bool(tail & TAIL_CONTINUATION) or ends_with_any(previous["text"], end, clause_links, link_length)
+        opened = not linked and gap_ms <= GAP_THRESHOLD_MS and ends_with_any(previous["text"], end, open_endings, open_length)
+        if linked or opened:
+            return not starts_new_sentence(current["text"])
+        return bool(continuation_starts) and continues_with(current["text"], skip_leading(current["text"]))
+
+    return continues
+
+
+TURN_STARTS = "\uff08(\u3010[-\uff0d\u2015"
+continues_japanese = make_cjk_continuation(
+    ["ながら", "つつ", "ので", "ために", "ための", "として", "について", "という", "ような", "によって", "による", "たり", "だり", "ずに", "ないで", "くせに", "途端", "とたん", "ものの", "うちに"],
+    ["を", "へ", "まで", "より", "ば"],
+    ["ええ", "えっ", "あっ", "ああ", "あ", "いや", "うん", "はい", "おい", "ほら", "まあ", "さあ", "ねえ", "なあ", "もう", "でも", "だから", "じゃあ", "じゃ", "それで", "そして", "しかし", "だが", "だけど", "ところで", "つまり", "えーと", "うーん", "ちょっと", "すみません", "ありがとう"],
+    [],
+    TURN_STARTS,
+)
+continues_chinese = make_cjk_continuation(
+    ["因为", "所以", "如果", "但是", "可是", "而且", "并且", "然后", "或者", "虽然", "不过", "只要", "只有", "除非", "既然", "即使", "尽管", "为了", "由于", "对于", "关于", "根据", "按照", "通过", "随着", "除了", "以便", "以及", "而是", "的话", "的时候", "之后", "之前"],
+    [],
+    ["嗯", "啊", "哦", "喔", "噢", "喂", "哎", "唉", "嘿", "呃", "哈", "哇", "哟", "咦", "谢谢", "对不起", "你好", "再见", "好的", "好吧"],
+    ["但是", "可是", "而且", "并且", "所以", "因此", "然后", "而是", "于是", "以及", "或者", "但", "而", "并", "却"],
+    TURN_STARTS,
+)
+
+
+def continuation_for(source_lang):
+    base = base_language(source_lang)
+    if base == "ja":
+        return continues_japanese
+    return continues_chinese if base in ("zh", "yue") else continues_by_punctuation
+
+
 def is_music_segment(text):
     return bool(MUSIC_NOTE_PATTERN.search(text))
 
 
 def music_continuation(text):
-    remainder = MUSIC_NOTE_PATTERN.sub("", text, count=1).strip()
-    if LEADING_ELLIPSIS_PATTERN.match(remainder):
-        return False
-    return first_letter_is_lower(remainder)
+    head = classify_head(MUSIC_NOTE_PATTERN.sub("", text, count=1).strip())
+    return not head & HEAD_ELLIPSIS and bool(head & HEAD_LOWER)
 
 
 def strip_edge_notes(text):
     return EDGE_NOTE_PATTERN.sub("", text)
-
-
-def first_letter_is_lower(text):
-    text = STYLE_TAG_LEADING_PATTERN.sub("", text)
-    match = LEADING_NON_LETTER_PATTERN.match(text)
-    rest = text[match.end():]
-    return bool(rest) and rest[0].islower()
 
 
 def strip_tags_preserving_style(line):
@@ -556,14 +706,6 @@ def split_dialogue(text):
     return segments if segments else [text]
 
 
-def has_terminal_punct(text):
-    if TRAILING_ELLIPSIS_PATTERN.search(text):
-        return False
-    if TRAILING_CUTOFF_PATTERN.search(text):
-        return True
-    return bool(TERMINAL_PUNCT_PATTERN.search(text))
-
-
 def is_short_reply(text, latin_source=True):
     if latin_source:
         return len(SHORT_REPLY_TOKEN_PATTERN.findall(text)) <= SHORT_REPLY_MAX_TOKENS
@@ -578,8 +720,10 @@ def update_quote_state(text, is_pending):
             is_pending = not is_pending
         elif char in ('“', '「', '«'):
             is_pending = True
-        elif char in ('”', '」', '»'):
+        elif char in ('”', '」', '»') or char in BRACKET_CLOSE_CHARS:
             is_pending = False
+        elif char in BRACKET_OPEN_CHARS:
+            is_pending = True
     return is_pending
 
 
@@ -593,38 +737,35 @@ def is_isolated_short(text, latin_source=True):
 
 def assign_merge_sides(segments, latin_source=True):
     for i, seg in enumerate(segments):
-        if seg["resolved"] is not None or is_music_segment(seg["text"]) or not is_isolated_short(seg["text"], latin_source):
+        if seg["resolved"] is not None or seg["music"] or not is_isolated_short(seg["text"], latin_source):
             continue
-        if i + 1 < len(segments) and not is_music_segment(segments[i + 1]["text"]):
+        if i + 1 < len(segments) and not segments[i + 1]["music"]:
             gap_next = time_to_ms(segments[i + 1]["start"]) - time_to_ms(seg["end"])
             if gap_next <= SCENE_ADJACENCY_MS:
                 seg["merge_side"] = "next"
                 continue
-        if i > 0 and not is_music_segment(segments[i - 1]["text"]):
+        if i > 0 and not segments[i - 1]["music"]:
             gap_prev = time_to_ms(seg["start"]) - time_to_ms(segments[i - 1]["end"])
             if gap_prev <= SCENE_ADJACENCY_MS:
                 seg["merge_side"] = "prev"
     return segments
 
 
-def merge_reason(prev_seg, curr_seg, latin_source=True):
-    prev_is_music = is_music_segment(prev_seg["text"])
-    curr_is_music = is_music_segment(curr_seg["text"])
-    if prev_is_music != curr_is_music:
+def merge_reason(prev_seg, curr_seg, latin_source=True, continues=continues_by_punctuation):
+    if prev_seg["music"] != curr_seg["music"]:
         return None
     if prev_seg["cue_id"] == curr_seg["cue_id"]:
         return "dash" if is_short_reply(curr_seg["text"], latin_source) else None
-    if prev_is_music and curr_is_music:
+    if curr_seg["music"]:
         return "music" if music_continuation(curr_seg["text"]) else None
     if prev_seg.get("merge_side") == "next" or curr_seg.get("merge_side") == "prev":
         return "marker"
     gap = time_to_ms(curr_seg["start"]) - time_to_ms(prev_seg["end"])
-    if TRAILING_SINGLE_CUTOFF_PATTERN.search(prev_seg["text"]) \
-            and not (gap <= GAP_THRESHOLD_MS and first_letter_is_lower(curr_seg["text"])):
+    if gap < -MAX_OVERLAP_MS:
         return None
-    if has_terminal_punct(prev_seg["text"]):
-        return None
-    return "gap" if gap <= GAP_THRESHOLD_MS or first_letter_is_lower(curr_seg["text"]) else None
+    if curr_seg["head"] & HEAD_CLOSER:
+        return "gap" if gap <= SCENE_ADJACENCY_MS else None
+    return "gap" if continues(prev_seg, curr_seg, gap) else None
 
 
 def find_stutter_resolution(text, glossary):
@@ -692,14 +833,15 @@ def build_segments(cues, glossary, latin_source=True):
             resolved = resolve_segment(text, glossary, latin_source)
             text = text if resolved is not None or not latin_source else strip_letter_stutter(text)
             segments.append({"cue_id": cue["id"], "text": text, "start": cue["start"], "end": cue["end"],
-                              "resolved": resolved, "dash_index": dash_index, "style_wrap": style_wrap})
+                              "resolved": resolved, "dash_index": dash_index, "style_wrap": style_wrap,
+                              "tail": classify_tail(text), "head": classify_head(text), "music": is_music_segment(text)})
     return assign_merge_sides(segments, latin_source)
 
 
 QUOTE_PENDING_LIMIT = 10
 
 
-def group_segments(segments, latin_source=True):
+def group_segments(segments, latin_source=True, continues=continues_by_punctuation):
     groups = []
     current = []
     quote_pending = False
@@ -719,7 +861,7 @@ def group_segments(segments, latin_source=True):
                 gap = time_to_ms(seg["start"]) - time_to_ms(current[-1]["end"])
                 merged = gap <= SCENE_ADJACENCY_MS
             if not merged:
-                reason = merge_reason(current[-1], seg, latin_source)
+                reason = merge_reason(current[-1], seg, latin_source, continues)
                 if reason:
                     merged = True
                     if reason in ("marker", "dash"):
@@ -823,7 +965,7 @@ def join_group_text(group, spans, is_music_group):
 
 
 def unit_kind(group):
-    return "music" if any(is_music_segment(seg["text"]) for seg in group) else "dialogue"
+    return "music" if any(seg["music"] for seg in group) else "dialogue"
 
 
 def chapterize(groups):
@@ -860,8 +1002,8 @@ def fuse_music_groups(groups):
     return fused
 
 
-def build_units(cues, glossary, latin_source=True):
-    groups = group_segments(build_segments(cues, glossary, latin_source), latin_source)
+def build_units(cues, glossary, latin_source=True, continues=continues_by_punctuation):
+    groups = group_segments(build_segments(cues, glossary, latin_source), latin_source, continues)
     units, chapters, marker_merges, unit_id = [], [], 0, 0
     for chapter_index, raw_chapter in enumerate(chapterize(groups), start=1):
         is_music_chapter = raw_chapter["kind"] == "music"
@@ -872,7 +1014,7 @@ def build_units(cues, glossary, latin_source=True):
             spans = [{"id": s["cue_id"], "start": s["start"], "end": s["end"], "text": s["text"],
                        "boundary": "marker" if (is_music_chapter or s.get("marker_boundary")) else None,
                        "dash_index": s.get("dash_index", 0), "style_wrap": s.get("style_wrap"),
-                       "kind": "music" if is_music_segment(s["text"]) else "dialogue"} for s in group]
+                       "kind": "music" if s["music"] else "dialogue"} for s in group]
             assign_marker_ids(spans)
             marker_merges += sum(1 for s in group if s.get("marker_boundary"))
             if is_passthrough(group):
@@ -890,7 +1032,7 @@ def extract(content, glossary, strip_sdh_enabled=True, source_lang="en"):
     cues, sdh_stats = parse_srt(content, strip_sdh_enabled and base_language(source_lang) in SDH_LANGS)
     if not cues:
         return {"success": False, "reason": "no_cues_parsed", "cues": [], "units": [], "chapters": [], "sdh_removed": sdh_stats, "marker_merges": 0}
-    units, chapters, marker_merges = build_units(cues, glossary, latin_source)
+    units, chapters, marker_merges = build_units(cues, glossary, latin_source, continuation_for(source_lang))
     return {"success": True, "cues": cues, "units": units, "chapters": chapters, "sdh_removed": sdh_stats, "marker_merges": marker_merges}
 
 
