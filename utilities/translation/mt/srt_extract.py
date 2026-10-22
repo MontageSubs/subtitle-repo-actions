@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: srt_extract.py
-# Version: 2.8.1
+# Version: 2.8.2
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -92,6 +92,7 @@
 import argparse
 import codecs
 import json
+import logging
 import re
 import subprocess
 import sys
@@ -445,8 +446,11 @@ BRACKET_CLOSE_CHARS = frozenset(")]}\uff09\uff3d\uff5d\u3015\u3017\u3019\u301b\u
 CLOSER_CHARS = BRACKET_CLOSE_CHARS | frozenset("\uff1e\u201d\u2019\u00bb\u203a\u300d\u300f\u301e\u301f")
 QUOTE_CHARS = frozenset("\"'")
 BRACKET_OPEN_CHARS = frozenset("([{\uff08\uff3b\uff5b\u3014\u3016\u3018\u301a\u3008\u300a\u3010\u27e8\u27ea")
+BOUND_CHARS = frozenset("\u3001\u3002\uff0c\uff0e\uff1b\uff1a\u30fb\u309d\u309e\u30fd\u30fe\u3005\u303b\u300d\u300f\u301e\u301f")
+HEAD_BOUND_CHARS = BRACKET_CLOSE_CHARS | BOUND_CHARS
+OPENER_CHARS = frozenset("\uff08\uff3b\uff5b\u3014\u3016\u3018\u301a\u3008\u300a\u3010\u27e8\u27ea\u300c\u300e\u301d\u00bf\u00a1\u00a5\uffe5\uff04\u00a3\uff03\u2116\u00a7\uff20")
 STYLE_TAG_LETTERS = "ibuIBU"
-TAIL_TERMINAL, TAIL_ELLIPSIS, TAIL_CONTINUATION, TAIL_DASH, TAIL_CLOSED = 1, 2, 4, 8, 16
+TAIL_TERMINAL, TAIL_ELLIPSIS, TAIL_CONTINUATION, TAIL_DASH, TAIL_CLOSED, TAIL_OPENER = 1, 2, 4, 8, 16, 32
 TAIL_END_SHIFT = 8
 HEAD_ELLIPSIS, HEAD_LOWER, HEAD_UPPER, HEAD_CLOSER = 1, 2, 4, 8
 
@@ -498,6 +502,8 @@ def classify_tail(text):
         flags = TAIL_TERMINAL
     elif last and last in CONTINUATION_CHARS:
         flags = TAIL_CONTINUATION
+    if last and last in OPENER_CHARS:
+        flags |= TAIL_OPENER
     return (flags | TAIL_CLOSED if closed else flags) | (content << TAIL_END_SHIFT)
 
 
@@ -510,7 +516,7 @@ def classify_head(text):
     flags = 0
     if first == "\u2026" or (first == "." and text[lead + 1:lead + 2] == "."):
         flags = HEAD_ELLIPSIS
-    elif first and first in CLOSER_CHARS:
+    elif first and first in HEAD_BOUND_CHARS:
         flags = HEAD_CLOSER
     while index < len(text):
         tag = style_tag_length(text, index)
@@ -526,10 +532,6 @@ def classify_head(text):
             return flags
         index += 1
     return flags
-
-
-def ends_with_any(text, end, words, max_length):
-    return any(text[end - length:end] in words for length in range(min(max_length, end), 0, -1))
 
 
 def continues_by_punctuation(previous, current, gap_ms):
@@ -556,53 +558,140 @@ def index_by_first_char(words):
     return lambda text, index: any(text.startswith(word, index) for word in by_char.get(text[index:index + 1], ()))
 
 
-def make_cjk_continuation(clause_links, open_endings, sentence_starts, continuation_starts, turn_starts):
-    clause_links, open_endings, turn_starts = frozenset(clause_links), frozenset(open_endings), frozenset(turn_starts)
-    link_length = max(map(len, clause_links), default=0)
-    open_length = max(map(len, open_endings), default=0)
-    starts_sentence_with = index_by_first_char(sentence_starts)
+def index_by_last_char(words):
+    by_char = {}
+    for word in words:
+        by_char.setdefault(word[-1], []).append(word)
+    return lambda text, end: any(text.startswith(word, end - len(word)) for word in by_char.get(text[end - 1:end], ()))
+
+
+EDGE_WINDOW = 8
+
+
+def create_edge_tokenizer(locale):
+    cutter = None
+    if locale == "zh":
+        try:
+            import jieba
+            jieba.setLogLevel(logging.ERROR)
+            cutter = jieba.lcut
+        except ImportError:
+            pass
+    elif locale == "ja":
+        try:
+            import tinysegmenter
+            cutter = tinysegmenter.TinySegmenter().tokenize
+        except ImportError:
+            pass
+    cache = {}
+
+    def tokens_of(window):
+        if window not in cache:
+            cache[window] = cutter(window) if cutter else list(window)
+        return cache[window]
+
+    def first(text, index):
+        tokens = tokens_of(text[index:index + EDGE_WINDOW])
+        return tokens[0] if tokens else ""
+
+    def last(text, end):
+        tokens = tokens_of(text[max(0, end - EDGE_WINDOW):end])
+        return tokens[-1] if tokens else ""
+
+    return first, last
+
+
+def make_cjk_continuation(locale, no_cue_start, no_cue_end, no_cue_end_phrases, complete_endings, sentence_starts, continuation_starts, turn_starts):
+    first_token, last_token = create_edge_tokenizer(locale)
+    start_tokens, end_tokens, turn_starts = frozenset(no_cue_start), frozenset(no_cue_end), frozenset(turn_starts)
+    may_start_bound = index_by_first_char(no_cue_start)
+    may_end_unfinished = index_by_last_char(no_cue_end)
+    ends_with_phrase = index_by_last_char(no_cue_end_phrases)
+    ends_complete = index_by_last_char(complete_endings)
+    starts_new_sentence = index_by_first_char(sentence_starts)
     continues_with = index_by_first_char(continuation_starts)
 
-    def starts_new_sentence(text):
-        index = skip_leading(text)
-        return text[index:index + 1] in turn_starts or starts_sentence_with(text, index)
+    def is_turn_start(text, index):
+        return text[index:index + 1] in turn_starts or starts_new_sentence(text, index)
+
+    def ends_unfinished(text, end):
+        return ends_with_phrase(text, end) or (may_end_unfinished(text, end) and not ends_complete(text, end) and last_token(text, end) in end_tokens)
+
+    def starts_bound(text, index):
+        return may_start_bound(text, index) and first_token(text, index) in start_tokens
 
     def continues(previous, current, gap_ms):
         tail = previous["tail"]
         if tail & (TAIL_TERMINAL | TAIL_ELLIPSIS | TAIL_CLOSED | TAIL_DASH) or gap_ms > SCENE_ADJACENCY_MS:
             return False
-        end = tail >> TAIL_END_SHIFT
-        linked = bool(tail & TAIL_CONTINUATION) or ends_with_any(previous["text"], end, clause_links, link_length)
-        opened = not linked and gap_ms <= GAP_THRESHOLD_MS and ends_with_any(previous["text"], end, open_endings, open_length)
-        if linked or opened:
-            return not starts_new_sentence(current["text"])
-        return bool(continuation_starts) and continues_with(current["text"], skip_leading(current["text"]))
+        index = skip_leading(current["text"])
+        if tail & TAIL_CONTINUATION or ends_unfinished(previous["text"], tail >> TAIL_END_SHIFT):
+            return not is_turn_start(current["text"], index)
+        return starts_bound(current["text"], index) or continues_with(current["text"], index)
 
     return continues
 
 
 TURN_STARTS = "\uff08(\u3010[-\uff0d\u2015"
 continues_japanese = make_cjk_continuation(
-    ["ながら", "つつ", "ので", "ために", "ための", "として", "について", "という", "ような", "によって", "による", "たり", "だり", "ずに", "ないで", "くせに", "途端", "とたん", "ものの", "うちに"],
-    ["を", "へ", "まで", "より", "ば"],
+    "ja",
+    ["を", "に", "が", "と", "から", "まで", "より", "ので", "のに", "ても", "ば", "たり", "だり", "ながら", "つつ", "ぞ", "ぜ", "かな", "かしら", "です", "ます", "ました", "でした"],
+    ["を", "は", "も", "が", "と", "より", "まで", "ば", "ながら", "つつ", "ので", "たり", "だり", "という", "によって", "による", "として", "について", "途端", "とたん"],
+    ["ために", "ための", "ような", "ずに", "ないで", "くせに", "ものの", "うちに"],
+    ["こんにちは", "こんばんは", "どうも", "これまで", "今まで", "ここまで", "そこまで", "どこまで", "あそこまで", "っと", "ちゃんと", "ほんと", "ふと"],
     ["ええ", "えっ", "あっ", "ああ", "あ", "いや", "うん", "はい", "おい", "ほら", "まあ", "さあ", "ねえ", "なあ", "もう", "でも", "だから", "じゃあ", "じゃ", "それで", "そして", "しかし", "だが", "だけど", "ところで", "つまり", "えーと", "うーん", "ちょっと", "すみません", "ありがとう"],
     [],
     TURN_STARTS,
 )
-continues_chinese = make_cjk_continuation(
-    ["因为", "所以", "如果", "但是", "可是", "而且", "并且", "然后", "或者", "虽然", "不过", "只要", "只有", "除非", "既然", "即使", "尽管", "为了", "由于", "对于", "关于", "根据", "按照", "通过", "随着", "除了", "以便", "以及", "而是", "的话", "的时候", "之后", "之前"],
-    [],
-    ["嗯", "啊", "哦", "喔", "噢", "喂", "哎", "唉", "嘿", "呃", "哈", "哇", "哟", "咦", "谢谢", "对不起", "你好", "再见", "好的", "好吧"],
-    ["但是", "可是", "而且", "并且", "所以", "因此", "然后", "而是", "于是", "以及", "或者", "但", "而", "并", "却"],
-    TURN_STARTS,
-)
+
+CHINESE_ORTHOGRAPHY = {
+    "zh-hans": {
+        "proclitics": ["在", "从", "向", "往", "对", "给", "把", "被", "与", "和", "跟", "同", "随", "自", "于", "由", "按", "按照", "根据", "为", "为了", "朝", "凭", "借", "沿", "沿着", "趁", "趁着", "这", "这个", "这些", "那", "那个", "那些", "哪", "各个", "每", "以及", "关于", "有关", "对于"],
+        "enclitics": ["的", "地", "得", "了", "着", "过", "吗", "呢", "吧", "啊", "呀", "哇", "啦", "罢", "哩", "呗", "嘞", "咯", "哈", "哟", "哎", "耶", "们", "等等"],
+        "conjunctions": ["并且", "而且", "但是", "然而", "或者", "还是", "因而", "所以", "虽然", "尽管", "不仅", "不但", "如果", "要是", "即使", "哪怕", "只有", "只要", "因为", "既然"],
+    },
+    "zh-hant": {
+        "proclitics": ["在", "從", "向", "往", "對", "給", "把", "被", "與", "和", "跟", "同", "隨", "自", "於", "由", "按", "按照", "根據", "為", "為了", "朝", "憑", "藉", "沿", "沿著", "趁", "趁著", "這", "這個", "這些", "那", "那個", "那些", "哪", "各", "每", "以及", "關於", "有關", "對於"],
+        "enclitics": ["的", "地", "得", "了", "著", "過", "嗎", "呢", "吧", "啊", "呀", "哇", "啦", "罷", "哩", "唄", "嘞", "咯", "哈", "喲", "哎", "耶", "們", "等等"],
+        "conjunctions": ["並且", "而且", "但是", "然而", "或者", "還是", "因而", "所以", "雖然", "儘管", "不僅", "不但", "如果", "要是", "即使", "哪怕", "只有", "只要", "因為", "既然"],
+    },
+    "yue": {
+        "proclitics": ["喺", "喺度", "由", "向", "畀", "同", "將", "自", "跟", "到", "由得", "為咗", "趁", "照", "順", "呢", "呢個", "呢啲", "嗰", "嗰個", "嗰啲", "邊個", "邊度", "點解", "關於", "同埋"],
+        "enclitics": ["嘅", "咗", "緊", "過", "喇", "咩", "呢", "咪", "呀", "喎", "㗎", "啫", "囉", "哩", "晒", "埋", "掂", "倒", "翻", "返", "添", "咋", "嘞", "啩", "啝", "先", "定", "哋"],
+        "conjunctions": ["而且", "但係", "不過", "或者", "所以", "如果", "同埋", "抑或", "因為", "既然", "縱使", "雖然", "就算", "只要"],
+    },
+}
+INTERJECTIVE_OR_LEXICAL_ENCLITICS = frozenset(["呢", "啊", "哇", "哈", "哎", "耶", "呀", "哟", "喲", "过", "過", "得", "地", "罢", "罷", "等等", "先", "定", "咪", "咩", "倒", "翻", "返", "掂"])
+STANDALONE_PROCLITICS = frozenset(["对", "對", "给", "給", "借", "藉", "按", "这", "這", "这个", "這個", "这些", "這些", "那", "那个", "那個", "那些", "哪", "每", "各", "各个", "呢", "呢個", "呢啲", "嗰", "嗰個", "嗰啲", "邊個", "邊度", "點解"])
+
+
+def make_chinese_continuation(*variants):
+    orthographies = [CHINESE_ORTHOGRAPHY[variant] for variant in variants]
+    return make_cjk_continuation(
+        "zh",
+        [word for orthography in orthographies for word in orthography["enclitics"] if word not in INTERJECTIVE_OR_LEXICAL_ENCLITICS] + ["嘛", "么", "麼", "而已", "罢了", "罷了", "似的"],
+        [word for orthography in orthographies for word in orthography["proclitics"] if word not in STANDALONE_PROCLITICS]
+        + [word for orthography in orthographies for word in orthography["conjunctions"]]
+        + ["然后", "然後", "不过", "不過", "可是", "而是", "以便", "由于", "由於", "除了", "通过", "通過", "随着", "隨著", "除非", "的话", "的話", "之后", "之後", "之前"],
+        ["的时候", "的時候"],
+        [],
+        ["嗯", "啊", "哦", "喔", "噢", "喂", "哎", "唉", "嘿", "呃", "哈", "哇", "哟", "咦", "谢谢", "謝謝", "对不起", "對不起", "你好", "再见", "再見", "好的", "好吧"],
+        ["但是", "但係", "可是", "而且", "并且", "並且", "所以", "因此", "然后", "然後", "而是", "于是", "於是", "以及", "或者", "但", "而", "并", "並", "却", "卻"],
+        TURN_STARTS,
+    )
+
+
+continues_mandarin = make_chinese_continuation("zh-hans", "zh-hant")
+continues_cantonese = make_chinese_continuation("yue")
 
 
 def continuation_for(source_lang):
     base = base_language(source_lang)
     if base == "ja":
         return continues_japanese
-    return continues_chinese if base in ("zh", "yue") else continues_by_punctuation
+    if base == "zh":
+        return continues_mandarin
+    return continues_cantonese if base == "yue" else continues_by_punctuation
 
 
 def is_music_segment(text):
@@ -763,7 +852,7 @@ def merge_reason(prev_seg, curr_seg, latin_source=True, continues=continues_by_p
     gap = time_to_ms(curr_seg["start"]) - time_to_ms(prev_seg["end"])
     if gap < -MAX_OVERLAP_MS:
         return None
-    if curr_seg["head"] & HEAD_CLOSER:
+    if curr_seg["head"] & HEAD_CLOSER or prev_seg["tail"] & TAIL_OPENER:
         return "gap" if gap <= SCENE_ADJACENCY_MS else None
     return "gap" if continues(prev_seg, curr_seg, gap) else None
 
