@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: bilingual_merge.py
-# Version: 2.11.0
+# Version: 2.11.1
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -631,8 +631,80 @@ def is_leading_punct_run(text, match_start):
     return match_start > 0 and text[match_start - 1] in NO_LINE_END_CHARS
 
 
-def find_protected_spans(text, glossary_terms, target_lang=None):
-    spans = [(m.start(), m.end()) for m in BOOK_TITLE_PATTERN.finditer(text)]
+BRACKET_PAIR_PATTERN = re.compile(r"（[^（）]{0,38}）|\([^()]{0,38}\)|【[^【】]{0,38}】|\[[^\[\]]{0,38}\]|〔[^〔〕]{0,38}〕")
+BRACKET_OPEN_CHARS = frozenset("([{\uff08\uff3b\uff5b\u3014\u3016\u3018\u301a\u3008\u300a\u3010\u27e8\u27ea")
+BRACKET_CLOSE_CHARS = frozenset(")]}\uff09\uff3d\uff5d\u3015\u3017\u3019\u301b\u3009\u300b\u3011\u27e9\u27eb")
+MISSING_BRACKET_COST = 1
+EXTRA_BRACKET_COST = 0.5
+UNBALANCED_COST = 0.5
+BRACKET_MISMATCH_WEIGHT = 0.25
+
+
+def bracket_profile(text):
+    depth, count, crossing = 0, 0, False
+    for char in text:
+        if char in BRACKET_OPEN_CHARS:
+            count += 1
+            depth += 1
+        elif char in BRACKET_CLOSE_CHARS:
+            count += 1
+            depth -= 1
+            if depth < 0:
+                crossing, depth = True, 0
+    return count, crossing or depth != 0
+
+
+def bracket_edges(text):
+    edges = []
+    for index, char in enumerate(text):
+        if char in BRACKET_OPEN_CHARS:
+            edges.append(index)
+        elif char in BRACKET_CLOSE_CHARS:
+            edges.append(index + 1)
+    return edges
+
+
+def bracket_mismatch(part, source):
+    target = bracket_profile(part)
+    if (source[0] > 0) == (target[0] > 0):
+        presence = 0
+    else:
+        presence = MISSING_BRACKET_COST if source[0] > 0 else EXTRA_BRACKET_COST
+    return presence + (0 if source[1] == target[1] else UNBALANCED_COST)
+
+
+def align_cuts_to_brackets(text, source_texts, cuts, locked, protected):
+    sources = [bracket_profile(source) for source in source_texts]
+    if all(profile[0] == 0 for profile in sources):
+        return list(cuts)
+    edges = bracket_edges(text)
+    aligned = list(cuts)
+    for i in range(len(cuts)):
+        if i in locked:
+            continue
+        low = 0 if i == 0 else aligned[i - 1]
+        high = len(text) if i == len(cuts) - 1 else aligned[i + 1]
+        scale = max(1, high - low)
+
+        def cost_at(position):
+            return abs(position - cuts[i]) / scale + BRACKET_MISMATCH_WEIGHT * (
+                bracket_mismatch(text[low:position], sources[i]) + bracket_mismatch(text[position:high], sources[i + 1]))
+
+        best = aligned[i]
+        best_cost = cost_at(best)
+        for edge in edges:
+            if edge <= low or edge >= high or edge == best or inside_protected_span(edge, protected):
+                continue
+            cost = cost_at(edge)
+            if cost < best_cost:
+                best, best_cost = edge, cost
+        aligned[i] = best
+    return aligned
+
+
+def find_protected_spans(text, glossary_terms, target_lang=None, protect_brackets=False):
+    spans = [(m.start(), m.end()) for m in BRACKET_PAIR_PATTERN.finditer(text)] if protect_brackets else []
+    spans.extend((m.start(), m.end()) for m in BOOK_TITLE_PATTERN.finditer(text))
     spans.extend((m.start(), m.end()) for m in STYLE_TAG_SPAN_PATTERN.finditer(text))
     spans.extend((m.start(), m.end()) for m in LATIN_WORD_PATTERN.finditer(text))
     spans.extend((m.start(), m.end()) for m in MARKER_PATTERN.finditer(text))
@@ -855,6 +927,7 @@ def split_by_boundary(translated_text, spans, protected=(), target_lang=None, so
 
     locked = {i for i in range(len(cuts)) if tags[i] == "marker"}
     cuts = rebalance_disproportionate_cuts(index, spans, cuts, locked, target_lang)
+    cuts = align_cuts_to_brackets(translated_text, [span["text"] for span in spans], cuts, locked, protected)
     cuts = snap_cuts_forward_to_punct(translated_text, cuts, locked, tags, protected)
     parts, cursor = [], 0
     for cut in cuts:
@@ -1026,11 +1099,12 @@ def build_bilingual_cues(cues, units, translations, target_lang, source_lang=Non
         original_text = "".join(span["text"] for span in spans)
         translated = strip_unsourced_brackets(original_text, strip_foreign_markers(translated))
         translated = rectify_translation_quotes(translated, original_text, target_lang)
+        protect_brackets = not any(bracket_profile(span["text"])[1] for span in spans)
         protected_holder = []
 
-        def get_protected(text=translated):
+        def get_protected(text=translated, protect=protect_brackets):
             if not protected_holder:
-                protected_holder.append(find_protected_spans(text, glossary_terms, target_lang))
+                protected_holder.append(find_protected_spans(text, glossary_terms, target_lang, protect))
             return protected_holder[0]
 
         parts, method = split_translation(translated, spans, get_protected, target_lang, source_lang)
