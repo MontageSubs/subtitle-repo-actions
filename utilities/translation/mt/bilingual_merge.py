@@ -250,7 +250,11 @@ BOUNDARY_SEARCH_PATTERNS = {
 MARKER_PATTERN = re.compile(r"\u27e6c(\d+(?:\.\d+)?)\u27e7")
 STYLE_TAG_PATTERN = re.compile(r"</?(?:i|b|u)>", re.IGNORECASE)
 STYLE_TAG_SPAN_PATTERN = re.compile(r"<(i|b|u)>.*?</\1>", re.IGNORECASE | re.DOTALL)
-RESIDUAL_MARKER_PATTERN = re.compile(r"\s*\u27e6[^\u27e6\u27e7]*\u27e7\s*")
+RESIDUAL_MARKER_PATTERN = re.compile(r"(\s*)\u27e6[^\u27e6\u27e7]*\u27e7(\s*)")
+
+
+def remove_residual_markers(part):
+    return RESIDUAL_MARKER_PATTERN.sub(lambda m: " " if m.group(1) and m.group(2) else m.group(1) + m.group(2), part)
 VALID_CUE_MARKER_PATTERN = re.compile(r"\u27e6c\d+(?:\.\d+)?\u27e7", re.IGNORECASE)
 FOREIGN_MARKER_PATTERN = re.compile(r"\u27e6[^\u27e6\u27e7]*\u27e7|[\u27e6\u27e7]")
 MARKER_PLACEHOLDER_PATTERN = re.compile(r"\u0002(\d+)\u0002")
@@ -1021,7 +1025,7 @@ def split_translation(translated_text, spans, get_protected, target_lang=None, s
         parts, method = [translated_text.strip()], "single"
     else:
         parts, method = split_by_boundary(translated_text, spans, get_protected(), target_lang, source_lang)
-    parts = [RESIDUAL_MARKER_PATTERN.sub(" ", p).strip() if ("\u27e6" in p or "\u27e7" in p) else p.strip() for p in parts]
+    parts = [remove_residual_markers(p).strip() if ("\u27e6" in p or "\u27e7" in p) else p.strip() for p in parts]
     parts = enforce_punctuation_placement(parts)
     parts = repair_empty_parts(parts, spans, get_protected, target_lang, source_lang)
     return enforce_quote_closure(parts, translated_text, target_lang), method
@@ -1174,7 +1178,7 @@ WRAP_PAIR_PATTERNS = tuple(re.compile(pattern) for pattern in (
 ))
 WRAP_NO_LINE_START_CHARS = NO_LINE_START_CHARS | set("‥っゃゅょゎッャュョヮーヵヶヽヾゝゞ々﹚﹜﹞…%‰°′″/")
 WRAP_NO_LINE_END_CHARS = NO_LINE_END_CHARS | set("$€£¥₩₽₹₺₴¢§№〔〖〘〚﹙﹛﹝")
-WRAP_STYLE_SPAN_PENALTY = 45
+WRAP_STYLE_SPAN_PENALTY = 12
 WRAP_PAIR_SPAN_PENALTY = 40
 WRAP_PAIR_HARD_MAX_CHARS = 8
 WRAP_CLOSERS = r"['\"”’»›」』）)}\]】]*"
@@ -1251,21 +1255,12 @@ def render_marked(visible, marks, offset):
 
 
 def cut_marked(visible, marks, line_end, next_start):
-    first, second, open_marks = [], [], []
+    first, second = [], []
     for mark in marks:
-        to_first = mark["at"] < line_end or (mark["at"] == line_end and mark["closing"])
+        to_first = mark["at"] < line_end or (mark["at"] <= next_start and mark["closing"])
         (first if to_first else second).append(mark)
-        if not to_first or not mark["name"]:
-            continue
-        if not mark["closing"]:
-            open_marks.append(mark)
-        else:
-            names = [entry["name"] for entry in open_marks]
-            del open_marks[max(0, len(names) - 1 - names[::-1].index(mark["name"])) if mark["name"] in names else len(open_marks):]
-    closers = [{**mark, "at": line_end, "raw": f"</{mark['name']}>", "closing": True} for mark in reversed(open_marks)]
-    reopeners = [{**mark, "at": next_start} for mark in open_marks]
-    return (render_marked(visible[:line_end], first + closers, 0),
-            render_marked(visible[next_start:], reopeners + second, next_start))
+    return (render_marked(visible[:line_end], first, 0),
+            render_marked(visible[next_start:], second, next_start))
 
 
 def match_ranges(text, patterns):
@@ -1295,7 +1290,7 @@ def wrap_tokens(text, target_lang):
 WRAP_ORTHOGRAPHY = {
     "ja": (
         "お ご 御 貴 諸 各 毎 元 前 新 超 最 大 小 この その あの どの",
-        "は が を に へ と から より で や の ね よ か わ ぞ ぜ な も ば て でも たり だけ ほど ばかり さえ こそ など なら かしら って ちゃ じゃ",
+        "は が を に へ と から より で や の ね よ か わ ぞ ぜ な も ば て でも たり だけ ほど ばかり さえ こそ など なら かしら って ちゃ じゃ まで ので のに ても だり ながら つつ です ます ました でした",
         "そして しかし また または だが したがって だから あるいは つまり ところで なお けれども けれど",
     ),
     "en": (
@@ -1372,7 +1367,9 @@ def split_into_two_lines(text, target_lang):
     if len(tokens) < 2:
         return None
     forbids, penalty_at = build_wrap_protection(visible, marks)
-    best, offset, last_word = None, 0, ""
+    proclitics, enclitics, conjunctions = wrap_orthography(target_lang)
+    enforces_clitics = is_chinese_target(target_lang) or is_japanese_target(target_lang)
+    options, offset, last_word = [], 0, ""
     for index in range(len(tokens) - 1):
         piece, is_word = tokens[index]
         offset += len(piece)
@@ -1387,10 +1384,13 @@ def split_into_two_lines(text, target_lang):
         next_word = next((word.lower() for word, flag in tokens[index + 1:] if flag), "")
         space_boundary = bool(re.search(r"\s", visible[len(line1):len(visible) - len(line2)]))
         score = score_wrap_candidate(offset, len(visible), line1, line2, last_word, next_word, space_boundary, target_lang) + penalty_at(offset)
-        if best is None or score < best[1]:
-            best = (offset, score)
-    if best is None:
+        splits_clitic = next_word in enclitics or last_word in proclitics or last_word in conjunctions
+        options.append((offset, score, splits_clitic))
+    if enforces_clitics:
+        options = [option for option in options if not option[2]] or options
+    if not options:
         return None
+    best = min(options, key=lambda option: option[1])
     line_end = len(visible[:best[0]].rstrip())
     next_start = len(visible) - len(visible[best[0]:].lstrip())
     first, second = cut_marked(visible, marks, line_end, next_start)
