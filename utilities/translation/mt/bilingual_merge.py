@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: bilingual_merge.py
-# Version: 2.11.1
+# Version: 2.12.0
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -36,6 +36,10 @@
 #       translation; inline <i>/<b>/<u> runs survive alignment cuts intact.
 #     - Multi-speaker music cues wrap each dash segment's notes individually
 #       instead of enclosing the whole joined line in one pair.
+#     - Optional --wrap-lines: balances over-long translations into two lines
+#       with the same algorithm as the web app (markup-aware cuts that close and
+#       reopen <i>/<b>/<u>, protected ellipses/numbers/names/quotes, pyramid
+#       balance with punctuation rewards scaled by line balance).
 #
 # 功能:
 #     - 重构双语字幕块并保持原始时间轴。
@@ -45,6 +49,9 @@
 #     - 音乐行判定基于原文首字符（兼容 <i> 等前导标签）；命中时译文加 {\an7}
 #       置顶标签，缺失的开头音符自动补齐，句中多余音符统一清理为一个空格。
 #     - 分句开/关符号集合覆盖中日韩引号、法语/德语引号与西班牙语倒问叹号。
+#     - 可选 --wrap-lines：与网页端同一算法，将过长译文均衡拆为两行（标签感知，
+#       跨 <i>/<b>/<u> 切分时自动闭合并重开；保护省略号/数字/人名/引号；金字塔
+#       平衡，标点奖励按两行均衡度缩放）。
 #
 # Usage / 用法:
 #     python bilingual_merge.py --extract extract.json --translations translations.json --output bilingual.srt
@@ -1081,7 +1088,7 @@ def compute_cue_music_flags(units):
     return {cue_id: bool(kinds) and all(kinds) for cue_id, kinds in kinds_by_cue.items()}
 
 
-def build_bilingual_cues(cues, units, translations, target_lang, source_lang=None):
+def build_bilingual_cues(cues, units, translations, target_lang, source_lang=None, wrap_lines=False):
     cue_segments = {}
     approx_splits = []
     quality_warnings = []
@@ -1138,6 +1145,8 @@ def build_bilingual_cues(cues, units, translations, target_lang, source_lang=Non
             if is_all_music and len(parts) == 1:
                 translation = format_music_line(translation)
             duration_ms = parse_srt_timestamp_ms(cue["end"]) - parse_srt_timestamp_ms(cue["start"])
+            if wrap_lines:
+                translation = wrap_translation_lines(translation, target_lang, duration_ms)
             metrics = evaluate_reading_speed(translation, duration_ms, target_lang)
             if metrics["over_cps"] or metrics["over_length"]:
                 quality_warnings.append({"cue_id": cue["id"], **metrics})
@@ -1145,6 +1154,257 @@ def build_bilingual_cues(cues, units, translations, target_lang, source_lang=Non
                 translation = POSITION_TOP_TAG + translation
         results.append({**cue, "translation": translation})
     return results, approx_splits, quality_warnings
+
+
+INLINE_MARKUP_PATTERN = re.compile(r"\{[^}]*\}|<(/?)([a-zA-Z][a-zA-Z0-9]*)[^>]*>")
+WRAP_HARD_PATTERNS = tuple(re.compile(pattern) for pattern in (
+    r"\.{2,}|[…‥]+",
+    r"[!?！？]{2,}[.…]*",
+    r"[—–-]{2,}|[~～]{2,}",
+    r"\d+(?:[.,:·/]\d+)+%?",
+    r"[$€£¥]\s?\d[\d.,]*|\d[\d.,]*\s?(?:%|‰|°[CF]?)",
+    r"[^\W\d_]+(?:[·•‧][^\W\d_]+)+",
+    r"(?:https?://|www\.)\S+|[\w.+-]+@[\w-]+(?:\.[\w-]+)+",
+    r"[#@][^\W]+",
+    r"《[^《》]{1,16}》",
+))
+WRAP_PAIR_PATTERNS = tuple(re.compile(pattern) for pattern in (
+    r"“[^“”]*”|‘[^‘’]*’|「[^「」]*」|『[^『』]*』|《[^《》]*》|（[^（）]*）|【[^【】]*】|„[^„“”]*[“”]|«[^«»]*»|‹[^‹›]*›",
+    r"\([^()]*\)|\[[^\[\]]*\]|\"[^\"]*\"",
+))
+WRAP_NO_LINE_START_CHARS = NO_LINE_START_CHARS | set("‥っゃゅょゎッャュョヮーヵヶヽヾゝゞ々﹚﹜﹞…%‰°′″/")
+WRAP_NO_LINE_END_CHARS = NO_LINE_END_CHARS | set("$€£¥₩₽₹₺₴¢§№〔〖〘〚﹙﹛﹝")
+WRAP_STYLE_SPAN_PENALTY = 45
+WRAP_PAIR_SPAN_PENALTY = 40
+WRAP_PAIR_HARD_MAX_CHARS = 8
+WRAP_CLOSERS = r"['\"”’»›」』）)}\]】]*"
+WRAP_TERMINAL_PATTERN = re.compile(r"(?:\.{2,}|[.…‥。۔?!？！؟‽])" + WRAP_CLOSERS + "$")
+WRAP_CLAUSE_PATTERN = re.compile(r"[:;：；؛—–]" + WRAP_CLOSERS + "$")
+WRAP_MINOR_PATTERN = re.compile(r"[,，、،]" + WRAP_CLOSERS + "$")
+WRAP_ABBREVIATION_PATTERN = re.compile(
+    r"(?:^|\s)(?:[A-Za-z]{1,3}\.|[A-Z][a-z]{1,4}\.|etc\.|vs\.|e\.g\.|i\.e\.|approx\.|dept\.|fig\.|gen\.|gov\.|inc\.|jr\.|sr\.|ltd\.|st\.|vol\.)"
+    + WRAP_CLOSERS + "$", re.IGNORECASE)
+WRAP_NUMBER_TAIL_PATTERN = re.compile(r"\d+$")
+WRAP_UNIT_HEAD_PATTERN = re.compile(r"^(%|‰|[a-zA-Z]{1,4}|[一-鿿])")
+WRAP_ATTACHED_CLOSING_PATTERN = re.compile(r"^['\"”’»›」』）)}\]】]")
+WRAP_UNBALANCED_RATIO = 1.35
+WRAP_UNBALANCED_PENALTY = 15
+WRAP_CLITIC_PENALTY = 70
+WRAP_ORPHAN_LETTER_PENALTY = 60
+WRAP_NUMBER_UNIT_PENALTY = 60
+WRAP_SHORT_LINE_PENALTY = 75
+WRAP_CJK_TINY_LINE_PENALTY = 150
+WRAP_CJK_SHORT_LINE_SOFT_PENALTY = 20
+WRAP_TERMINAL_REWARD = 40
+WRAP_CLAUSE_REWARD = 24
+WRAP_MINOR_REWARD = 14
+WRAP_SPACE_BOUNDARY_REWARD = 20
+WRAP_CONJUNCTION_REWARD = 12
+WRAP_PYRAMID_WEIGHT = 0.5
+WRAP_REWARD_MIN_SHARE = 0.2
+WRAP_REWARD_FULL_SHARE = 0.38
+CHINESE_CONJUNCTIONS = {
+    "zh-hans": "并且 而且 但是 然而 或者 还是 因而 所以 虽然 尽管 不仅 不但 如果 要是 即使 哪怕 只有 只要 因为 既然",
+    "zh-hant": "並且 而且 但是 然而 或者 還是 因而 所以 雖然 儘管 不僅 不但 如果 要是 即使 哪怕 只有 只要 因為 既然",
+    "yue": "同埋 而且 但係 不過 或者 所以 如果 抑或 因為 既然 縱使 雖然 就算 只要",
+}
+
+
+def separate_markup(text):
+    marks, visible, last = [], [], 0
+    length = 0
+    for match in INLINE_MARKUP_PATTERN.finditer(text):
+        chunk = text[last:match.start()]
+        visible.append(chunk)
+        length += len(chunk)
+        marks.append({"at": length, "raw": match.group(0), "name": (match.group(2) or "").lower() or None, "closing": match.group(1) == "/"})
+        last = match.end()
+    visible.append(text[last:])
+    return "".join(visible), marks
+
+
+def paired_spans(marks):
+    open_marks, spans = [], []
+    for mark in marks:
+        if not mark["name"]:
+            continue
+        if not mark["closing"]:
+            open_marks.append(mark)
+            continue
+        names = [entry["name"] for entry in open_marks]
+        if mark["name"] not in names:
+            continue
+        index = len(names) - 1 - names[::-1].index(mark["name"])
+        spans.append((open_marks[index]["at"], mark["at"]))
+        del open_marks[index:]
+    return spans
+
+
+def render_marked(visible, marks, offset):
+    out, cursor = [], 0
+    for mark in marks:
+        at = max(0, mark["at"] - offset)
+        out.append(visible[cursor:at] + mark["raw"])
+        cursor = at
+    out.append(visible[cursor:])
+    return "".join(out)
+
+
+def cut_marked(visible, marks, line_end, next_start):
+    first, second, open_marks = [], [], []
+    for mark in marks:
+        to_first = mark["at"] < line_end or (mark["at"] == line_end and mark["closing"])
+        (first if to_first else second).append(mark)
+        if not to_first or not mark["name"]:
+            continue
+        if not mark["closing"]:
+            open_marks.append(mark)
+        else:
+            names = [entry["name"] for entry in open_marks]
+            del open_marks[max(0, len(names) - 1 - names[::-1].index(mark["name"])) if mark["name"] in names else len(open_marks):]
+    closers = [{**mark, "at": line_end, "raw": f"</{mark['name']}>", "closing": True} for mark in reversed(open_marks)]
+    reopeners = [{**mark, "at": next_start} for mark in open_marks]
+    return (render_marked(visible[:line_end], first + closers, 0),
+            render_marked(visible[next_start:], reopeners + second, next_start))
+
+
+def match_ranges(text, patterns):
+    return [(m.start(), m.end()) for pattern in patterns for m in pattern.finditer(text)]
+
+
+def strictly_inside(ranges, position):
+    return any(start < position < end for start, end in ranges)
+
+
+def build_wrap_protection(visible, marks):
+    pairs = match_ranges(visible, WRAP_PAIR_PATTERNS)
+    hard = match_ranges(visible, WRAP_HARD_PATTERNS) + [(a, b) for a, b in pairs if b - a <= WRAP_PAIR_HARD_MAX_CHARS]
+    styled = paired_spans(marks)
+    return (lambda position: strictly_inside(hard, position),
+            lambda position: (WRAP_STYLE_SPAN_PENALTY if strictly_inside(styled, position) else 0)
+            + (WRAP_PAIR_SPAN_PENALTY if strictly_inside(pairs, position) else 0))
+
+
+def wrap_tokens(text, target_lang):
+    words = segment_words(text, target_lang)
+    if words is None:
+        words = re.findall(r"\s+|\S+", text) if re.search(r"\s", text) else list(text)
+    return [(word, bool(re.search(r"[^\W_]", word))) for word in words]
+
+
+WRAP_ORTHOGRAPHY = {
+    "ja": (
+        "お ご 御 貴 諸 各 毎 元 前 新 超 最 大 小 この その あの どの",
+        "は が を に へ と から より で や の ね よ か わ ぞ ぜ な も ば て でも たり だけ ほど ばかり さえ こそ など なら かしら って ちゃ じゃ",
+        "そして しかし また または だが したがって だから あるいは つまり ところで なお けれども けれど",
+    ),
+    "en": (
+        "a an the to of in for on with at by from into onto than as about upon within without toward towards through during before after above below between under over across along among against around behind beneath beside besides beyond inside outside near past since throughout until via despite my your his her its our their this that these those whose each every either neither some any no both much many several",
+        "'s 're 've 'd 'll 'm n't",
+        "and but or nor so yet because although while whereas since unless if",
+    ),
+}
+
+
+@functools.lru_cache(maxsize=32)
+def wrap_orthography(target_lang):
+    key = language_key(target_lang)
+    rule = CHINESE_BREAK_RULES.get(key)
+    if rule:
+        enclitics, proclitics = (set(words.split()) for words in rule)
+        return proclitics, enclitics, set(CHINESE_CONJUNCTIONS[key].split())
+    proclitics, enclitics, conjunctions = WRAP_ORTHOGRAPHY.get(key, ("", "", ""))
+    return set(proclitics.split()), set(enclitics.split()), set(conjunctions.split())
+
+
+def wrap_balance_factor(line1, line2):
+    share = min(len(line1), len(line2)) / (len(line1) + len(line2))
+    return min(1.0, max(0.0, (share - WRAP_REWARD_MIN_SHARE) / (WRAP_REWARD_FULL_SHARE - WRAP_REWARD_MIN_SHARE)))
+
+
+def wrap_short_line_penalty(line1, line2, counts_characters, softened):
+    pattern = re.compile(r"[^\W_]") if counts_characters else re.compile(r"[^\W_]+")
+    units1, units2 = len(pattern.findall(line1)), len(pattern.findall(line2))
+    if counts_characters:
+        if units1 < 2 or units2 < 2:
+            return WRAP_CJK_TINY_LINE_PENALTY
+        if units1 < 3 or units2 < 3:
+            return WRAP_CJK_SHORT_LINE_SOFT_PENALTY if softened else WRAP_SHORT_LINE_PENALTY
+        return 0
+    return WRAP_SHORT_LINE_PENALTY if units1 <= 1 or len(line1) < 4 or units2 <= 1 or len(line2) < 4 else 0
+
+
+def score_wrap_candidate(offset, total, line1, line2, last_word, next_word, space_boundary, target_lang):
+    proclitics, enclitics, conjunctions = wrap_orthography(target_lang)
+    counts_characters = is_chinese_target(target_lang) or is_japanese_target(target_lang)
+    rewards_space = is_chinese_target(target_lang) and space_boundary
+    terminal = bool(WRAP_TERMINAL_PATTERN.search(line1)) and not WRAP_ABBREVIATION_PATTERN.search(line1)
+    score = abs(offset - total / 2) + abs(len(line1) - len(line2)) * 0.5 + max(0, len(line1) - len(line2)) * WRAP_PYRAMID_WEIGHT
+    if not terminal and not rewards_space and len(line1) > len(line2) * WRAP_UNBALANCED_RATIO:
+        score += WRAP_UNBALANCED_PENALTY
+    if last_word in proclitics:
+        score += WRAP_CLITIC_PENALTY
+    if not counts_characters and len(last_word) == 1 and last_word.isalpha():
+        score += WRAP_ORPHAN_LETTER_PENALTY
+    if next_word in enclitics:
+        score += WRAP_CLITIC_PENALTY
+    if WRAP_NUMBER_TAIL_PATTERN.search(line1) and WRAP_UNIT_HEAD_PATTERN.search(next_word):
+        score += WRAP_NUMBER_UNIT_PENALTY
+    score += wrap_short_line_penalty(line1, line2, counts_characters, terminal or rewards_space)
+    balance = wrap_balance_factor(line1, line2)
+    if terminal:
+        reward = WRAP_TERMINAL_REWARD
+    elif WRAP_CLAUSE_PATTERN.search(line1):
+        reward = WRAP_CLAUSE_REWARD
+    elif WRAP_MINOR_PATTERN.search(line1):
+        reward = WRAP_MINOR_REWARD
+    else:
+        reward = WRAP_SPACE_BOUNDARY_REWARD if rewards_space else 0
+    score -= reward * balance
+    if next_word in conjunctions:
+        score -= WRAP_CONJUNCTION_REWARD * balance
+    return score
+
+
+def split_into_two_lines(text, target_lang):
+    visible, marks = separate_markup(text)
+    tokens = wrap_tokens(visible, target_lang)
+    if len(tokens) < 2:
+        return None
+    forbids, penalty_at = build_wrap_protection(visible, marks)
+    best, offset, last_word = None, 0, ""
+    for index in range(len(tokens) - 1):
+        piece, is_word = tokens[index]
+        offset += len(piece)
+        if is_word:
+            last_word = piece.lower()
+        rest = visible[offset:]
+        if WRAP_ATTACHED_CLOSING_PATTERN.search(rest) or forbids(offset):
+            continue
+        line1, line2 = visible[:offset].rstrip(), rest.lstrip()
+        if not line1 or not line2 or line2[0] in WRAP_NO_LINE_START_CHARS or line1[-1] in WRAP_NO_LINE_END_CHARS:
+            continue
+        next_word = next((word.lower() for word, flag in tokens[index + 1:] if flag), "")
+        space_boundary = bool(re.search(r"\s", visible[len(line1):len(visible) - len(line2)]))
+        score = score_wrap_candidate(offset, len(visible), line1, line2, last_word, next_word, space_boundary, target_lang) + penalty_at(offset)
+        if best is None or score < best[1]:
+            best = (offset, score)
+    if best is None:
+        return None
+    line_end = len(visible[:best[0]].rstrip())
+    next_start = len(visible) - len(visible[best[0]:].lstrip())
+    first, second = cut_marked(visible, marks, line_end, next_start)
+    return f"{first}\n{second}"
+
+
+def wrap_translation_lines(text, target_lang, duration_ms):
+    text = text.strip()
+    if not text or "\n" in text:
+        return text
+    metrics = evaluate_reading_speed(text, duration_ms, target_lang)
+    if not metrics["over_cps"] and not metrics["over_length"]:
+        return text
+    return split_into_two_lines(text, target_lang) or text
 
 
 def format_srt_time(value):
@@ -1189,7 +1449,7 @@ def render_srt(cues):
     return "\n\n".join(blocks) + "\n"
 
 
-def merge(extract_data, translate_data):
+def merge(extract_data, translate_data, wrap_lines=False):
     target_lang = translate_data.get("target_lang", "")
     if DEBUG_MODE and is_chinese_target(target_lang):
         jieba_module = ensure_jieba()
@@ -1200,7 +1460,7 @@ def merge(extract_data, translate_data):
     source_lang = translate_data.get("source_lang", "")
     translations = translate_data.get("translations", {})
     register_glossary_terms(collect_glossary_terms(extract_data["units"]), target_lang)
-    cues, approx_splits, quality_warnings = build_bilingual_cues(extract_data["cues"], extract_data["units"], translations, target_lang, source_lang)
+    cues, approx_splits, quality_warnings = build_bilingual_cues(extract_data["cues"], extract_data["units"], translations, target_lang, source_lang, wrap_lines)
 
     position_of_cue = {cue["id"]: position for position, cue in enumerate(cues, start=1)}
     missing_cues = [cue["id"] for cue in cues if cue.get("translation") is None]
@@ -1230,6 +1490,8 @@ def main():
     parser.add_argument("--output", default=None)
     parser.add_argument("--output-encoding", default=None,
                          help="'same' (default: inherit source_format recorded by srt_extract.py) or an explicit codec name such as utf-8")
+    parser.add_argument("--wrap-lines", action="store_true",
+                         help="wrap over-long translations into two balanced lines using the same rules as the web app")
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
 
@@ -1238,7 +1500,7 @@ def main():
     extract_data = json.load(open(args.extract, encoding="utf-8"))
     translate_data = json.load(open(args.translations, encoding="utf-8"))
 
-    result = merge(extract_data, translate_data)
+    result = merge(extract_data, translate_data, args.wrap_lines)
     log(f"status: ok (cues={len(extract_data['cues'])}, missing={result['missing_count']}, "
         f"approx_splits={len(result['approx_splits'])}, quality_warnings={len(result['quality_warnings'])})")
 
