@@ -74,6 +74,7 @@
 # ============================================================================
 
 import argparse
+import unicodedata
 import bisect
 import functools
 import json
@@ -228,8 +229,6 @@ def segment_words(text, target_lang):
 
 ELLIPSIS_PATTERN = re.compile(r"\.{2,}|…+")
 DASH_ARTIFACT_PATTERN = re.compile(r"—+|-{2,}")
-CJK_TERMINATOR_PATTERN = re.compile(r"[。，、]")
-HALFWIDTH_COMMA_PATTERN = re.compile(r"(?<!\d)[,](?!\d)")
 WHITESPACE_COLLAPSE_PATTERN = re.compile(r"\s+")
 NON_WORD_PATTERN = re.compile(r"[^\w]", re.UNICODE)
 NO_LINE_END_CHARS = set("“「『（([{＜〈《【〔„‚«‹¿¡'\"‘")
@@ -249,6 +248,7 @@ BOUNDARY_SEARCH_PATTERNS = {
 }
 MARKER_PATTERN = re.compile(r"\u27e6c(\d+(?:\.\d+)?)\u27e7")
 STYLE_TAG_PATTERN = re.compile(r"</?(?:i|b|u)>", re.IGNORECASE)
+STYLE_TAG_PAIR_PATTERN = re.compile(r"<([ibu])>([^<]*)</\1>", re.IGNORECASE)
 STYLE_TAG_SPAN_PATTERN = re.compile(r"<(i|b|u)>.*?</\1>", re.IGNORECASE | re.DOTALL)
 RESIDUAL_MARKER_PATTERN = re.compile(r"(\s*)\u27e6[^\u27e6\u27e7]*\u27e7(\s*)")
 
@@ -297,13 +297,6 @@ def enforce_line_edges(text):
     while text and text[-1] in NO_LINE_END_CHARS:
         text = text[:-1].rstrip()
     return text
-
-
-WORD_CHAR_PATTERN = re.compile(r"\w", re.UNICODE)
-
-
-def strip_terminator(match):
-    return " " if WORD_CHAR_PATTERN.search(match.string, match.end()) else ""
 
 
 CJK_OPEN_QUOTE, CJK_CLOSE_QUOTE = "“", "”"
@@ -377,15 +370,25 @@ def space_after_ellipsis(match):
     return "... "
 
 
+def defers_punctuation_style(target_lang):
+    return is_chinese_target(target_lang) or is_japanese_target(target_lang)
+
+
+def is_marker_only(content):
+    return all(c.isspace() or unicodedata.category(c)[0] in "PS" for c in content)
+
+
+def drop_marker_only_style_pairs(translated, source_text):
+    if "</" not in translated or re.search(r"\s", STYLE_TAG_PATTERN.sub("", source_text).strip()):
+        return translated
+    return STYLE_TAG_PAIR_PATTERN.sub(lambda m: "" if is_marker_only(m.group(2)) else m.group(), translated)
+
+
 def normalize_translation(text, target_lang):
     if "—" in text or "--" in text:
         text = DASH_ARTIFACT_PATTERN.sub("...", text)
-    if ".." in text or "…" in text:
+    if (".." in text or "…" in text) and not defers_punctuation_style(target_lang):
         text = ELLIPSIS_PATTERN.sub(space_after_ellipsis, text)
-    if is_chinese_target(target_lang):
-        text = CJK_TERMINATOR_PATTERN.sub(strip_terminator, text)
-        if "," in text:
-            text = HALFWIDTH_COMMA_PATTERN.sub(strip_terminator, text)
     text = fix_music_spacing(text)
     text = WHITESPACE_COLLAPSE_PATTERN.sub(" ", text).strip()
     return enforce_line_edges(text)
@@ -1044,22 +1047,70 @@ def strip_unsourced_brackets(original_text, translated_text):
     return stripped
 
 
-FULLWIDTH_TO_ASCII = {"！": "!", "？": "?"}
+FULL_TO_HALF = {"！": "!", "？": "?", "，": ",", "。": ".", "、": ","}
+CLOSING_MARKUP = r"(?:</(?:i|b|u)>|\{[^}]*\}|['\"”’»›」』）)}\]】♪♫♬♩])"
+SPACE_NOT_NEEDED_PATTERN = re.compile(rf"^{CLOSING_MARKUP}*(?:$|\s|[、，。！？；：,.!?;:…])")
+WORD_CHAR_PATTERN = re.compile(r"\w", re.UNICODE)
 EXCLAIM_QUESTION_RUN_PATTERN = re.compile(r"[！？!?]+")
-EXCLAIM_QUESTION_TEST_PATTERN = re.compile(r"[！？!?]")
+CHINESE_TERMINATOR_PATTERN = re.compile(r"[，。]|(?<!\d),(?!\d)")
+JAPANESE_TERMINATOR_PATTERN = re.compile(r"[、，。]|(?<!\d),(?!\d)")
+CHINESE_FULL_TERMINATOR_PATTERN = re.compile(r"[，。]")
+JAPANESE_FULL_TERMINATOR_PATTERN = re.compile(r"[、，。]")
+REPEATED_SPACES_PATTERN = re.compile(r" {2,}")
 
 
-def normalize_exclaim_question(text):
-    if not EXCLAIM_QUESTION_TEST_PATTERN.search(text):
+def needs_space_after(text, end):
+    return end < len(text) and not SPACE_NOT_NEEDED_PATTERN.match(text[end:])
+
+
+def style_ellipses(text, full_width):
+    if ".." not in text and "…" not in text:
         return text
 
     def substitute(match):
-        run = "".join(FULLWIDTH_TO_ASCII.get(c, c) for c in match.group())
-        if match.end() == len(text) or text[match.end()] == " ":
-            return run
-        return run + " "
+        run = match.group()
+        if full_width:
+            return "…" if run.startswith(".") else run
+        return "... " if needs_space_after(text, match.end()) else "..."
+
+    return ELLIPSIS_PATTERN.sub(substitute, text)
+
+
+def strip_terminators(text, target_lang):
+    pattern = JAPANESE_TERMINATOR_PATTERN if is_japanese_target(target_lang) else CHINESE_TERMINATOR_PATTERN
+    last_content = max((m.end() for m in WORD_CHAR_PATTERN.finditer(text)), default=0)
+    stripped = pattern.sub(lambda m: " " if last_content >= m.end() else "", text)
+    if stripped == text:
+        return text
+    stripped = REPEATED_SPACES_PATTERN.sub(" ", stripped)
+    return "\n".join(line.strip() for line in stripped.split("\n"))
+
+
+def halve_terminators(text, target_lang):
+    pattern = JAPANESE_FULL_TERMINATOR_PATTERN if is_japanese_target(target_lang) else CHINESE_FULL_TERMINATOR_PATTERN
+    return pattern.sub(lambda m: FULL_TO_HALF[m.group()] + (" " if needs_space_after(text, m.end()) else ""), text)
+
+
+def halve_exclaim_question(text):
+    def substitute(match):
+        run = "".join(FULL_TO_HALF.get(c, c) for c in match.group())
+        return run + " " if needs_space_after(text, match.end()) else run
 
     return EXCLAIM_QUESTION_RUN_PATTERN.sub(substitute, text)
+
+
+def restyle_punctuation(text, target_lang, full_width=False, keep_terminators=False):
+    if not text:
+        return text
+    cjk = defers_punctuation_style(target_lang)
+    full_width = cjk and full_width
+    if cjk:
+        text = style_ellipses(text, full_width)
+        if not keep_terminators:
+            text = strip_terminators(text, target_lang)
+        elif not full_width:
+            text = halve_terminators(text, target_lang)
+    return text if full_width else halve_exclaim_question(text)
 
 
 def determine_dash_style(cues):
@@ -1092,7 +1143,7 @@ def compute_cue_music_flags(units):
     return {cue_id: bool(kinds) and all(kinds) for cue_id, kinds in kinds_by_cue.items()}
 
 
-def build_bilingual_cues(cues, units, translations, target_lang, source_lang=None, wrap_lines=False):
+def build_bilingual_cues(cues, units, translations, target_lang, source_lang=None, wrap_lines=False, punctuation_style=(False, False)):
     cue_segments = {}
     approx_splits = []
     quality_warnings = []
@@ -1122,7 +1173,7 @@ def build_bilingual_cues(cues, units, translations, target_lang, source_lang=Non
         if method not in ("single", "original_boundary", "inferred_punctuation", "marker_boundary", "mixed_boundary"):
             approx_splits.append({"unit_id": unit["id"], "cues": [span["id"] for span in spans], "method": method})
         for span, part in zip(spans, parts):
-            part = normalize_translation(part, target_lang)
+            part = normalize_translation(drop_marker_only_style_pairs(part, span["text"]), target_lang)
             if span.get("style_wrap") and part:
                 part = f"<{span['style_wrap']}>{part}</{span['style_wrap']}>"
             if span.get("kind") == "music" and not cue_all_music.get(span["id"], False):
@@ -1145,12 +1196,12 @@ def build_bilingual_cues(cues, units, translations, target_lang, source_lang=Non
         if translation:
             if "-" in translation:
                 translation = DASH_REPLACE_PATTERN.sub(rf"\1{dash_style}", translation)
-            translation = normalize_exclaim_question(translation)
             if is_all_music and len(parts) == 1:
                 translation = format_music_line(translation)
+            translation = restyle_punctuation(translation, target_lang, *punctuation_style)
             duration_ms = parse_srt_timestamp_ms(cue["end"]) - parse_srt_timestamp_ms(cue["start"])
             if wrap_lines:
-                translation = wrap_translation_lines(translation, target_lang, duration_ms)
+                translation = wrap_translation_lines(translation, target_lang)
             metrics = evaluate_reading_speed(translation, duration_ms, target_lang)
             if metrics["over_cps"] or metrics["over_length"]:
                 quality_warnings.append({"cue_id": cue["id"], **metrics})
@@ -1397,12 +1448,21 @@ def split_into_two_lines(text, target_lang):
     return f"{first}\n{second}"
 
 
-def wrap_translation_lines(text, target_lang, duration_ms):
-    text = text.strip()
+DANGLING_CLOSING_PATTERN = re.compile(r"[ \t]*\n[ \t]*((?:</[ibu]>|\{[^}]*\})+)\s*$")
+DANGLING_OPENING_PATTERN = re.compile(r"^((?:<[ibu]>|\{[^}]*\})+)[ \t]*\n[ \t]*")
+
+
+def attach_dangling_markup(text):
+    if "\n" not in text or ("<" not in text and "{" not in text):
+        return text
+    return DANGLING_OPENING_PATTERN.sub(r"\1", DANGLING_CLOSING_PATTERN.sub(r"\1", text))
+
+
+def wrap_translation_lines(text, target_lang):
+    text = attach_dangling_markup(text.strip())
     if not text or "\n" in text:
         return text
-    metrics = evaluate_reading_speed(text, duration_ms, target_lang)
-    if not metrics["over_cps"] and not metrics["over_length"]:
+    if not evaluate_reading_speed(text, float("inf"), target_lang)["over_length"]:
         return text
     return split_into_two_lines(text, target_lang) or text
 
@@ -1449,7 +1509,7 @@ def render_srt(cues):
     return "\n\n".join(blocks) + "\n"
 
 
-def merge(extract_data, translate_data, wrap_lines=False):
+def merge(extract_data, translate_data, wrap_lines=False, punctuation_style=(False, False)):
     target_lang = translate_data.get("target_lang", "")
     if DEBUG_MODE and is_chinese_target(target_lang):
         jieba_module = ensure_jieba()
@@ -1460,7 +1520,7 @@ def merge(extract_data, translate_data, wrap_lines=False):
     source_lang = translate_data.get("source_lang", "")
     translations = translate_data.get("translations", {})
     register_glossary_terms(collect_glossary_terms(extract_data["units"]), target_lang)
-    cues, approx_splits, quality_warnings = build_bilingual_cues(extract_data["cues"], extract_data["units"], translations, target_lang, source_lang, wrap_lines)
+    cues, approx_splits, quality_warnings = build_bilingual_cues(extract_data["cues"], extract_data["units"], translations, target_lang, source_lang, wrap_lines, punctuation_style)
 
     position_of_cue = {cue["id"]: position for position, cue in enumerate(cues, start=1)}
     missing_cues = [cue["id"] for cue in cues if cue.get("translation") is None]
@@ -1492,6 +1552,10 @@ def main():
                          help="'same' (default: inherit source_format recorded by srt_extract.py) or an explicit codec name such as utf-8")
     parser.add_argument("--wrap-lines", action="store_true",
                          help="wrap over-long translations into two balanced lines using the same rules as the web app")
+    parser.add_argument("--full-width", action="store_true",
+                         help="keep full-width punctuation and ellipses for Chinese and Japanese targets")
+    parser.add_argument("--keep-terminators", action="store_true",
+                         help="keep periods and commas for Chinese and Japanese targets")
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
 
@@ -1500,7 +1564,7 @@ def main():
     extract_data = json.load(open(args.extract, encoding="utf-8"))
     translate_data = json.load(open(args.translations, encoding="utf-8"))
 
-    result = merge(extract_data, translate_data, args.wrap_lines)
+    result = merge(extract_data, translate_data, args.wrap_lines, (args.full_width, args.keep_terminators))
     log(f"status: ok (cues={len(extract_data['cues'])}, missing={result['missing_count']}, "
         f"approx_splits={len(result['approx_splits'])}, quality_warnings={len(result['quality_warnings'])})")
 
