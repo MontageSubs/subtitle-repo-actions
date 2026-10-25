@@ -867,7 +867,7 @@ def script_of(lang):
 
 
 STYLE_AND_TAG_STRIP_PATTERN = re.compile(r"\{\\[^}]*\}|<[^>]*>|\u27e6[^\u27e6\u27e7]*\u27e7")
-UNTRANSLATED_WORD_PAIR_THRESHOLD = 2
+LEAKED_NAME_ALLOWANCE = 2
 
 
 def is_untranslated(text, source_lang, target_lang):
@@ -879,8 +879,8 @@ def is_untranslated(text, source_lang, target_lang):
     clean = STYLE_AND_TAG_STRIP_PATTERN.sub("", text).strip()
     if not clean:
         return False
-    word_pair = source_script in WORD_BASED_SCRIPTS and target_script in WORD_BASED_SCRIPTS
-    return len(SCRIPT_LEAK_PATTERNS[source_script].findall(clean)) > (UNTRANSLATED_WORD_PAIR_THRESHOLD if word_pair else 0)
+    tolerates_names = source_script in WORD_BASED_SCRIPTS and (target_script in WORD_BASED_SCRIPTS or (source_script == "latin" and target_script == "cjk"))
+    return len(SCRIPT_LEAK_PATTERNS[source_script].findall(clean)) > (LEAKED_NAME_ALLOWANCE if tolerates_names else 0)
 
 
 def build_protected_spans(text, term_matches):
@@ -1076,15 +1076,24 @@ def is_leaked_untranslated(original, translated, source_lang, target_lang):
     return norm_orig == normalize_for_equality(translated)
 
 
+LATIN_MARKUP_SOURCE = r"</?[A-Za-z][^<>]*>|\{\\[^{}]*\}|\u27e6[^\u27e6\u27e7]*\u27e7"
+LATIN_WORD_OUTSIDE_MARKUP = re.compile(f"(?:{LATIN_MARKUP_SOURCE})|({SCRIPT_LEAK_PATTERNS['latin'].pattern})")
+
 def find_latin_word_leaks(text):
-    return SCRIPT_LEAK_PATTERNS["latin"].findall(text or "")
+    return [match.group(1) for match in LATIN_WORD_OUTSIDE_MARKUP.finditer(text or "") if match.group(1)]
+
+def forced_term_words(unit):
+    return {word for match in unit.get("term_matches") or [] for word in find_latin_word_leaks(match["target"])}
+
+def substitute_latin_words(text, replacements):
+    return LATIN_WORD_OUTSIDE_MARKUP.sub(lambda match: replacements.get(match.group(1), match.group(0)) if match.group(1) else match.group(0), text)
 
 
-def repair_latin_word_leaks(results, lang, target_lang, api_key, batch_chars, concurrency):
+def repair_latin_word_leaks(results, unit_by_id, lang, target_lang, api_key, batch_chars, concurrency):
     if script_of(lang.current()) != "latin" or script_of(target_lang) != "cjk":
         return
     leaks_by_uid = {uid: words for uid, text in results.items() if text
-                    for words in [find_latin_word_leaks(text)] if words}
+                    for words in [[word for word in find_latin_word_leaks(text) if word not in forced_term_words(unit_by_id[uid])]] if words}
     if not leaks_by_uid:
         return
 
@@ -1096,12 +1105,9 @@ def repair_latin_word_leaks(results, lang, target_lang, api_key, batch_chars, co
         return
 
     for uid, leaked_words in leaks_by_uid.items():
-        text = results[uid]
-        for word in dict.fromkeys(leaked_words):
-            replacement = translated.get(word)
-            if replacement:
-                text = text.replace(word, replacement)
-        results[uid] = text
+        replacements = {word: translated[word] for word in leaked_words if word in translated}
+        if replacements:
+            results[uid] = substitute_latin_words(results[uid], replacements)
 
 
 def unit_cue_ids(unit):
@@ -1636,7 +1642,7 @@ def translate_units(units, chapters, cues, lang, target_lang, api_key, batch_cha
             results[uid] = next(iter(r_cues.values())) if is_single_plain_cue(unit) else patch_missing_cues(results[uid], expected_cue_ids(unit), r_cues)
             log(f"untranslated-leak retry for unit {uid}: recovered cues {sorted(r_cues, key=_marker_sort_key)}")
 
-    repair_latin_word_leaks(results, lang, target_lang, api_key, batch_chars, concurrency)
+    repair_latin_word_leaks(results, unit_by_id, lang, target_lang, api_key, batch_chars, concurrency)
 
     skipped = [uid for uid, text in results.items() if text is None]
     translations = {str(uid): sanitize_style_tags(text) for uid, text in results.items() if text is not None}
