@@ -1052,8 +1052,7 @@ CLOSING_MARKUP = r"(?:</(?:i|b|u)>|\{[^}]*\}|['\"”’»›」』）)}\]】♪�
 SPACE_NOT_NEEDED_PATTERN = re.compile(rf"^{CLOSING_MARKUP}*(?:$|\s|[、，。！？；：,.!?;:…])")
 WORD_CHAR_PATTERN = re.compile(r"\w", re.UNICODE)
 EXCLAIM_QUESTION_RUN_PATTERN = re.compile(r"[！？!?]+")
-CHINESE_TERMINATOR_PATTERN = re.compile(r"[，。]|(?<!\d),(?!\d)")
-JAPANESE_TERMINATOR_PATTERN = re.compile(r"[、，。]|(?<!\d),(?!\d)")
+TERMINATOR_PATTERN = re.compile(r"[、，。]|(?<!\d),(?!\d)")
 CHINESE_FULL_TERMINATOR_PATTERN = re.compile(r"[，。]")
 JAPANESE_FULL_TERMINATOR_PATTERN = re.compile(r"[、，。]")
 REPEATED_SPACES_PATTERN = re.compile(r" {2,}")
@@ -1076,10 +1075,9 @@ def style_ellipses(text, full_width):
     return ELLIPSIS_PATTERN.sub(substitute, text)
 
 
-def strip_terminators(text, target_lang):
-    pattern = JAPANESE_TERMINATOR_PATTERN if is_japanese_target(target_lang) else CHINESE_TERMINATOR_PATTERN
+def strip_terminators(text):
     last_content = max((m.end() for m in WORD_CHAR_PATTERN.finditer(text)), default=0)
-    stripped = pattern.sub(lambda m: " " if last_content >= m.end() else "", text)
+    stripped = TERMINATOR_PATTERN.sub(lambda m: " " if last_content >= m.end() else "", text)
     if stripped == text:
         return text
     stripped = REPEATED_SPACES_PATTERN.sub(" ", stripped)
@@ -1107,7 +1105,7 @@ def restyle_punctuation(text, target_lang, full_width=False, keep_terminators=Fa
     if cjk:
         text = style_ellipses(text, full_width)
         if not keep_terminators:
-            text = strip_terminators(text, target_lang)
+            text = strip_terminators(text)
         elif not full_width:
             text = halve_terminators(text, target_lang)
     return text if full_width else halve_exclaim_question(text)
