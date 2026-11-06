@@ -233,6 +233,8 @@ WHITESPACE_COLLAPSE_PATTERN = re.compile(r"\s+")
 NON_WORD_PATTERN = re.compile(r"[^\w]", re.UNICODE)
 NO_LINE_END_CHARS = set("“「『（([{＜〈《【〔„‚«‹¿¡'\"‘")
 NO_LINE_START_CHARS = set("”」』）)]}＞〉》】〕»›、，,。.！!？?；;：:·'\"’")
+CUE_NO_START_CHARS = (NO_LINE_START_CHARS - set("'\"")) | set("。，、．！？；：）】』」》〉’”·…‥⋯‼⁇⁈⁉〃々〻ーゝゞヽヾ゠・･ぁぃぅぇぉっゃゅょゎゕゖァィゥェォッャュョヮヵヶㇰㇱㇲㇳㇴㇵㇶㇷㇸㇹㇺㇻㇼㇽㇾㇿ〕］｝〗〙〛｣､｡〞〟゛゜〜～％℃℉﹚﹜﹞﹐﹑﹒﹔﹕﹖﹗")
+CUE_NO_END_CHARS = (NO_LINE_END_CHARS - set("'\"")) | set("（【『「《〈‘“〔〖〘〚［｛｟｢〝＜﹙﹛﹝＄￥￡$€£¥₩₽₹₺₴¢§№")
 BOUNDARY_ORDER = ("trail_off", "comma", "period", "colon")
 BOUNDARY_CLASSIFY_PATTERNS = {
     "trail_off": re.compile(r"(\.{2,}|-{2,}|—+|…+)\s*$"),
@@ -395,6 +397,18 @@ def normalize_translation(text, target_lang):
 
 
 LATIN_WORD_PATTERN = re.compile(r"[a-zA-Z]+(?:['’][a-zA-Z]+)*")
+LATIN_LETTER = "A-Za-z\u00c0-\u00d6\u00d8-\u00f6\u00f8-\u024f"
+COUNTER_CHARS = "个個名位年月日号號点點时時分秒岁歲次遍回倍条條件只隻张張块塊元万萬亿億千百层層楼樓米斤度周天场場部辆輛双雙种種套份头頭台页頁集章课課期代世纪紀毛角美刀磅吨噸克升级級人つ円歳番本枚匹階冊杯"
+NUMBER_SUFFIX = rf"\s?(?:%|‰|°[CF]?|℃|℉|[€£¥₩])|[{COUNTER_CHARS}]"
+UNIT_GATE_PATTERN = re.compile("[A-Za-z0-9$€£¥₩第\u00c0-\u024f]")
+UNIT_PATTERN = re.compile("|".join((
+    r"(?:[A-Za-z]\.){2,}",
+    rf"(?:[{LATIN_LETTER}]|[0-9]+[{LATIN_LETTER}])[{LATIN_LETTER}0-9]*(?:['’&-][{LATIN_LETTER}0-9]+)*",
+    r"[$€£¥₩]\s?[0-9][0-9.,]*",
+    rf"第?[0-9][0-9.,]*(?:[:·/\-–][0-9]+)*(?:{NUMBER_SUFFIX})",
+    r"[0-9]+(?:[.,:·/\-–][0-9]+)+",
+    r"第[0-9]+",
+)))
 DIGIT_PATTERN = re.compile(r"\d")
 OTHER_WORD_PATTERN = re.compile(r"[^\W_a-zA-Z0-9]", re.UNICODE)
 PUNCT_WEIGHT_PATTERN = re.compile(r"[，,、；;。.!?！？：:…]")
@@ -471,6 +485,9 @@ def allowed_boundaries(pieces, rule, text_length):
         if position >= text_length:
             continue
         if runs and (inside(position, False) or (piece not in NAME_JOINERS and inside(position, True))):
+            continue
+        following = pieces[index + 1] if index + 1 < len(pieces) else None
+        if piece[-1:] in CUE_NO_END_CHARS or (following is not None and following[:1] in CUE_NO_START_CHARS):
             continue
         open_cuts.append(position)
         if rule and before not in no_end and next_content_piece(pieces, index + 1) not in no_start:
@@ -720,9 +737,12 @@ def find_protected_spans(text, glossary_terms, target_lang=None, protect_bracket
     spans = [(m.start(), m.end()) for m in BRACKET_PAIR_PATTERN.finditer(text)] if protect_brackets else []
     spans.extend((m.start(), m.end()) for m in BOOK_TITLE_PATTERN.finditer(text))
     spans.extend((m.start(), m.end()) for m in STYLE_TAG_SPAN_PATTERN.finditer(text))
-    spans.extend((m.start(), m.end()) for m in LATIN_WORD_PATTERN.finditer(text))
-    spans.extend((m.start(), m.end()) for m in MARKER_PATTERN.finditer(text))
-    spans.extend((m.start(), m.end()) for m in ELLIPSIS_PATTERN.finditer(text))
+    if UNIT_GATE_PATTERN.search(text):
+        spans.extend((m.start(), m.end()) for m in UNIT_PATTERN.finditer(text))
+    if "\u27e6" in text:
+        spans.extend((m.start(), m.end()) for m in MARKER_PATTERN.finditer(text))
+    if ".." in text or "…" in text:
+        spans.extend((m.start(), m.end()) for m in ELLIPSIS_PATTERN.finditer(text))
     quotes = target_quote_pair(target_lang)
     if quotes:
         pattern = embedded_quote_pattern(*quotes)
@@ -1214,19 +1234,17 @@ WRAP_HARD_PATTERNS = tuple(re.compile(pattern) for pattern in (
     r"\.{2,}|[…‥]+",
     r"[!?！？]{2,}[.…]*",
     r"[—–-]{2,}|[~～]{2,}",
-    r"\d+(?:[.,:·/]\d+)+%?",
-    r"[$€£¥]\s?\d[\d.,]*|\d[\d.,]*\s?(?:%|‰|°[CF]?)",
+    UNIT_PATTERN.pattern,
     r"[^\W\d_]+(?:[·•‧][^\W\d_]+)+",
-    r"(?:https?://|www\.)\S+|[\w.+-]+@[\w-]+(?:\.[\w-]+)+",
-    r"[#@][^\W]+",
+    r"(?:https?://|www\.)[A-Za-z0-9_\-.~:/?#@!$&'()*+,;=%]+",
     r"《[^《》]{1,16}》",
 ))
 WRAP_PAIR_PATTERNS = tuple(re.compile(pattern) for pattern in (
     r"“[^“”]*”|‘[^‘’]*’|「[^「」]*」|『[^『』]*』|《[^《》]*》|（[^（）]*）|【[^【】]*】|„[^„“”]*[“”]|«[^«»]*»|‹[^‹›]*›",
     r"\([^()]*\)|\[[^\[\]]*\]|\"[^\"]*\"",
 ))
-WRAP_NO_LINE_START_CHARS = NO_LINE_START_CHARS | set("‥っゃゅょゎッャュョヮーヵヶヽヾゝゞ々﹚﹜﹞…%‰°′″/")
-WRAP_NO_LINE_END_CHARS = NO_LINE_END_CHARS | set("$€£¥₩₽₹₺₴¢§№〔〖〘〚﹙﹛﹝")
+WRAP_NO_LINE_START_CHARS = NO_LINE_START_CHARS | set("。，、．！？；：）】』」》〉’”·…‥⋯‼⁇⁈⁉〃々〻ーゝゞヽヾ゠・･ぁぃぅぇぉっゃゅょゎゕゖァィゥェォッャュョヮヵヶㇰㇱㇲㇳㇴㇵㇶㇷㇸㇹㇺㇻㇼㇽㇾㇿ〕］｝〗〙〛｣､｡〞〟゛゜〜～％℃℉﹚﹜﹞﹐﹑﹒﹔﹕﹖﹗") | set("%‰°′″/")
+WRAP_NO_LINE_END_CHARS = NO_LINE_END_CHARS | set("（【『「《〈‘“〔〖〘〚［｛｟｢〝＜﹙﹛﹝＄￥￡$€£¥₩₽₹₺₴¢§№")
 WRAP_STYLE_SPAN_PENALTY = 12
 WRAP_PAIR_SPAN_PENALTY = 40
 WRAP_PAIR_HARD_MAX_CHARS = 8
