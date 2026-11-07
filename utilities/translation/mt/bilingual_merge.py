@@ -598,7 +598,7 @@ class CandidateIndex:
         ends = self._ends.get(pattern)
         if ends is None:
             ends = [m.end() for m in pattern.finditer(self.text)
-                    if not inside_protected_span(m.end(), self.protected) and not is_leading_punct_run(self.text, m.start())]
+                    if not self.protected.inside(m.end()) and not is_leading_punct_run(self.text, m.start())]
             self._ends[pattern] = ends
         return ends
 
@@ -609,7 +609,7 @@ class CandidateIndex:
     def left_cuts_between(self, lower, upper):
         if self._left_cuts is None:
             self._left_cuts = [m.start() for m in LEFT_CUT_PATTERN.finditer(self.text)
-                               if not inside_protected_span(m.start(), self.protected)]
+                               if not self.protected.inside(m.start())]
         cuts = self._left_cuts
         return cuts[bisect.bisect_right(cuts, lower):bisect.bisect_left(cuts, upper)]
 
@@ -724,7 +724,7 @@ def align_cuts_to_brackets(text, source_texts, cuts, locked, protected):
         best = aligned[i]
         best_cost = cost_at(best)
         for edge in edges:
-            if edge <= low or edge >= high or edge == best or inside_protected_span(edge, protected):
+            if edge <= low or edge >= high or edge == best or protected.inside(edge):
                 continue
             cost = cost_at(edge)
             if cost < best_cost:
@@ -761,15 +761,32 @@ def find_protected_spans(text, glossary_terms, target_lang=None, protect_bracket
     return spans
 
 
-def inside_protected_span(pos, protected):
-    return any(start < pos < end for start, end in protected)
+class ProtectedIndex:
+    def __init__(self, spans):
+        self.spans = spans
+        self.starts = []
+        self.ends = []
+        for start, end in sorted((s, e) for s, e in spans if e - s > 1):
+            if self.ends and start < self.ends[-1]:
+                self.ends[-1] = max(self.ends[-1], end)
+            else:
+                self.starts.append(start)
+                self.ends.append(end)
+
+    def inside(self, pos):
+        i = bisect.bisect_left(self.starts, pos)
+        return i > 0 and pos < self.ends[i - 1]
+
+    def escape(self, pos):
+        if not self.inside(pos):
+            return pos
+        for start, end in self.spans:
+            if start < pos < end:
+                return start if pos - start <= end - pos else end
+        return pos
 
 
-def escape_protected_span(pos, protected):
-    for start, end in protected:
-        if start < pos < end:
-            return start if pos - start <= end - pos else end
-    return pos
+EMPTY_PROTECTED = ProtectedIndex(())
 
 
 HARD_BREAK_PUNCT_TOLERANCE = 0.25
@@ -807,10 +824,10 @@ def resolve_cut(index, cursor, expected, boundary, max_cut, target_lang=None, an
         if abs(cut - expected) <= weak_tol:
             return cut, "inferred"
     boundaries = [b for b in (bd + cursor for bd in word_boundaries(text[cursor:], target_lang))
-                  if cursor < b < ceiling and not inside_protected_span(b, protected)]
+                  if cursor < b < ceiling and not protected.inside(b)]
     if boundaries:
         return nearest_boundary(boundaries, expected), None
-    return escape_protected_span(max(cursor + 1, min(round(expected), ceiling - 1)), protected), None
+    return protected.escape(max(cursor + 1, min(round(expected), ceiling - 1))), None
 
 
 def enforce_punctuation_placement(parts):
@@ -868,10 +885,10 @@ def snap_or_interpolate(index, ideal, scope, target_lang, tolerance):
     if near:
         return min(near, key=lambda c: abs(c - ideal))
     boundaries = [b for b in (bd + lo for bd in word_boundaries(text[lo:hi], target_lang))
-                  if lo < b < hi and not inside_protected_span(b, protected)]
+                  if lo < b < hi and not protected.inside(b)]
     if boundaries:
         return nearest_boundary(boundaries, ideal)
-    return escape_protected_span(round(ideal), protected)
+    return protected.escape(round(ideal))
 
 
 def rebalance_disproportionate_cuts(index, spans, cuts, locked, target_lang):
@@ -934,13 +951,13 @@ def snap_cuts_forward_to_punct(text, cuts, locked, tags, protected):
         if window_end <= cursor:
             continue
         candidates = [m.end() for m in GENERAL_STRONG_PUNCT_PATTERN.finditer(text, cursor, window_end)
-                      if not inside_protected_span(m.end(), protected)]
+                      if not protected.inside(m.end())]
         if candidates:
             result[i] = min(candidates)
     return result
 
 
-def split_by_boundary(translated_text, spans, protected=(), target_lang=None, source_lang=None):
+def split_by_boundary(translated_text, spans, protected=EMPTY_PROTECTED, target_lang=None, source_lang=None):
     boundary_types = [classify_boundary(span["text"]) for span in spans[:-1]]
     expected_positions = compute_expected_positions(translated_text, spans)
     index = CandidateIndex(translated_text, protected)
@@ -985,7 +1002,8 @@ def has_content(text):
 
 def proportional_split(text, spans, target_lang):
     title_spans = [(m.start(), m.end()) for m in BOOK_TITLE_PATTERN.finditer(text)]
-    boundaries = [b for b in word_boundaries(text, target_lang) if not inside_protected_span(b, title_spans)]
+    title_index = ProtectedIndex(title_spans)
+    boundaries = [b for b in word_boundaries(text, target_lang) if not title_index.inside(b)]
     if len(boundaries) <= 2:
         return None
     weights = [effective_length(s["text"]) for s in spans]
@@ -1184,7 +1202,7 @@ def build_bilingual_cues(cues, units, translations, target_lang, source_lang=Non
 
         def get_protected(text=translated, protect=protect_brackets):
             if not protected_holder:
-                protected_holder.append(find_protected_spans(text, glossary_terms, target_lang, protect))
+                protected_holder.append(ProtectedIndex(find_protected_spans(text, glossary_terms, target_lang, protect)))
             return protected_holder[0]
 
         parts, method = split_translation(translated, spans, get_protected, target_lang, source_lang)

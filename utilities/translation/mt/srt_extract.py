@@ -928,6 +928,7 @@ def build_segments(cues, glossary, latin_source=True):
 
 
 QUOTE_PENDING_LIMIT = 10
+MAX_CHAINED_SEGMENTS = 16
 
 
 def group_segments(segments, latin_source=True, continues=continues_by_punctuation):
@@ -946,12 +947,13 @@ def group_segments(segments, latin_source=True, continues=continues_by_punctuati
             continue
         merged = False
         if current:
-            if quote_pending:
+            chain_full = len(current) >= MAX_CHAINED_SEGMENTS
+            if quote_pending and not chain_full:
                 gap = time_to_ms(seg["start"]) - time_to_ms(current[-1]["end"])
                 merged = gap <= SCENE_ADJACENCY_MS
             if not merged:
                 reason = merge_reason(current[-1], seg, latin_source, continues)
-                if reason:
+                if reason and not (chain_full and reason in ("gap", "music")):
                     merged = True
                     if reason in ("marker", "dash"):
                         seg["marker_boundary"] = True
@@ -1083,7 +1085,7 @@ def fuse_music_groups(groups):
         if is_passthrough(group):
             fused.append(group)
             open_group = None
-        elif open_group is not None:
+        elif open_group is not None and len(open_group) + len(group) <= MAX_CHAINED_SEGMENTS:
             open_group.extend(group)
         else:
             open_group = list(group)
