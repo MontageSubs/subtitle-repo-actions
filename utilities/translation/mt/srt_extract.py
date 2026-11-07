@@ -840,6 +840,18 @@ def assign_merge_sides(segments, latin_source=True):
     return segments
 
 
+CAPTION_MAX_WORDS = 3
+TAIL_PUNCTUATION_MASK = 0x3f ^ TAIL_CLOSED
+
+
+def is_unpunctuated_caption(segment):
+    if segment["tail"] & TAIL_PUNCTUATION_MASK:
+        return False
+    text = segment["text"]
+    words = WORD_TOKEN_PATTERN.findall(text)
+    return bool(words) and len(words) <= CAPTION_MAX_WORDS and text == text.upper() and text != text.lower()
+
+
 def merge_reason(prev_seg, curr_seg, latin_source=True, continues=continues_by_punctuation):
     if prev_seg["music"] != curr_seg["music"]:
         return None
@@ -854,6 +866,8 @@ def merge_reason(prev_seg, curr_seg, latin_source=True, continues=continues_by_p
         return None
     if curr_seg["head"] & HEAD_CLOSER or prev_seg["tail"] & TAIL_OPENER:
         return "gap" if gap <= SCENE_ADJACENCY_MS else None
+    if latin_source and is_unpunctuated_caption(prev_seg) and not curr_seg["head"] & HEAD_LOWER:
+        return None
     return "gap" if continues(prev_seg, curr_seg, gap) else None
 
 

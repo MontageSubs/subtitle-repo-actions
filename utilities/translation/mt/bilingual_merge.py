@@ -376,6 +376,20 @@ def defers_punctuation_style(target_lang):
     return is_chinese_target(target_lang) or is_japanese_target(target_lang)
 
 
+SPACED_FINAL_PUNCTUATION_PATTERN = re.compile(r"\s+(?=[.!?…]+(?:[\"'”’»)\]]|</[ibu]>)*$)")
+SOURCE_SPACED_FINAL_PUNCTUATION_PATTERN = re.compile(r"\s[.!?…]+(?:[\"'”’»)\]]|</[ibu]>)*\s*$")
+
+
+def spaces_before_final_punctuation(target_lang):
+    return target_lang.split("-")[0].lower() == "fr"
+
+
+def trim_space_before_final_punctuation(translated, source_text):
+    if not SPACED_FINAL_PUNCTUATION_PATTERN.search(translated) or SOURCE_SPACED_FINAL_PUNCTUATION_PATTERN.search(source_text):
+        return translated
+    return SPACED_FINAL_PUNCTUATION_PATTERN.sub("", translated, count=1)
+
+
 def is_marker_only(content):
     return all(c.isspace() or unicodedata.category(c)[0] in "PS" for c in content)
 
@@ -932,6 +946,9 @@ def rebalance_disproportionate_cuts(index, spans, cuts, locked, target_lang):
             tol = max(REBALANCE_SNAP_TOLERANCE * (end_pos - start_pos) / (hi - lo), REBALANCE_SNAP_FLOOR)
             cut = snap_or_interpolate(index, ideal, (cursor, end_pos), target_lang, tol)
             cut = max(cursor + 1, min(cut, end_pos - span_slots))
+            if index.protected.inside(cut):
+                cursor = new_cuts[k]
+                continue
             new_cuts[k] = cut
             cursor = cut
     return new_cuts
@@ -1032,11 +1049,13 @@ def repair_empty_parts(parts, spans, get_protected, target_lang=None, source_lan
         if not (0 <= neighbor < len(parts)):
             continue
         lo, hi = sorted((i, neighbor))
-        fixed, _ = split_by_boundary(parts[neighbor], spans[lo:hi + 1], get_protected(), target_lang, source_lang)
+        fixed, _ = split_by_boundary(parts[neighbor], spans[lo:hi + 1], get_protected(parts[neighbor]), target_lang, source_lang)
         if not has_content(fixed[i - lo]):
             proportional = proportional_split(parts[neighbor], spans[lo:hi + 1], target_lang)
             if proportional and has_content(proportional[i - lo]):
                 fixed = proportional
+            elif not any(c.isspace() for c in parts[neighbor].strip()):
+                fixed = [parts[neighbor], parts[neighbor]]
         parts[lo], parts[hi] = fixed
     return parts
 
@@ -1065,7 +1084,7 @@ def split_translation(translated_text, spans, get_protected, target_lang=None, s
     if len(spans) == 1:
         parts, method = [translated_text.strip()], "single"
     else:
-        parts, method = split_by_boundary(translated_text, spans, get_protected(), target_lang, source_lang)
+        parts, method = split_by_boundary(translated_text, spans, get_protected(translated_text), target_lang, source_lang)
     parts = [remove_residual_markers(p).strip() if ("\u27e6" in p or "\u27e7" in p) else p.strip() for p in parts]
     parts = enforce_punctuation_placement(parts)
     parts = repair_empty_parts(parts, spans, get_protected, target_lang, source_lang)
@@ -1200,9 +1219,11 @@ def build_bilingual_cues(cues, units, translations, target_lang, source_lang=Non
         protect_brackets = not any(bracket_profile(span["text"])[1] for span in spans)
         protected_holder = []
 
-        def get_protected(text=translated, protect=protect_brackets):
+        def get_protected(value, full_text=translated, crossing=protect_brackets):
+            if value != full_text:
+                return ProtectedIndex(find_protected_spans(value, glossary_terms, target_lang, crossing))
             if not protected_holder:
-                protected_holder.append(ProtectedIndex(find_protected_spans(text, glossary_terms, target_lang, protect)))
+                protected_holder.append(ProtectedIndex(find_protected_spans(full_text, glossary_terms, target_lang, crossing)))
             return protected_holder[0]
 
         parts, method = split_translation(translated, spans, get_protected, target_lang, source_lang)
@@ -1210,6 +1231,8 @@ def build_bilingual_cues(cues, units, translations, target_lang, source_lang=Non
             approx_splits.append({"unit_id": unit["id"], "cues": [span["id"] for span in spans], "method": method})
         for span, part in zip(spans, parts):
             part = normalize_translation(drop_marker_only_style_pairs(part, span["text"]), target_lang)
+            if not spaces_before_final_punctuation(target_lang):
+                part = trim_space_before_final_punctuation(part, span["text"])
             if span.get("style_wrap") and part:
                 part = f"<{span['style_wrap']}>{part}</{span['style_wrap']}>"
             if span.get("kind") == "music" and not cue_all_music.get(span["id"], False):
