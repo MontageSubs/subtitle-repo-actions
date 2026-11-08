@@ -239,13 +239,13 @@ BOUNDARY_ORDER = ("trail_off", "comma", "period", "colon")
 BOUNDARY_CLASSIFY_PATTERNS = {
     "trail_off": re.compile(r"(\.{2,}|-{2,}|—+|…+)\s*$"),
     "comma": re.compile(r"[,，、]\s*$"),
-    "period": re.compile(r"[.!?！？]['\"”’)\]]*\s*$"),
+    "period": re.compile(r"[.。!?！？]['\"”’)\]」』]*\s*$"),
     "colon": re.compile(r"[:：]\s*$"),
 }
 BOUNDARY_SEARCH_PATTERNS = {
     "trail_off": (re.compile(r"\.{2,}|-{2,}|—+|…+"),),
     "comma": (re.compile(r"[,，；;]+"), re.compile(r"、+")),
-    "period": (re.compile(r"[.。!?！？]+['\"”’)\]]*"),),
+    "period": (re.compile(r"[.。!?！？]+['\"”’)\]」』]*"),),
     "colon": (re.compile(r"[:：]+"),),
 }
 MARKER_PATTERN = re.compile(r"\u27e6c(\d+(?:\.\d+)?)\u27e7")
@@ -665,6 +665,10 @@ def embedded_quote_pattern(open_q, close_q):
         EMBEDDED_QUOTE_PATTERN_CACHE[(open_q, close_q)] = pattern
     return pattern
 ORIGINAL_PUNCT_TOLERANCE = {"trail_off": 0.60, "comma": 0.30, "period": 0.25, "colon": 0.25}
+CLAUSE_SPACE_PATTERN = re.compile(r"(?<![A-Za-z0-9])\s+(?![A-Za-z0-9\s])")
+CLAUSE_SPACE_TOLERANCE = 0.3
+CLAUSE_SPACE_PROXIMITY_CHARS = 4
+CLAUSE_SPACE_LANGUAGES = frozenset({"zh", "yue", "ja"})
 INFERRED_PUNCT_TOLERANCE = 0.15
 INFERRED_WEAK_PUNCT_TOLERANCE = 0.06
 INFERRED_MIN_SHARE = 0.5
@@ -837,6 +841,12 @@ def resolve_cut(index, cursor, expected, boundary, max_cut, target_lang=None, an
             else max(INFERRED_WEAK_PUNCT_TOLERANCE * chunk, PUNCT_PROXIMITY_CHARS_WEAK)
         if abs(cut - expected) <= weak_tol:
             return cut, "inferred"
+    if (target_lang or "").split("-")[0].lower() in CLAUSE_SPACE_LANGUAGES:
+        spaces = index.ends_between(CLAUSE_SPACE_PATTERN, cursor, ceiling)
+        if spaces:
+            cut = min(spaces, key=lambda pos: abs(pos - expected))
+            if abs(cut - expected) <= max(CLAUSE_SPACE_TOLERANCE * chunk, CLAUSE_SPACE_PROXIMITY_CHARS):
+                return cut, "inferred"
     boundaries = [b for b in (bd + cursor for bd in word_boundaries(text[cursor:], target_lang))
                   if cursor < b < ceiling and not protected.inside(b)]
     if boundaries:
@@ -1054,8 +1064,8 @@ def repair_empty_parts(parts, spans, get_protected, target_lang=None, source_lan
             proportional = proportional_split(parts[neighbor], spans[lo:hi + 1], target_lang)
             if proportional and has_content(proportional[i - lo]):
                 fixed = proportional
-            elif not any(c.isspace() for c in parts[neighbor].strip()):
-                fixed = [parts[neighbor], parts[neighbor]]
+            else:
+                continue
         parts[lo], parts[hi] = fixed
     return parts
 
