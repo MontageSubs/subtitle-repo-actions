@@ -47,8 +47,12 @@
 #     - When labels are stripped and a cue holds two or more speakers, a
 #       leading '- ' is restored per turn and handled as a native dash.
 #     - Every dash segment detects its own full style wrap.
-#     - Segments without any letter or digit (e.g. '♪ ♪', '...') pass through
-#       as `resolved` and are never sent for translation.
+#     - Cues without any translatable text (e.g. '♪ ♪', '...', a lone space)
+#       are emitted verbatim by the merge step and listed in
+#       `passthrough_cue_ids`. They only stay in the unit stream as sentence
+#       barriers when they follow a cue whose sentence is still open.
+#     - A sentence-ending '.' that splits a domain name across cues
+#       ('None Higher.' / 'com') keeps both cues in one group.
 #
 # 功能特性：
 #     - 解析 SRT 字幕结构，并对文本和时间戳进行标准化。
@@ -72,8 +76,10 @@
 #     - 剥离标签后若同一字幕块存在两位及以上说话人，按发言轮次补回行首
 #       '- '，并按原生破折号继续处理。
 #     - 每个破折号分段独立识别整句样式包裹。
-#     - 不含字母或数字的分段（如 '♪ ♪'、'...'）以 `resolved` 原样透传，
-#       不发送翻译。
+#     - 不含可翻译文字的字幕块（如 '♪ ♪'、'...'、单个空格）由合并阶段原样输出，
+#       其 id 记录在 `passthrough_cue_ids`；仅当前一句尚未结束时才作为句子屏障
+#       保留在单元流中。
+#     - 域名被句点拆到两个字幕块（'None Higher.' / 'com'）时保持同组。
 #
 # Usage / 用法:
 #     python srt_extract.py --input en.srt --glossary GLOSSARY.md --output extract.json
@@ -534,10 +540,19 @@ def classify_head(text):
     return flags
 
 
+DOMAIN_LABEL_TAIL_PATTERN = re.compile(r"[^\W_]\.\Z|-\.\Z")
+TOP_LEVEL_DOMAIN_HEAD_PATTERN = re.compile(r"(?:com|net|org|io|co|tv|me|app|dev|ai|edu|gov|info|biz|xyz|uk|cn|jp|de|fr|ru|us|ca|au|fm|ly|gg)(?![^\W_])")
+
+
+def splits_domain_name(previous, current):
+    return bool(current["head"] & HEAD_LOWER) and bool(DOMAIN_LABEL_TAIL_PATTERN.search(previous["text"].rstrip())) \
+        and bool(TOP_LEVEL_DOMAIN_HEAD_PATTERN.match(current["text"].lstrip()))
+
+
 def continues_by_punctuation(previous, current, gap_ms):
     tail, head = previous["tail"], current["head"]
     if tail & TAIL_TERMINAL:
-        return False
+        return gap_ms <= GAP_THRESHOLD_MS and splits_domain_name(previous, current)
     contiguous = gap_ms <= GAP_THRESHOLD_MS
     if tail & TAIL_DASH:
         return contiguous and bool(head & HEAD_LOWER)
@@ -917,6 +932,20 @@ def has_content_chars(text):
     return any(char.isalnum() or char == "_" for char in text)
 
 
+NON_TEXT_CATEGORIES = frozenset({"Cf", "Zs", "Zl", "Zp"})
+NON_TEXT_CATEGORY_INITIALS = frozenset({"P", "N", "S"})
+
+
+def has_translatable_content(text):
+    stripped = TAG_PATTERN.sub("", text)
+    return any(
+        not char.isspace() and char not in MUSIC_NOTE_CHARS
+        and (category := unicodedata.category(char)) not in NON_TEXT_CATEGORIES
+        and category[0] not in NON_TEXT_CATEGORY_INITIALS
+        for char in stripped
+    )
+
+
 def resolve_segment(text, glossary, latin_source):
     if not has_content_chars(text):
         return text
@@ -1132,13 +1161,33 @@ def build_units(cues, glossary, latin_source=True, continues=continues_by_punctu
     return units, chapters, marker_merges
 
 
+def select_unit_cues(cues):
+    selected, barriers, sentence_open = [], [], False
+    for cue in cues:
+        if not has_translatable_content(cue["text"]):
+            if sentence_open:
+                barriers.append(cue)
+            continue
+        selected.extend(barriers)
+        selected.append(cue)
+        barriers = []
+        sentence_open = not classify_tail(cue["text"]) & TAIL_TERMINAL
+    return selected
+
+
+def split_passthrough_cues(cues):
+    passthrough_ids = [cue["id"] for cue in cues if not has_translatable_content(cue["text"])]
+    return select_unit_cues(cues), passthrough_ids
+
+
 def extract(content, glossary, strip_sdh_enabled=True, source_lang="en"):
     latin_source = is_latin_source(source_lang)
     cues, sdh_stats = parse_srt(content, strip_sdh_enabled and base_language(source_lang) in SDH_LANGS)
     if not cues:
-        return {"success": False, "reason": "no_cues_parsed", "cues": [], "units": [], "chapters": [], "sdh_removed": sdh_stats, "marker_merges": 0}
-    units, chapters, marker_merges = build_units(cues, glossary, latin_source, continuation_for(source_lang))
-    return {"success": True, "cues": cues, "units": units, "chapters": chapters, "sdh_removed": sdh_stats, "marker_merges": marker_merges}
+        return {"success": False, "reason": "no_cues_parsed", "cues": [], "units": [], "chapters": [], "passthrough_cue_ids": [], "sdh_removed": sdh_stats, "marker_merges": 0}
+    translatable_cues, passthrough_cue_ids = split_passthrough_cues(cues)
+    units, chapters, marker_merges = build_units(translatable_cues, glossary, latin_source, continuation_for(source_lang))
+    return {"success": True, "cues": cues, "units": units, "chapters": chapters, "passthrough_cue_ids": passthrough_cue_ids, "sdh_removed": sdh_stats, "marker_merges": marker_merges}
 
 
 def main():

@@ -1208,7 +1208,8 @@ def compute_cue_music_flags(units):
     return {cue_id: bool(kinds) and all(kinds) for cue_id, kinds in kinds_by_cue.items()}
 
 
-def build_bilingual_cues(cues, units, translations, target_lang, source_lang=None, wrap_lines=False, punctuation_style=(False, False)):
+def build_bilingual_cues(cues, units, translations, target_lang, source_lang=None, wrap_lines=False, punctuation_style=(False, False), passthrough_cue_ids=()):
+    passthrough = frozenset(passthrough_cue_ids)
     cue_segments = {}
     approx_splits = []
     quality_warnings = []
@@ -1251,6 +1252,9 @@ def build_bilingual_cues(cues, units, translations, target_lang, source_lang=Non
 
     results = []
     for cue in cues:
+        if cue["id"] in passthrough:
+            results.append({**cue, "translation": cue["text"]})
+            continue
         entries = cue_segments.get(cue["id"])
         parts = [p for _, p in sorted(entries, key=lambda e: e[0])] if entries else None
         is_all_music = cue_all_music.get(cue["id"], False)
@@ -1587,7 +1591,7 @@ def merge(extract_data, translate_data, wrap_lines=False, punctuation_style=(Fal
     source_lang = translate_data.get("source_lang", "")
     translations = translate_data.get("translations", {})
     register_glossary_terms(collect_glossary_terms(extract_data["units"]), target_lang)
-    cues, approx_splits, quality_warnings = build_bilingual_cues(extract_data["cues"], extract_data["units"], translations, target_lang, source_lang, wrap_lines, punctuation_style)
+    cues, approx_splits, quality_warnings = build_bilingual_cues(extract_data["cues"], extract_data["units"], translations, target_lang, source_lang, wrap_lines, punctuation_style, extract_data.get("passthrough_cue_ids", []))
 
     position_of_cue = {cue["id"]: position for position, cue in enumerate(cues, start=1)}
     missing_cues = [cue["id"] for cue in cues if cue.get("translation") is None]

@@ -870,7 +870,45 @@ STYLE_AND_TAG_STRIP_PATTERN = re.compile(r"\{\\[^}]*\}|<[^>]*>|\u27e6[^\u27e6\u2
 LEAKED_NAME_ALLOWANCE = 2
 
 
-def is_untranslated(text, source_lang, target_lang):
+COMMON_TLDS = "com|net|org|io|co|tv|me|app|dev|ai|edu|gov|info|biz|xyz|uk|cn|jp|de|fr|ru|us|ca|au|fm|ly|gg"
+CAPITALIZED_NOUN_LANGUAGES = {"de", "lb"}
+CUE_MARKER_SOURCE = r"⟦[^⟦⟧]*⟧"
+ADDRESS_TOKEN_PATTERN = re.compile(rf"^(?:https?://|www\.)|@|\.(?:{COMMON_TLDS})(?![^\W_])", re.IGNORECASE)
+DOMAIN_CONTINUATION_PATTERN = re.compile(rf"^\.(?:\s|{CUE_MARKER_SOURCE})*(?:{COMMON_TLDS})(?![^\W_])", re.IGNORECASE)
+DOMAIN_LABEL_BEFORE_PATTERN = re.compile(rf"(?:[^\W_]|-)\.(?:\s|{CUE_MARKER_SOURCE})*\Z")
+SENTENCE_BOUNDARY_BEFORE_PATTERN = re.compile(rf"(?:^|[.!?…:\n])(?:\s|{CUE_MARKER_SOURCE}|[\"'“”‘’(\[])*\Z")
+TOP_LEVEL_DOMAIN_PATTERN = re.compile(rf"^(?:{COMMON_TLDS})$", re.IGNORECASE)
+
+
+def token_around(text, start, end):
+    left, right = start, end
+    while left > 0 and not text[left - 1].isspace():
+        left -= 1
+    while right < len(text) and not text[right].isspace():
+        right += 1
+    return text[left:right]
+
+
+def occurs_as_preserved_form(text, start, end, capitalizes_nouns):
+    occurrence = text[start:end]
+    if len(occurrence) >= 2 and not any(char.islower() for char in occurrence):
+        return True
+    if ADDRESS_TOKEN_PATTERN.search(token_around(text, start, end)):
+        return True
+    if DOMAIN_CONTINUATION_PATTERN.search(text[end:end + 48]):
+        return True
+    if TOP_LEVEL_DOMAIN_PATTERN.match(occurrence) and DOMAIN_LABEL_BEFORE_PATTERN.search(text[max(0, start - 48):start]):
+        return True
+    return not capitalizes_nouns and occurrence[:1].isupper() and not SENTENCE_BOUNDARY_BEFORE_PATTERN.search(text[:start])
+
+
+def is_preserved_latin_word(source_text, word, source_lang):
+    capitalizes_nouns = (source_lang or "").split("-")[0].lower() in CAPITALIZED_NOUN_LANGUAGES
+    occurrences = re.compile(rf"(?<![^\W_]){re.escape(word)}(?![^\W_])", re.IGNORECASE)
+    return any(occurs_as_preserved_form(source_text, match.start(), match.end(), capitalizes_nouns) for match in occurrences.finditer(source_text))
+
+
+def is_untranslated(text, source_lang, target_lang, original_text=""):
     if not text:
         return False
     source_script, target_script = script_of(source_lang), script_of(target_lang)
@@ -880,7 +918,13 @@ def is_untranslated(text, source_lang, target_lang):
     if not clean:
         return False
     tolerates_names = source_script in WORD_BASED_SCRIPTS and (target_script in WORD_BASED_SCRIPTS or (source_script == "latin" and target_script == "cjk"))
-    return len(SCRIPT_LEAK_PATTERNS[source_script].findall(clean)) > (LEAKED_NAME_ALLOWANCE if tolerates_names else 0)
+    leaked_words = SCRIPT_LEAK_PATTERNS[source_script].findall(clean)
+    allowance = LEAKED_NAME_ALLOWANCE if tolerates_names else 0
+    if len(leaked_words) <= allowance:
+        return False
+    if source_script != "latin" or not original_text:
+        return True
+    return len([word for word in leaked_words if not is_preserved_latin_word(original_text, word, source_lang)]) > allowance
 
 
 def build_protected_spans(text, term_matches):
@@ -1085,15 +1129,28 @@ def find_latin_word_leaks(text):
 def forced_term_words(unit):
     return {word for match in unit.get("term_matches") or [] for word in find_latin_word_leaks(match["target"])}
 
+REPLACED_OPEN = "\ue000"
+REPLACED_CLOSE = "\ue001"
+UNSPACED_SCRIPTS = "\u3400-\u4dbf\u4e00-\u9fff\u3040-\u30ff\u31f0-\u31ff"
+GAP_AROUND_REPLACED_PATTERN = re.compile(rf"(?<=[{UNSPACED_SCRIPTS}])[ \t]+(?={REPLACED_OPEN}[{UNSPACED_SCRIPTS}])|(?<=[{UNSPACED_SCRIPTS}]{REPLACED_CLOSE})[ \t]+(?=[{UNSPACED_SCRIPTS}]|{REPLACED_OPEN})")
+REPLACED_MARKS_PATTERN = re.compile(f"[{REPLACED_OPEN}{REPLACED_CLOSE}]")
+
 def substitute_latin_words(text, replacements):
-    return LATIN_WORD_OUTSIDE_MARKUP.sub(lambda match: replacements.get(match.group(1), match.group(0)) if match.group(1) else match.group(0), text)
+    def mark_replacement(match):
+        word = match.group(1)
+        replacement = replacements.get(word) if word else None
+        return match.group(0) if replacement is None else f"{REPLACED_OPEN}{replacement}{REPLACED_CLOSE}"
+    marked = LATIN_WORD_OUTSIDE_MARKUP.sub(mark_replacement, text)
+    return REPLACED_MARKS_PATTERN.sub("", GAP_AROUND_REPLACED_PATTERN.sub("", marked))
 
 
 def repair_latin_word_leaks(results, unit_by_id, lang, target_lang, api_key, batch_chars, concurrency):
     if script_of(lang.current()) != "latin" or script_of(target_lang) != "cjk":
         return
     leaks_by_uid = {uid: words for uid, text in results.items() if text
-                    for words in [[word for word in find_latin_word_leaks(text) if word not in forced_term_words(unit_by_id[uid])]] if words}
+                    for words in [[word for word in find_latin_word_leaks(text)
+                                   if word not in forced_term_words(unit_by_id[uid])
+                                   and not is_preserved_latin_word(unit_by_id[uid]["text"], word, lang.current())]] if words}
     if not leaks_by_uid:
         return
 
@@ -1535,7 +1592,7 @@ def translate_units(units, chapters, cues, lang, target_lang, api_key, batch_cha
     for unit in pending:
         raw_text = translations_raw.get(unit["id"])
         final_text = apply_term_replacements(raw_text, unit.get("term_matches") or [], target_lang) if raw_text is not None else None
-        if final_text is not None and is_untranslated(final_text, lang.current(), target_lang):
+        if final_text is not None and is_untranslated(final_text, lang.current(), target_lang, unit["text"]):
             untranslated_jobs.append(unit)
 
     if untranslated_jobs:
