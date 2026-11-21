@@ -232,20 +232,20 @@ DASH_ARTIFACT_PATTERN = re.compile(r"—+|-{2,}")
 WHITESPACE_COLLAPSE_PATTERN = re.compile(r"\s+")
 NON_WORD_PATTERN = re.compile(r"[^\w]", re.UNICODE)
 NO_LINE_END_CHARS = set("“「『（([{＜〈《【〔„‚«‹¿¡'\"‘")
-NO_LINE_START_CHARS = set("”」』）)]}＞〉》】〕»›、，,。.！!？?；;：:·'\"’")
+NO_LINE_START_CHARS = set("”」』）)]}＞〉》】〕»›、，,。.！!？?；;：:।॥·'\"’")
 CUE_NO_START_CHARS = (NO_LINE_START_CHARS - set("'\"")) | set("。，、．！？；：）】』」》〉’”·…‥⋯‼⁇⁈⁉〃々〻ーゝゞヽヾ゠・･ぁぃぅぇぉっゃゅょゎゕゖァィゥェォッャュョヮヵヶㇰㇱㇲㇳㇴㇵㇶㇷㇸㇹㇺㇻㇼㇽㇾㇿ〕］｝〗〙〛｣､｡〞〟゛゜〜～％℃℉﹚﹜﹞﹐﹑﹒﹔﹕﹖﹗")
 CUE_NO_END_CHARS = (NO_LINE_END_CHARS - set("'\"")) | set("（【『「《〈‘“〔〖〘〚［｛｟｢〝＜﹙﹛﹝＄￥￡$€£¥₩₽₹₺₴¢§№")
 BOUNDARY_ORDER = ("trail_off", "comma", "period", "colon")
 BOUNDARY_CLASSIFY_PATTERNS = {
     "trail_off": re.compile(r"(\.{2,}|-{2,}|—+|…+)\s*$"),
     "comma": re.compile(r"[,，、]\s*$"),
-    "period": re.compile(r"[.。!?！？]['\"”’)\]」』]*\s*$"),
+    "period": re.compile(r"[.。!?！？।॥]['\"”’)\]」』]*\s*$"),
     "colon": re.compile(r"[:：]\s*$"),
 }
 BOUNDARY_SEARCH_PATTERNS = {
     "trail_off": (re.compile(r"\.{2,}|-{2,}|—+|…+"),),
     "comma": (re.compile(r"[,，；;]+"), re.compile(r"、+")),
-    "period": (re.compile(r"[.。!?！？]+['\"”’)\]」』]*"),),
+    "period": (re.compile(r"[.。!?！？।॥]+['\"”’)\]」』]*"),),
     "colon": (re.compile(r"[:：]+"),),
 }
 MARKER_PATTERN = re.compile(r"\u27e6c(\d+(?:\.\d+)?)\u27e7")
@@ -376,8 +376,8 @@ def defers_punctuation_style(target_lang):
     return is_chinese_target(target_lang) or is_japanese_target(target_lang)
 
 
-SPACED_FINAL_PUNCTUATION_PATTERN = re.compile(r"\s+(?=[.!?…]+(?:[\"'”’»)\]]|</[ibu]>)*$)")
-SOURCE_SPACED_FINAL_PUNCTUATION_PATTERN = re.compile(r"\s[.!?…]+(?:[\"'”’»)\]]|</[ibu]>)*\s*$")
+SPACED_FINAL_PUNCTUATION_PATTERN = re.compile(r"\s+(?=[.!?…।॥]+(?:[\"'”’»)\]]|</[ibu]>)*$)")
+SOURCE_SPACED_FINAL_PUNCTUATION_PATTERN = re.compile(r"\s[.!?…।॥]+(?:[\"'”’»)\]]|</[ibu]>)*\s*$")
 
 
 def spaces_before_final_punctuation(target_lang):
@@ -425,7 +425,7 @@ UNIT_PATTERN = re.compile("|".join((
 )))
 DIGIT_PATTERN = re.compile(r"\d")
 OTHER_WORD_PATTERN = re.compile(r"[^\W_a-zA-Z0-9]", re.UNICODE)
-PUNCT_WEIGHT_PATTERN = re.compile(r"[，,、；;。.!?！？：:…]")
+PUNCT_WEIGHT_PATTERN = re.compile(r"[，,、；;。.!?！？：:…।॥]")
 
 
 def content_weight(text):
@@ -437,7 +437,7 @@ def effective_length(text):
     return content_weight(text) or len(text)
 
 
-FALLBACK_BOUNDARY_PATTERN = re.compile(r"[，,、；;。.!?…\s]+")
+FALLBACK_BOUNDARY_PATTERN = re.compile(r"[，,、；;。.!?…।॥\s]+")
 
 
 WHITESPACE_TOKEN_PATTERN = re.compile(r"\S+\s*")
@@ -650,7 +650,7 @@ def resolve_anchor_cuts(index, boundary_types, expected):
 
 
 CLOSING_TAIL_CHARS = "'\"”’)\\]}》」』】〕＞〉»›"
-GENERAL_STRONG_PUNCT_PATTERN = re.compile(r"[，,、；;。.!?！？：:]+[" + CLOSING_TAIL_CHARS + r"]*")
+GENERAL_STRONG_PUNCT_PATTERN = re.compile(r"[，,、；;。.!?！？：:।॥]+[" + CLOSING_TAIL_CHARS + r"]*")
 GENERAL_WEAK_PUNCT_PATTERN = re.compile(r"(?:\.{2,}|—+|…+)[" + CLOSING_TAIL_CHARS + r"]*")
 LEFT_CUT_PATTERN = re.compile(r"[“「『（([{＜〈《【〔„‚«‹¿¡]")
 BOOK_TITLE_PATTERN = re.compile(r"《[^《》]*》")
@@ -1298,13 +1298,13 @@ WRAP_PAIR_PATTERNS = tuple(re.compile(pattern) for pattern in (
     r"“[^“”]*”|‘[^‘’]*’|「[^「」]*」|『[^『』]*』|《[^《》]*》|（[^（）]*）|【[^【】]*】|„[^„“”]*[“”]|«[^«»]*»|‹[^‹›]*›",
     r"\([^()]*\)|\[[^\[\]]*\]|\"[^\"]*\"",
 ))
-WRAP_NO_LINE_START_CHARS = NO_LINE_START_CHARS | set("。，、．！？；：）】』」》〉’”·…‥⋯‼⁇⁈⁉〃々〻ーゝゞヽヾ゠・･ぁぃぅぇぉっゃゅょゎゕゖァィゥェォッャュョヮヵヶㇰㇱㇲㇳㇴㇵㇶㇷㇸㇹㇺㇻㇼㇽㇾㇿ〕］｝〗〙〛｣､｡〞〟゛゜〜～％℃℉﹚﹜﹞﹐﹑﹒﹔﹕﹖﹗") | set("%‰°′″/")
-WRAP_NO_LINE_END_CHARS = NO_LINE_END_CHARS | set("（【『「《〈‘“〔〖〘〚［｛｟｢〝＜﹙﹛﹝＄￥￡$€£¥₩₽₹₺₴¢§№")
+WRAP_NO_LINE_START_CHARS = (NO_LINE_START_CHARS - set("'\"")) | set("。，、．！？；：）】』」》〉’”·…‥⋯‼⁇⁈⁉〃々〻ーゝゞヽヾ゠・･ぁぃぅぇぉっゃゅょゎゕゖァィゥェォッャュョヮヵヶㇰㇱㇲㇳㇴㇵㇶㇷㇸㇹㇺㇻㇼㇽㇾㇿ〕］｝〗〙〛｣､｡〞〟゛゜〜～％℃℉﹚﹜﹞﹐﹑﹒﹔﹕﹖﹗") | set("%‰°′″/")
+WRAP_NO_LINE_END_CHARS = (NO_LINE_END_CHARS - set("'\"")) | set("（【『「《〈‘“〔〖〘〚［｛｟｢〝＜﹙﹛﹝＄￥￡$€£¥₩₽₹₺₴¢§№")
 WRAP_STYLE_SPAN_PENALTY = 12
 WRAP_PAIR_SPAN_PENALTY = 40
 WRAP_PAIR_HARD_MAX_CHARS = 8
 WRAP_CLOSERS = r"['\"”’»›」』）)}\]】]*"
-WRAP_TERMINAL_PATTERN = re.compile(r"(?:\.{2,}|[.…‥。۔?!？！؟‽])" + WRAP_CLOSERS + "$")
+WRAP_TERMINAL_PATTERN = re.compile(r"(?:\.{2,}|[.…‥。۔।॥?!？！؟‽])" + WRAP_CLOSERS + "$")
 WRAP_CLAUSE_PATTERN = re.compile(r"[:;：；؛—–]" + WRAP_CLOSERS + "$")
 WRAP_MINOR_PATTERN = re.compile(r"[,，、،]" + WRAP_CLOSERS + "$")
 WRAP_ABBREVIATION_PATTERN = re.compile(
@@ -1410,6 +1410,11 @@ def wrap_tokens(text, target_lang):
 
 
 WRAP_ORTHOGRAPHY = {
+    "hi": (
+        "यह वह ये वो इस उस इन उन एक हर मेरा मेरी मेरे हमारा हमारी हमारे तुम्हारा तुम्हारी तुम्हारे तेरा तेरी तेरे आपका आपकी आपके उसका उसकी उसके इसका इसकी इसके उनका उनकी उनके",
+        "का की के को में से पर ने तक ही भी तो भर सा सी वाला वाली वाले लिए है हैं हूँ हूं हो था थी थे थीं होगा होगी होंगे रहा रही रहे रहीं सकता सकती सकते चाहिए गया गई गए",
+        "और लेकिन मगर परंतु क्योंकि कि अगर यदि जब तब या इसलिए जबकि ताकि जैसे जहाँ जहां जो",
+    ),
     "ja": (
         "お ご 御 貴 諸 各 毎 元 前 新 超 最 大 小 この その あの どの",
         "は が を に へ と から より で や の ね よ か わ ぞ ぜ な も ば て でも たり だけ ほど ばかり さえ こそ など なら かしら って ちゃ じゃ まで ので のに ても だり ながら つつ です ます ました でした",
@@ -1440,7 +1445,7 @@ def wrap_balance_factor(line1, line2):
 
 
 def wrap_short_line_penalty(line1, line2, counts_characters, softened):
-    pattern = re.compile(r"[^\W_]") if counts_characters else re.compile(r"[^\W_]+")
+    pattern = re.compile(r"[^\W_]") if counts_characters else re.compile(r"(?:[^\W_]|[\u0900-\u0DFF])+")
     units1, units2 = len(pattern.findall(line1)), len(pattern.findall(line2))
     if counts_characters:
         if units1 < 2 or units2 < 2:
