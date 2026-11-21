@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
 # Name: bilingual_merge.py
-# Version: 2.12.0
+# Version: 2.13.0
 # Organization: MontageSubs (蒙太奇字幕社区)
 # Contributors: Meow P (小p), Joey
 # License: MIT License
@@ -36,12 +36,20 @@
 #       translation; inline <i>/<b>/<u> runs survive alignment cuts intact.
 #     - Multi-speaker music cues wrap each dash segment's notes individually
 #       instead of enclosing the whole joined line in one pair.
+#     - French targets keep a lone leading dialogue dash: extraction strips it
+#       before translation, and it is re-attached after translation (music
+#       cues excluded; <i>/<b>/<u> before the dash are tolerated).
+#     - French reading profile (15 cps, 42 chars per line) follows the ATAA
+#       subtitling norms.
 #     - Optional --wrap-lines: balances over-long translations into two lines
 #       with the same algorithm as the web app (markup-aware cuts that close and
 #       reopen <i>/<b>/<u>, protected ellipses/numbers/names/quotes, pyramid
 #       balance with punctuation rewards scaled by line balance).
 #
 # 功能:
+#     - 法语目标语言保留孤立的行首对白破折号：提取阶段已剥离、翻译后拼接
+#       回去（音乐行除外；破折号前允许出现 <i>/<b>/<u> 标签）。
+#     - 法语阅读速度档案（15 cps、每行 42 字符）依据 ATAA 字幕规范。
 #     - 重构双语字幕块并保持原始时间轴。
 #     - 利用长度限制、句尾标点或结巴分词（jieba）将翻译单元重新拆分为字幕段落。
 #     - 自动处理缺失的翻译，并记录近似拆分的单元。
@@ -131,7 +139,7 @@ def language_key(code):
 READING_PROFILES = {
     "zh-hans": (9, 16, "weighted"), "zh-hant": (9, 16, "weighted"), "yue": (9, 16, "weighted"),
     "ja": (4, 13, "weighted"), "ko": (12, 16, "weighted"),
-    "en": (20, 42, "plain"), "hi": (22, 42, "plain"), "ru": (17, 39, "plain"), "th": (17, 35, "plain"),
+    "en": (20, 42, "plain"), "fr": (15, 42, "plain"), "hi": (22, 42, "plain"), "ru": (17, 39, "plain"), "th": (17, 35, "plain"),
 }
 DEFAULT_READING_PROFILE = (17, 42, "plain")
 MARKUP_PATTERN = re.compile(r"\{[^}]*\}|</?[a-zA-Z][^>]*>")
@@ -381,6 +389,13 @@ SOURCE_SPACED_FINAL_PUNCTUATION_PATTERN = re.compile(r"\s[.!?…।॥]+(?:[\"'�
 
 
 def spaces_before_final_punctuation(target_lang):
+    return target_lang.split("-")[0].lower() == "fr"
+
+
+LONE_LEADING_DASH_PATTERN = re.compile(r"^(?:\s|</?[ibu]>)*-(?!-)", re.IGNORECASE)
+
+
+def keeps_lone_dialogue_dash(target_lang):
     return target_lang.split("-")[0].lower() == "fr"
 
 
@@ -1208,6 +1223,16 @@ def compute_cue_music_flags(units):
     return {cue_id: bool(kinds) and all(kinds) for cue_id, kinds in kinds_by_cue.items()}
 
 
+def compute_lone_dash_cues(cues, units, target_lang):
+    if not keeps_lone_dialogue_dash(target_lang):
+        return frozenset()
+    dash_indices = {}
+    for unit in units:
+        for span in unit["spans"]:
+            dash_indices.setdefault(span["id"], set()).add(span.get("dash_index", 0))
+    return frozenset(cue["id"] for cue in cues if len(dash_indices.get(cue["id"], ())) == 1 and LONE_LEADING_DASH_PATTERN.match(cue["text"]))
+
+
 def build_bilingual_cues(cues, units, translations, target_lang, source_lang=None, wrap_lines=False, punctuation_style=(False, False), passthrough_cue_ids=()):
     passthrough = frozenset(passthrough_cue_ids)
     cue_segments = {}
@@ -1216,6 +1241,7 @@ def build_bilingual_cues(cues, units, translations, target_lang, source_lang=Non
     glossary_terms = collect_glossary_terms(units)
     dash_style = determine_dash_style(cues)
     cue_all_music = compute_cue_music_flags(units)
+    lone_dash_cues = compute_lone_dash_cues(cues, units, target_lang)
 
     for unit in units:
         spans = unit["spans"]
@@ -1264,6 +1290,8 @@ def build_bilingual_cues(cues, units, translations, target_lang, source_lang=Non
             translation = " ".join(f"-{format_music_line(p.lstrip('- '))}" for p in parts)
         elif len(parts) > 1:
             translation = " ".join(f"-{p.lstrip('- ')}" for p in parts)
+        elif cue["id"] in lone_dash_cues and not is_all_music and parts[0]:
+            translation = f"-{parts[0].lstrip('- ')}"
         else:
             translation = parts[0]
         if translation:
