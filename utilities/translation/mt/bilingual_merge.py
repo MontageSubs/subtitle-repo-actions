@@ -1212,9 +1212,6 @@ def determine_dash_style(cues):
     return "-"
 
 
-DASH_REPLACE_PATTERN = re.compile(r"(^|\s)-\s*")
-
-
 def compute_cue_music_flags(units):
     kinds_by_cue = {}
     for unit in units:
@@ -1287,16 +1284,14 @@ def build_bilingual_cues(cues, units, translations, target_lang, source_lang=Non
         if not parts or any(p is None for p in parts):
             translation = None
         elif len(parts) > 1 and is_all_music:
-            translation = " ".join(f"-{format_music_line(p.lstrip('- '))}" for p in parts)
+            translation = " ".join(f"{dash_style}{format_music_line(p.lstrip('- '))}" for p in parts)
         elif len(parts) > 1:
-            translation = " ".join(f"-{p.lstrip('- ')}" for p in parts)
+            translation = " ".join(f"{dash_style}{p.lstrip('- ')}" for p in parts)
         elif cue["id"] in lone_dash_cues and not is_all_music and parts[0]:
-            translation = f"-{parts[0].lstrip('- ')}"
+            translation = f"{dash_style}{parts[0].lstrip('- ')}"
         else:
             translation = parts[0]
         if translation:
-            if "-" in translation:
-                translation = DASH_REPLACE_PATTERN.sub(rf"\1{dash_style}", translation)
             if is_all_music and len(parts) == 1:
                 translation = format_music_line(translation)
             translation = restyle_punctuation(translation, target_lang, *punctuation_style)

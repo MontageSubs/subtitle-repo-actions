@@ -191,7 +191,10 @@ STYLE_TAG_ALT = r"(?:</?(?:i|b|u)>)"
 STYLE_CLOSE_ALT = r"(?:</(?:i|b|u)>)"
 FULL_WRAP_PATTERN = re.compile(r"^<(i|b|u)>(.*)</\1>$", re.IGNORECASE | re.DOTALL)
 WHITESPACE_PATTERN = re.compile(r"\s+")
-DIALOGUE_DASH_PATTERN = re.compile(rf"(?:^|(?<=\s)){STYLE_TAG_ALT}*-(?!-){STYLE_TAG_ALT}*\s?", re.IGNORECASE)
+DIALOGUE_DASH_PATTERN = re.compile(rf"(?:^|(?<=\s))({STYLE_TAG_ALT}*)-(?!-)({STYLE_TAG_ALT}*)\s?", re.IGNORECASE)
+FINISHED_TURN_PATTERN = re.compile(rf"(?:[.?!…。！？؟۔।॥♩♪♫♬—–]|--|(?<=\S)-)(?:[\"'”’»)\]」』\s]|{STYLE_TAG_ALT})*\Z", re.IGNORECASE)
+SPOKEN_CONTENT_PATTERN = re.compile(r"[^\W_]")
+EMPTY_STYLE_PAIR_PATTERN = re.compile(r"<([ibu])>(\s*)</\1>", re.IGNORECASE)
 STUTTER_WORD_PATTERN = re.compile(r"(?<![A-Za-z])([A-Za-z])-\1(?![A-Za-z])", re.IGNORECASE)
 STUTTER_PREFIX_PATTERN = re.compile(r"(?<![A-Za-z])([A-Za-z])-(?=\1[a-z])", re.IGNORECASE)
 LATIN_LETTER_CLASS = "A-Za-z\u00aa\u00ba\u00c0-\u00d6\u00d8-\u00f6\u00f8-\u02b8\u1e00-\u1eff\u2c60-\u2c7f\ua720-\ua7ff\uff21-\uff3a\uff41-\uff5a"
@@ -794,19 +797,57 @@ def parse_srt(content, strip_sdh_enabled=True):
     return cues, sdh_stats
 
 
+def balance_style_tags(segments):
+    open_names = []
+
+    def match_tag(m):
+        name = m.group(2).lower()
+        if not m.group(1):
+            open_names.append(name)
+            return m.group(0)
+        for at in range(len(open_names) - 1, -1, -1):
+            if open_names[at] == name:
+                del open_names[at]
+                return m.group(0)
+        return ""
+
+    balanced_segments = []
+    for segment in segments:
+        reopened = "".join(f"<{name}>" for name in open_names)
+        matched = STYLE_TAG_TOKEN_PATTERN.sub(match_tag, segment)
+        balanced = reopened + matched + "".join(f"</{name}>" for name in reversed(open_names))
+        previous = None
+        while previous != balanced:
+            previous = balanced
+            balanced = EMPTY_STYLE_PAIR_PATTERN.sub(r"\2", balanced)
+        balanced_segments.append(balanced.strip())
+    return balanced_segments
+
+
+def may_open_dialogue(lead):
+    spoken = STYLE_TAG_TOKEN_PATTERN.sub("", lead)
+    return not spoken.strip() or bool(FINISHED_TURN_PATTERN.search(lead) and SPOKEN_CONTENT_PATTERN.search(spoken))
+
+
+def dialogue_dashes(text):
+    matches = list(DIALOGUE_DASH_PATTERN.finditer(text))
+    for index, match in enumerate(matches):
+        if may_open_dialogue(text[:match.start()]):
+            return matches[index:]
+    return []
+
+
 def split_dialogue(text):
     if "-" not in text:
         return [text]
-    matches = list(DIALOGUE_DASH_PATTERN.finditer(text))
-    if not matches:
+    dashes = dialogue_dashes(text)
+    if not dashes:
         return [text]
-    segments = []
-    if matches[0].start() > 0:
-        segments.append(text[:matches[0].start()].strip())
-    for idx, match in enumerate(matches):
-        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
-        segments.append(text[match.end():end].strip())
-    segments = [s for s in segments if s]
+    ends = [match.start() for match in dashes[1:]] + [len(text)]
+    segments = [match.group(1) + match.group(2) + text[match.end():end].strip() for match, end in zip(dashes, ends)]
+    if dashes[0].start() > 0:
+        segments.insert(0, text[:dashes[0].start()].strip())
+    segments = [s for s in balance_style_tags(segments) if s]
     return segments if segments else [text]
 
 
@@ -961,7 +1002,7 @@ def build_segments(cues, glossary, latin_source=True):
         body, cue_wrap = split_full_wrap(cue["text"])
         parts = split_dialogue(body)
         for dash_index, part in enumerate(parts):
-            text, style_wrap = (part, cue_wrap) if cue_wrap or len(parts) == 1 else split_full_wrap(part)
+            text, style_wrap = (part, cue_wrap) if cue_wrap else split_full_wrap(part)
             resolved = resolve_segment(text, glossary, latin_source)
             text = text if resolved is not None or not latin_source else strip_letter_stutter(text)
             segments.append({"cue_id": cue["id"], "text": text, "start": cue["start"], "end": cue["end"],
